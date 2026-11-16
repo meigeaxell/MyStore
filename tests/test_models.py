@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database.base import Base
 from app.models import Category, Product, StockItem
 
+
 @pytest.fixture
 def db_session(tmp_path):
     """Создаёт временную базу данных для тестов."""
@@ -127,3 +128,144 @@ def test_stock_item_imei_must_be_unique(db_session):
         db_session.commit()
 
     db_session.rollback()
+
+def test_stock_item_imei2_must_be_unique(db_session):
+    category = Category(
+        name="Новые телефоны",
+        code="NEW_PHONE",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="SAMSUNG-S25",
+        name="Samsung S25",
+    )
+
+    db_session.add(product)
+    db_session.commit()
+
+    phone1 = StockItem(
+        product_id=product.id,
+        imei1="111111111111111",
+        imei2="222222222222222",
+        condition="new",
+    )
+
+    phone2 = StockItem(
+        product_id=product.id,
+        imei1="333333333333333",
+        imei2="222222222222222",
+        condition="new",
+    )
+
+    db_session.add(phone1)
+    db_session.commit()
+
+    db_session.add(phone2)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+    db_session.rollback()
+
+
+def test_multiple_stock_items_can_have_empty_imei2(db_session):
+    category = Category(
+        name="Новые телефоны",
+        code="NEW_PHONE",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="XIAOMI-17",
+        name="Xiaomi 17",
+    )
+
+    db_session.add(product)
+    db_session.commit()
+
+    phone1 = StockItem(
+        product_id=product.id,
+        imei1="444444444444444",
+        imei2=None,
+        condition="new",
+    )
+
+    phone2 = StockItem(
+        product_id=product.id,
+        imei1="555555555555555",
+        imei2=None,
+        condition="new",
+    )
+
+    db_session.add_all([phone1, phone2])
+    db_session.commit()
+
+    assert db_session.query(StockItem).count() == 2
+
+
+def test_stock_item_requires_imei1(db_session):
+    category = Category(
+        name="Новые телефоны",
+        code="NEW_PHONE",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="PIXEL-10",
+        name="Google Pixel 10",
+    )
+
+    db_session.add(product)
+    db_session.commit()
+
+    phone = StockItem(
+        product_id=product.id,
+        imei1=None,
+        condition="new",
+    )
+
+    db_session.add(phone)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+    db_session.rollback()
+
+def test_stock_item_default_status(db_session):
+    category = Category(
+        name="Новые телефоны",
+        code="NEW_PHONE",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="IPHONE-17-PRO",
+        name="iPhone 17 Pro",
+    )
+
+    db_session.add(product)
+    db_session.commit()
+
+    phone = StockItem(
+        product_id=product.id,
+        imei1="666666666666666",
+        condition="new",
+    )
+
+    db_session.add(phone)
+    db_session.commit()
+
+    assert phone.status == "in_stock"
