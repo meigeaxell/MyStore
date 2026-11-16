@@ -1,9 +1,9 @@
 from datetime import datetime
 
+from sqlalchemy import DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
-from sqlalchemy import DateTime, Numeric, String
 
 
 class Purchase(Base):
