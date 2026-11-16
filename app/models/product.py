@@ -1,5 +1,5 @@
 
-from sqlalchemy import Boolean, ForeignKey, String
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -7,6 +7,12 @@ from app.database.base import Base
 
 class Product(Base):
     __tablename__ = "products"
+    __table_args__ = (
+        CheckConstraint(
+            "stock_quantity >= 0",
+            name="ck_products_stock_quantity_nonnegative",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
 
@@ -30,6 +36,13 @@ class Product(Base):
     specification: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,
+    )
+    
+    stock_quantity: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
     )
 
     is_active: Mapped[bool] = mapped_column(

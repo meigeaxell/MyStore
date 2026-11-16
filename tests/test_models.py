@@ -269,3 +269,52 @@ def test_stock_item_default_status(db_session):
     db_session.commit()
 
     assert phone.status == "in_stock"
+
+def test_accessory_stock_quantity(db_session):
+    category = Category(
+        name="Аксессуары",
+        code="ACCESSORY",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    accessory = Product(
+        category_id=category.id,
+        sku="CASE-S25-BLACK",
+        name="Чехол Samsung S25 Black",
+    )
+
+    db_session.add(accessory)
+    db_session.commit()
+
+    assert accessory.stock_quantity == 0
+
+    accessory.stock_quantity = 50
+    db_session.commit()
+
+    assert accessory.stock_quantity == 50
+
+
+def test_product_stock_quantity_cannot_be_negative(db_session):
+    category = Category(
+        name="Аксессуары",
+        code="ACCESSORY",
+    )
+
+    db_session.add(category)
+    db_session.commit()
+
+    accessory = Product(
+        category_id=category.id,
+        sku="CASE-TEST",
+        name="Тестовый чехол",
+        stock_quantity=-1,
+    )
+
+    db_session.add(accessory)
+
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+
+    db_session.rollback()
