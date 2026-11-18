@@ -37,6 +37,16 @@ class CashMovement(Base):
         nullable=True,
     )
 
+    purchase_payment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("purchase_payments.id"),
+        nullable=True,
+    )
+
+    purchase_refund_id: Mapped[int | None] = mapped_column(
+        ForeignKey("purchase_refunds.id"),
+        nullable=True,
+    )
+
     description: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,

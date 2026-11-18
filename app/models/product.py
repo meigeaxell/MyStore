@@ -1,4 +1,3 @@
-
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,8 +11,11 @@ class Product(Base):
             "stock_quantity >= 0",
             name="ck_products_stock_quantity_nonnegative",
         ),
+        CheckConstraint(
+            "min_stock_quantity >= 0",
+            name="ck_products_min_stock_quantity_nonnegative",
+        ),
     )
-
     id: Mapped[int] = mapped_column(primary_key=True)
 
     category_id: Mapped[int] = mapped_column(
@@ -37,8 +39,15 @@ class Product(Base):
         String(255),
         nullable=True,
     )
-    
+
     stock_quantity: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
+    min_stock_quantity: Mapped[int] = mapped_column(
         Integer,
         default=0,
         server_default="0",

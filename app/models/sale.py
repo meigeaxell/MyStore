@@ -40,6 +40,16 @@ class Sale(Base):
         nullable=False,
     )
 
+    comment: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    cancellation_reason: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
     note: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,

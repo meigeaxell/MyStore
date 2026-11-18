@@ -19,6 +19,11 @@ class SaleItem(Base):
         nullable=False,
     )
 
+    imei: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
     stock_item_id: Mapped[int | None] = mapped_column(
         ForeignKey("stock_items.id"),
         nullable=True,
