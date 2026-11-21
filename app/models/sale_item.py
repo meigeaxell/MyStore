@@ -1,4 +1,6 @@
-from sqlalchemy import ForeignKey, Numeric, String
+from decimal import Decimal
+
+from sqlalchemy import Boolean, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -34,18 +36,47 @@ class SaleItem(Base):
         default=1,
     )
 
-    unit_price: Mapped[float] = mapped_column(
+    unit_price: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,
     )
 
-    discount: Mapped[float] = mapped_column(
+    discount: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,
-        default=0,
+        default=Decimal("0.00"),
     )
 
     currency: Mapped[str] = mapped_column(
         String(3),
         nullable=False,
     )
+
+    unit_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        nullable=False,
+        default=Decimal("0.00"),
+        server_default="0.00",
+    )
+
+    cost_currency: Mapped[str] = mapped_column(
+        String(3),
+        nullable=False,
+        default="USD",
+        server_default="USD",
+    )
+
+    cost_exchange_rate: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4),
+        nullable=False,
+        default=Decimal("1.0000"),
+        server_default="1.0000",
+    )
+
+    is_exchanged: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
+

@@ -1,13 +1,13 @@
 from decimal import Decimal
+
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app.database.base import Base
-from app.models import Category, Product, StockItem
+from app.models import CashMovement, Category, Product, SalePayment, StockItem
 from app.models.cash_register import CashRegister, CashTransaction
 from app.services.sales_service import SalesService
-from app.services.cash_service import CashService
 
 
 @pytest.fixture
@@ -178,7 +178,7 @@ def test_sale_out_of_stock_and_imei_reuse_fails(db_session):
         }
     ]
 
-    with pytest.raises(ValueError, match="Недостаточно товара"):
+    with pytest.raises(ValueError, match="ýeterlik däl"):
         SalesService.create_sale(
             session=db_session,
             items=items,
@@ -213,7 +213,7 @@ def test_sale_out_of_stock_and_imei_reuse_fails(db_session):
         }
     ]
 
-    with pytest.raises(ValueError, match="уже продан или недоступен"):
+    with pytest.raises(ValueError, match="eýýäm satyldy ýa-da elýeterli däl"):
         SalesService.create_sale(
             session=db_session,
             items=items_imei,
@@ -310,10 +310,151 @@ def test_cancel_sale_returns_stock_refunds_and_prevents_double(db_session):
     assert refund_tx.amount == Decimal("1200.00")
 
     # Попытка повторной отмены уже отмененного чека
-    with pytest.raises(ValueError, match="уже отменена"):
+    with pytest.raises(ValueError, match="eýýäm ýatyryldy"):
         SalesService.cancel_sale(
             session=db_session,
             sale_id=sale.id,
             reason="Вторая попытка отмены",
             refund_cash_register_id=cash.id,
         )
+
+
+def test_ensure_default_registers_creates_usd_and_tmt(db_session):
+    """Проверка автоматического создания касс USD и TMT, если база пуста."""
+    regs = SalesService.ensure_default_registers(db_session)
+    db_session.commit()
+
+    assert set(regs.keys()) == {"USD", "TMT"}
+    assert regs["USD"].balance == Decimal("0.00")
+    assert regs["TMT"].balance == Decimal("0.00")
+
+
+def test_duplicate_imei_in_same_sale_is_rejected(db_session):
+    """Защита от повторного добавления одного и того же IMEI (в т.ч. через imei1 и imei2) в один чек."""
+    category = Category(name="Телефоны", code="PHONES")
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="DUAL-SIM-PHONE",
+        name="Dual SIM Phone",
+        stock_quantity=5,
+    )
+    db_session.add(product)
+    db_session.commit()
+
+    stock_item = StockItem(
+        product_id=product.id,
+        imei1="111000111000111",
+        imei2="222000222000222",
+        condition="new",
+        status="in_stock",
+    )
+    db_session.add(stock_item)
+
+    cash = CashRegister(name="Касса USD", currency="USD", balance=Decimal("1000.00"))
+    db_session.add(cash)
+    db_session.commit()
+
+    items = [
+        {
+            "product_id": product.id,
+            "quantity": 1,
+            "unit_price": Decimal("500.00"),
+            "imei": "111000111000111",
+            "currency": "USD",
+        },
+        {
+            "product_id": product.id,
+            "quantity": 1,
+            "unit_price": Decimal("500.00"),
+            "imei": "222000222000222",
+            "currency": "USD",
+        },
+    ]
+    payments = [
+        {
+            "cash_register_id": cash.id,
+            "amount": Decimal("1000.00"),
+            "currency": "USD",
+        }
+    ]
+
+    with pytest.raises(ValueError, match="çekde bir gezekden köp görkezildi"):
+        SalesService.create_sale(
+            session=db_session,
+            items=items,
+            payments=payments,
+            currency="USD",
+        )
+
+
+def test_sale_records_sale_payments_movements_and_change(db_session):
+    """Проверка записи SalePayment, CashMovement и учета сдачи при переплате."""
+    category = Category(name="Аксессуары", code="ACC")
+    db_session.add(category)
+    db_session.commit()
+
+    product = Product(
+        category_id=category.id,
+        sku="CHARGER-20W",
+        name="Charger 20W",
+        stock_quantity=10,
+    )
+    db_session.add(product)
+
+    cash_tmt = CashRegister(name="Касса TMT", currency="TMT", balance=Decimal("500.00"))
+    db_session.add(cash_tmt)
+    db_session.commit()
+
+    items = [
+        {
+            "product_id": product.id,
+            "quantity": 1,
+            "unit_price": Decimal("150.00"),
+            "currency": "TMT",
+        }
+    ]
+    payments = [
+        {
+            "cash_register_id": cash_tmt.id,
+            "amount": Decimal("200.00"),
+            "currency": "TMT",
+        }
+    ]
+
+    sale = SalesService.create_sale(
+        session=db_session,
+        items=items,
+        payments=payments,
+        currency="TMT",
+        exchange_rate=Decimal("19.5000"),
+    )
+    db_session.commit()
+
+    # Баланс должен вырасти ровно на сумму чека (150), т.к. 200 приход и 50 сдача
+    assert cash_tmt.balance == Decimal("650.00")
+
+    sale_payments = db_session.scalars(
+        select(SalePayment).where(SalePayment.sale_id == sale.id)
+    ).all()
+    assert len(sale_payments) == 1
+    assert sale_payments[0].amount == Decimal("200.00")
+
+    movements = db_session.scalars(
+        select(CashMovement).where(CashMovement.sale_id == sale.id)
+    ).all()
+    assert {m.movement_type for m in movements} == {"sale_payment", "sale_change"}
+
+    # Отмена чека без явного указания кассы должна вернуть ровно чистую сумму (150 TMT)
+    SalesService.cancel_sale(
+        session=db_session,
+        sale_id=sale.id,
+        reason="Возврат аксессуара",
+    )
+    db_session.commit()
+
+    assert cash_tmt.balance == Decimal("500.00")
+    assert product.stock_quantity == 10
+

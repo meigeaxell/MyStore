@@ -1,3 +1,4 @@
+import sys
 from logging.config import fileConfig
 
 from alembic import context
@@ -13,8 +14,8 @@ config = context.config
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and sys.stderr is not None:
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -56,7 +57,7 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
 
-    configuration = config.get_section(config.config_ini_section)
+    configuration = config.get_section(config.config_ini_section) or {}
     configuration["sqlalchemy.url"] = DATABASE_URL
 
     connectable = engine_from_config(

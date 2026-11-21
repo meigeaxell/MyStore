@@ -9,11 +9,13 @@ from sqlalchemy.orm import Session
 
 from app.database.engine import SessionLocal
 from app.models.cash_movement import CashMovement
+from app.models.cash_register import CashRegister, CashTransaction
 from app.models.product import Product
 from app.models.purchase import Purchase
 from app.models.purchase_item import PurchaseItem
 from app.models.purchase_payment import PurchasePayment
 from app.models.purchase_refund import PurchaseRefund
+from app.models.stock_item import StockItem
 
 CURRENCIES = {"USD", "TMT"}
 CENT = Decimal("0.01")
@@ -25,10 +27,10 @@ def _decimal(value: Any) -> Decimal:
     try:
         result = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError("Некорректное числовое значение.") from exc
+        raise ValueError("San bahasy nädogry.") from exc
 
     if not result.is_finite():
-        raise ValueError("Число должно быть конечным.")
+        raise ValueError("San gutarnykly bolmaly.")
 
     return result
 
@@ -39,19 +41,19 @@ def _money(value: Decimal) -> Decimal:
         return value.quantize(CENT, rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
         raise ValueError(
-            "Сумма слишком велика или имеет некорректный формат."
+            "Mukdar gaty uly ýa-da formaty nädogry."
         ) from exc
 
 
 def _validate_currency(currency: str) -> str:
     """Проверяет и нормализует валюту."""
     if not isinstance(currency, str):
-        raise TypeError("Валюта должна быть указана текстом.")
+        raise TypeError("Walýuta tekst görnüşinde görkezilmeli.")
 
     currency = currency.strip().upper()
 
     if currency not in CURRENCIES:
-        raise ValueError("Допустимые валюты: USD и TMT.")
+        raise ValueError("Rugsat edilýän walýutalar: USD we TMT.")
 
     return currency
 
@@ -63,10 +65,10 @@ def _validate_rate(value: Any) -> Decimal:
     try:
         rate = rate.quantize(RATE_PRECISION, rounding=ROUND_HALF_UP)
     except InvalidOperation as exc:
-        raise ValueError("Некорректный формат курса.") from exc
+        raise ValueError("Kurs formaty nädogry.") from exc
 
     if rate <= 0:
-        raise ValueError("Курс должен быть больше нуля.")
+        raise ValueError("Kurs noldan uly bolmaly.")
 
     return rate
 
@@ -75,14 +77,14 @@ def _positive_integer(value: Any, field_name: str) -> int:
     """Проверяет положительное целое число."""
     if isinstance(value, bool):
         raise TypeError(
-            f"{field_name} должно быть положительным целым числом."
+            f"{field_name} položitel bitin san bolmaly."
         )
 
     number = _decimal(value)
 
     if number != number.to_integral_value() or number <= 0:
         raise ValueError(
-            f"{field_name} должно быть положительным целым числом."
+            f"{field_name} položitel bitin san bolmaly."
         )
 
     return int(number)
@@ -107,7 +109,7 @@ def _convert_to_document_currency(
     if payment_currency == "USD" and document_currency == "TMT":
         return _money(amount * exchange_rate)
 
-    raise ValueError("Не удалось пересчитать валюту.")
+    raise ValueError("Walýutany hasaplap bolmady.")
 
 
 def _get_paid_amount(session: Session, purchase: Purchase) -> Decimal:
@@ -173,14 +175,14 @@ def _register_payment(
 ) -> PurchasePayment:
     """Регистрирует платёж и соответствующее движение кассы."""
     if purchase.status != "active":
-        raise ValueError("Нельзя оплачивать аннулированную закупку.")
+        raise ValueError("Ýatyrylan alyş üçin töleg edip bolmaýar.")
 
     currency = _validate_currency(currency)
     amount = _money(_decimal(amount))
     exchange_rate = _validate_rate(exchange_rate)
 
     if amount <= 0:
-        raise ValueError("Сумма платежа должна быть больше нуля.")
+        raise ValueError("Töleg mukdary noldan uly bolmaly.")
 
     payment_date = payment_date or datetime.now()
     paid_before = _get_paid_amount(session, purchase)
@@ -198,7 +200,7 @@ def _register_payment(
 
     if payment_in_document_currency > remaining:
         raise ValueError(
-            f"Сумма платежа превышает остаток долга: "
+            f"Töleg mukdary galan bergiden köp: "
             f"{remaining} {purchase.currency}."
         )
 
@@ -213,14 +215,41 @@ def _register_payment(
     session.add(payment)
     session.flush()
 
+    register = session.scalar(
+        select(CashRegister).where(CashRegister.currency == currency)
+    )
+    reg_id = None
+    if register is not None:
+        reg_balance = _money(_decimal(register.balance))
+        if reg_balance < amount:
+            raise ValueError(
+                f"{currency} kassasynda pul ýeterlik däl "
+                f"(elýeterli: {reg_balance} {currency}, gerek: {amount} {currency})."
+            )
+        register.balance = _money(reg_balance - amount)
+        reg_id = register.id
+        session.add(
+            CashTransaction(
+                cash_register_id=register.id,
+                transaction_type="expense",
+                amount=amount,
+                currency=currency,
+                exchange_rate=exchange_rate,
+                description=f"Alyş №{purchase.id} tölegi",
+                transaction_date=payment_date,
+            )
+        )
+
     session.add(
         CashMovement(
             movement_date=payment_date,
             movement_type="purchase_payment",
             currency=currency,
             amount=amount,
+            exchange_rate=exchange_rate,
+            cash_register_id=reg_id,
             purchase_payment_id=payment.id,
-            description=f"Оплата закупки №{purchase.id}",
+            description=f"Alyş №{purchase.id} tölegi",
         )
     )
 
@@ -234,20 +263,24 @@ def create_purchase(
     payments: list[dict] | None = None,
     note: str | None = None,
     purchase_date: datetime | None = None,
+    supplier_name: str | None = None,
 ) -> int:
     """Создаёт закупку, увеличивает остатки и регистрирует платежи."""
     currency = _validate_currency(currency)
     rate = _validate_rate(exchange_rate)
 
     if not items:
-        raise ValueError("В закупке должен быть хотя бы один товар.")
+        raise ValueError("Alyşda iň azyndan bir haryt bolmaly.")
 
     payments = payments or []
     purchase_date = purchase_date or datetime.now()
+    if supplier_name is not None:
+        supplier_name = str(supplier_name).strip() or None
 
     with SessionLocal() as session, session.begin():
         purchase = Purchase(
             purchase_date=purchase_date,
+            supplier_name=supplier_name,
             currency=currency,
             exchange_rate=rate,
             total_amount=Decimal("0.00"),
@@ -259,21 +292,22 @@ def create_purchase(
         session.flush()
 
         total = Decimal("0.00")
+        seen_imeis: set[str] = set()
 
         for item in items:
             product_id = _positive_integer(
                 item["product_id"],
-                "ID товара",
+                "Haryt ID",
             )
             quantity = _positive_integer(
                 item["quantity"],
-                "Количество",
+                "Sany",
             )
             unit_cost = _money(_decimal(item["unit_cost"]))
 
             if unit_cost < 0:
                 raise ValueError(
-                    "Закупочная цена не может быть отрицательной."
+                    "Alyş bahasy otrisatel bolup bilmez."
                 )
 
             product = session.scalar(
@@ -285,7 +319,7 @@ def create_purchase(
 
             if product is None:
                 raise ValueError(
-                    f"Активный товар с ID {product_id} не найден."
+                    f"ID {product_id} bolan işjeň haryt tapylmady."
                 )
 
             line_total = _money(unit_cost * quantity)
@@ -299,6 +333,65 @@ def create_purchase(
                     total_cost=line_total,
                 )
             )
+
+            imei_records = item.get("imeis") or []
+            if len(imei_records) > quantity:
+                raise ValueError(
+                    f"IMEI sany ({len(imei_records)}) "
+                    f"'{product.name}' harydynyň sanyndan ({quantity}) köp."
+                )
+            for imei_data in imei_records:
+                if isinstance(imei_data, str):
+                    imei1 = imei_data.strip()
+                    imei2 = None
+                    serial_number = None
+                    condition = "new"
+                else:
+                    imei1 = str(imei_data.get("imei1", "")).strip()
+                    imei2_raw = imei_data.get("imei2")
+                    imei2 = str(imei2_raw).strip() or None if imei2_raw else None
+                    sn_raw = imei_data.get("serial_number")
+                    serial_number = str(sn_raw).strip() or None if sn_raw else None
+                    condition = str(imei_data.get("condition", "new")).strip() or "new"
+
+                if not imei1:
+                    raise ValueError("IMEI 1 boş bolup bilmez.")
+                if imei1 in seen_imeis or (imei2 and imei2 in seen_imeis) or imei1 == imei2:
+                    raise ValueError(f"Alyş resminamasynda gaýtalanýan IMEI: {imei1}")
+                seen_imeis.add(imei1)
+                if imei2:
+                    seen_imeis.add(imei2)
+
+                existing_stock = session.scalar(
+                    select(StockItem).where(
+                        (StockItem.imei1 == imei1)
+                        | (StockItem.imei2 == imei1)
+                        | (
+                            (StockItem.imei1 == imei2)
+                            | (StockItem.imei2 == imei2)
+                            if imei2
+                            else False
+                        )
+                    )
+                )
+                if existing_stock is not None:
+                    raise ValueError(f"IMEI {imei1} bolan enjam eýýäm bazada hasaba alnan.")
+
+                session.add(
+                    StockItem(
+                        product_id=product.id,
+                        purchase_id=purchase.id,
+                        imei1=imei1,
+                        imei2=imei2,
+                        serial_number=serial_number,
+                        condition=condition,
+                        status="in_stock",
+                        unit_cost=unit_cost,
+                        cost_currency=currency,
+                        cost_exchange_rate=rate,
+                        created_at=purchase_date,
+                    )
+                )
 
             product.stock_quantity += quantity
             total += line_total
@@ -328,13 +421,13 @@ def add_purchase_payment(
     payment_date: datetime | None = None,
 ) -> int:
     """Добавляет очередной платёж по существующей закупке."""
-    purchase_id = _positive_integer(purchase_id, "ID закупки")
+    purchase_id = _positive_integer(purchase_id, "Alyş ID")
 
     with SessionLocal() as session, session.begin():
         purchase = session.get(Purchase, purchase_id)
 
         if purchase is None:
-            raise ValueError("Закупка не найдена.")
+            raise ValueError("Alyş tapylmady.")
 
         payment = _register_payment(
             session=session,
@@ -352,13 +445,13 @@ def add_purchase_payment(
 
 def get_purchase_balance(purchase_id: int) -> Decimal:
     """Возвращает долг магазина по активной закупке."""
-    purchase_id = _positive_integer(purchase_id, "ID закупки")
+    purchase_id = _positive_integer(purchase_id, "Alyş ID")
 
     with SessionLocal() as session:
         purchase = session.get(Purchase, purchase_id)
 
         if purchase is None:
-            raise ValueError("Закупка не найдена.")
+            raise ValueError("Alyş tapylmady.")
 
         if purchase.status == "cancelled":
             return Decimal("0.00")
@@ -377,15 +470,15 @@ def cancel_purchase(
     cancelled_at: datetime | None = None,
 ) -> None:
     """Аннулирует закупку и возвращает её товары со склада."""
-    purchase_id = _positive_integer(purchase_id, "ID закупки")
+    purchase_id = _positive_integer(purchase_id, "Alyş ID")
 
     if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("Укажи причину аннулирования.")
+        raise ValueError("Ýatyrma sebäbini görkeziň.")
 
     reason = reason.strip()
 
     if len(reason) > 255:
-        raise ValueError("Причина не должна превышать 255 символов.")
+        raise ValueError("Sebäp 255 nyşandan köp bolmaly däl.")
 
     cancelled_at = cancelled_at or datetime.now()
 
@@ -393,10 +486,10 @@ def cancel_purchase(
         purchase = session.get(Purchase, purchase_id)
 
         if purchase is None:
-            raise ValueError("Закупка не найдена.")
+            raise ValueError("Alyş tapylmady.")
 
         if purchase.status != "active":
-            raise ValueError("Закупка уже аннулирована.")
+            raise ValueError("Alyş eýýäm ýatyryldy.")
 
         purchase_items = session.scalars(
             select(PurchaseItem).where(
@@ -420,21 +513,33 @@ def cancel_purchase(
 
             if product is None:
                 raise ValueError(
-                    f"Товар с ID {product_id} не найден."
+                    f"ID {product_id} bolan haryt tapylmady."
                 )
 
             if product.stock_quantity < quantity:
                 raise ValueError(
-                    f"Нельзя аннулировать закупку: товара "
-                    f"«{product.name}» на складе {product.stock_quantity}, "
-                    f"а вернуть нужно {quantity}. "
-                    "Вероятно, часть товара уже выбыла."
+                    f"Alyşy ýatyryp bolmaýar: «{product.name}» harydyndan "
+                    f"skladda {product.stock_quantity} bar, "
+                    f"yzyna gaýtarmaly {quantity}. "
+                    "Harydyň bir bölegi eýýäm çykarylan bolmagy mümkin."
                 )
 
             products[product_id] = product
 
         for product_id, quantity in quantities.items():
             products[product_id].stock_quantity -= quantity
+
+        # Проверяем и удаляем связанные с закупкой IMEI-записи (или запрещаем отмену, если IMEI уже продан)
+        linked_stock_items = session.scalars(
+            select(StockItem).where(StockItem.purchase_id == purchase_id)
+        ).all()
+        for s_item in linked_stock_items:
+            if s_item.status != "in_stock":
+                raise ValueError(
+                    f"Alyşy ýatyryp bolmaýar: IMEI {s_item.imei1} bolan enjam "
+                    "eýýäm satyldy ýa-da elýeterli däl."
+                )
+            session.delete(s_item)
 
         purchase.status = "cancelled"
         purchase.cancelled_at = cancelled_at
@@ -450,19 +555,19 @@ def add_purchase_refund(
     description: str | None = None,
 ) -> int:
     """Регистрирует возврат денег от поставщика и приход в кассу."""
-    purchase_id = _positive_integer(purchase_id, "ID закупки")
+    purchase_id = _positive_integer(purchase_id, "Alyş ID")
     currency = _validate_currency(currency)
     refund_amount = _money(_decimal(amount))
     rate = _validate_rate(exchange_rate)
 
     if refund_amount <= 0:
-        raise ValueError("Сумма возврата должна быть больше нуля.")
+        raise ValueError("Yzyna gaýtarma mukdary noldan uly bolmaly.")
 
     if description is not None:
         description = description.strip() or None
         if description is not None and len(description) > 255:
             raise ValueError(
-                "Описание не должно превышать 255 символов."
+                "Bellik 255 nyşandan köp bolmaly däl."
             )
 
     refund_date = refund_date or datetime.now()
@@ -471,12 +576,11 @@ def add_purchase_refund(
         purchase = session.get(Purchase, purchase_id)
 
         if purchase is None:
-            raise ValueError("Закупка не найдена.")
+            raise ValueError("Alyş tapylmady.")
 
         if purchase.status != "cancelled":
             raise ValueError(
-                "Возврат денег можно зарегистрировать "
-                "только по аннулированной закупке."
+                "Pul yzyna gaýtarmagy diňe ýatyrylan alyş boýunça belläp bolýar."
             )
 
         debt_before = _get_supplier_debt_amount(session, purchase)
@@ -490,8 +594,8 @@ def add_purchase_refund(
 
         if refund_in_document_currency > debt_before:
             raise ValueError(
-                f"Возврат превышает задолженность поставщика. "
-                f"Остаток: {debt_before} {purchase.currency}."
+                f"Yzyna gaýtarma üpjün edijiniň bergisinden köp. "
+                f"Galyndy: {debt_before} {purchase.currency}."
             )
 
         refund = PurchaseRefund(
@@ -506,16 +610,41 @@ def add_purchase_refund(
         session.add(refund)
         session.flush()
 
+        register = session.scalar(
+            select(CashRegister).where(CashRegister.currency == currency)
+        )
+        reg_id = None
+        if register is not None:
+            reg_balance = _money(_decimal(register.balance))
+            register.balance = _money(reg_balance + refund_amount)
+            reg_id = register.id
+            session.add(
+                CashTransaction(
+                    cash_register_id=register.id,
+                    transaction_type="income",
+                    amount=refund_amount,
+                    currency=currency,
+                    exchange_rate=rate,
+                    description=(
+                        description
+                        or f"Alyş №{purchase.id} boýunça üpjün edijiden yzyna gaýtarma"
+                    ),
+                    transaction_date=refund_date,
+                )
+            )
+
         session.add(
             CashMovement(
                 movement_date=refund_date,
                 movement_type="purchase_refund",
                 currency=currency,
                 amount=refund_amount,
+                exchange_rate=rate,
+                cash_register_id=reg_id,
                 purchase_refund_id=refund.id,
                 description=(
                     description
-                    or f"Возврат от поставщика по закупке №{purchase.id}"
+                    or f"Alyş №{purchase.id} boýunça üpjün edijiden yzyna gaýtarma"
                 ),
             )
         )
@@ -527,13 +656,13 @@ def add_purchase_refund(
 
 def get_supplier_debt(purchase_id: int) -> Decimal:
     """Возвращает задолженность поставщика по аннулированной закупке."""
-    purchase_id = _positive_integer(purchase_id, "ID закупки")
+    purchase_id = _positive_integer(purchase_id, "Alyş ID")
 
     with SessionLocal() as session:
         purchase = session.get(Purchase, purchase_id)
 
         if purchase is None:
-            raise ValueError("Закупка не найдена.")
+            raise ValueError("Alyş tapylmady.")
 
         if purchase.status != "cancelled":
             return Decimal("0.00")

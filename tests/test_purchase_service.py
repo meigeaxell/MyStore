@@ -154,7 +154,7 @@ def test_add_payment_to_existing_purchase(product):
 
 
 def test_overpayment_is_rejected(product):
-    with pytest.raises(ValueError, match="превышает остаток"):
+    with pytest.raises(ValueError, match="galan bergiden köp"):
         purchase_service.create_purchase(
             items=[
                 {
@@ -184,7 +184,7 @@ def test_overpayment_is_rejected(product):
 
 
 def test_invalid_product_rolls_back_purchase(product):
-    with pytest.raises(ValueError, match="не найден"):
+    with pytest.raises(ValueError, match="tapylmady"):
         purchase_service.create_purchase(
             items=[
                 {
@@ -212,7 +212,7 @@ def test_invalid_product_rolls_back_purchase(product):
 
 
 def test_negative_quantity_is_rejected(product):
-    with pytest.raises(ValueError, match="Количество"):
+    with pytest.raises(ValueError, match="Sany"):
         purchase_service.create_purchase(
             items=[
                 {
@@ -340,7 +340,7 @@ def test_invalid_quantity_is_rejected(product, value):
 
 
 def test_invalid_currency_is_rejected(product):
-    with pytest.raises(ValueError, match="Допустимые валюты"):
+    with pytest.raises(ValueError, match="Rugsat edilýän walýutalar"):
         purchase_service.create_purchase(
             items=[
                 {
@@ -355,7 +355,7 @@ def test_invalid_currency_is_rejected(product):
 
 
 def test_zero_exchange_rate_is_rejected(product):
-    with pytest.raises(ValueError, match="больше нуля"):
+    with pytest.raises(ValueError, match="noldan uly"):
         purchase_service.create_purchase(
             items=[
                 {

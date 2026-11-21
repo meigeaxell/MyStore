@@ -1,4 +1,3 @@
-
 from decimal import Decimal
 
 from PySide6.QtCore import Qt
@@ -13,7 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -29,6 +28,7 @@ from app.models.purchase import Purchase
 from app.models.purchase_item import PurchaseItem
 from app.models.purchase_payment import PurchasePayment
 from app.models.purchase_refund import PurchaseRefund
+from app.repositories.product_repository import get_low_stock_products
 from app.services.purchase_service import (
     add_purchase_payment,
     add_purchase_refund,
@@ -37,99 +37,16 @@ from app.services.purchase_service import (
     get_purchase_balance,
     get_supplier_debt,
 )
+from app.services.settings_service import SettingsService
 from app.ui import theme
-from app.ui.widgets import Card
-
-
-def money(value) -> str:
-    return f"{Decimal(str(value)):,.2f}"
-
-
-def convert_currency(
-    amount: Decimal,
-    source_currency: str,
-    target_currency: str,
-    rate: Decimal,
-) -> Decimal:
-    if source_currency == target_currency:
-        return amount
-
-    if source_currency == "TMT" and target_currency == "USD":
-        return amount / rate
-
-    if source_currency == "USD" and target_currency == "TMT":
-        return amount * rate
-
-    return amount
-
-
-def styled_button(text: str, primary: bool = False) -> QPushButton:
-    button = QPushButton(text)
-    button.setCursor(Qt.CursorShape.PointingHandCursor)
-
-    if primary:
-        button.setObjectName("primaryBtn")
-    else:
-        button.setStyleSheet(f"""
-            QPushButton {{
-                background: white;
-                color: {theme.TEXT};
-                border: 1px solid {theme.BORDER};
-                border-radius: 8px;
-                padding: 9px 14px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background: {theme.ACCENT_BG};
-                border-color: {theme.ACCENT};
-            }}
-        """)
-
-    return button
-
-
-def configure_table(table: QTableWidget) -> None:
-    table.setStyleSheet(f"""
-        QTableWidget {{
-            background: white;
-            color: {theme.TEXT};
-            border: none;
-            border-radius: 12px;
-            gridline-color: transparent;
-            selection-background-color: {theme.ACCENT_BG};
-            selection-color: {theme.TEXT};
-            alternate-background-color: #FAFBFC;
-            outline: none;
-        }}
-        QHeaderView::section {{
-            background: #F8F9FB;
-            color: {theme.MUTED};
-            padding: 13px 10px;
-            border: none;
-            border-bottom: 1px solid {theme.BORDER};
-            font-weight: 600;
-        }}
-        QTableWidget::item {{
-            padding: 10px;
-            border: none;
-            border-bottom: 1px solid #F0F1F3;
-        }}
-        QTableWidget::item:selected {{
-            background: #FFF0E1;
-            color: {theme.TEXT};
-        }}
-    """)
-    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-    table.setSelectionBehavior(
-        QTableWidget.SelectionBehavior.SelectRows
-    )
-    table.setSelectionMode(
-        QTableWidget.SelectionMode.SingleSelection
-    )
-    table.setAlternatingRowColors(True)
-    table.setShowGrid(False)
-    table.verticalHeader().setVisible(False)
-    table.verticalHeader().setDefaultSectionSize(46)
+from app.ui.selection_dialogs import CatalogProductSelectorDialog
+from app.ui.widgets import (
+    configure_table,
+    make_button,
+    make_stat_card,
+    money_str,
+    style_combo,
+)
 
 
 def money_input(maximum: float = 999999999) -> QDoubleSpinBox:
@@ -137,7 +54,7 @@ def money_input(maximum: float = 999999999) -> QDoubleSpinBox:
     field.setRange(0, maximum)
     field.setDecimals(2)
     field.setSingleStep(10)
-    field.setMinimumHeight(38)
+    field.setMinimumHeight(36)
     return field
 
 
@@ -145,15 +62,14 @@ def rate_input() -> QDoubleSpinBox:
     field = QDoubleSpinBox()
     field.setRange(0.0001, 999999.9999)
     field.setDecimals(4)
-    field.setValue(19.5)
+    field.setValue(float(SettingsService.get_default_exchange_rate()))
     field.setSingleStep(0.1)
-    field.setMinimumHeight(38)
+    field.setMinimumHeight(36)
     return field
 
 
-def fill_table(table, rows):
+def fill_table(table: QTableWidget, rows: list[tuple]) -> None:
     table.setRowCount(len(rows))
-
     for row, values in enumerate(rows):
         for column, value in enumerate(values):
             cell = QTableWidgetItem(str(value))
@@ -162,179 +78,460 @@ def fill_table(table, rows):
             table.setItem(row, column, cell)
 
 
-class PurchaseDialog(QDialog):
-    """Создание закупки с несколькими товарами и платежами."""
+class ImeiEntryDialog(QDialog):
+    """Окно ввода IMEI для товарной позиции закупки."""
 
-    def __init__(self, parent=None):
+    def __init__(
+        self,
+        product_name: str,
+        max_quantity: int,
+        existing_imeis: list[dict] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Новая закупка")
-        self.setMinimumSize(850, 700)
+        self.setWindowTitle(f"IMEI — {product_name}")
+        self.setMinimumSize(640, 440)
         self.setStyleSheet(theme.STYLE)
 
-        self.items = []
-        self.payments = []
-        self.products = []
+        self.max_quantity = max_quantity
+        self.imei_list: list[dict] = list(existing_imeis or [])
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel(f"Enjamlar: {product_name}")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        self.counter_label = QLabel()
+        self.counter_label.setObjectName("mutedText")
+        root.addWidget(self.counter_label)
+
+        form_row = QHBoxLayout()
+        self.imei1_input = QLineEdit()
+        self.imei1_input.setPlaceholderText("IMEI 1 (hökmany)*")
+        self.imei2_input = QLineEdit()
+        self.imei2_input.setPlaceholderText("IMEI 2 (hökmany däl)")
+        self.sn_input = QLineEdit()
+        self.sn_input.setPlaceholderText("Seriýa №")
+        self.cond_input = style_combo(QComboBox())
+        self.cond_input.addItem("Täze", "new")
+        self.cond_input.addItem("B/U", "used")
+
+        add_btn = make_button("+ IMEI goş", "primary")
+        add_btn.clicked.connect(self._add_imei)
+
+        form_row.addWidget(self.imei1_input, 2)
+        form_row.addWidget(self.imei2_input, 2)
+        form_row.addWidget(self.sn_input, 1)
+        form_row.addWidget(self.cond_input)
+        form_row.addWidget(add_btn)
+        root.addLayout(form_row)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["IMEI 1", "IMEI 2", "Seriýa №", "Ýagdaýy"])
+        configure_table(self.table, stretch_col=[0, 1], row_height=42)
+        root.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        rem_btn = make_button("Saýlanan IMEI-ni poz", "danger")
+        rem_btn.clicked.connect(self._remove_selected)
+        footer.addWidget(rem_btn)
+        footer.addStretch()
+
+        cancel_btn = make_button("Ýatyr")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = make_button("Taýýar", "primary")
+        save_btn.clicked.connect(self.accept)
+        footer.addWidget(cancel_btn)
+        footer.addWidget(save_btn)
+        root.addLayout(footer)
+
+        self._refresh_table()
+
+    def _add_imei(self) -> None:
+        if len(self.imei_list) >= self.max_quantity:
+            QMessageBox.warning(
+                self,
+                "Çäk doldy",
+                f"IMEI sany setirdäki sanyndan ({self.max_quantity}) köp bolup bilmez.",
+            )
+            return
+        imei1 = self.imei1_input.text().strip()
+        imei2 = self.imei2_input.text().strip() or None
+        sn = self.sn_input.text().strip() or None
+        cond = self.cond_input.currentData()
+
+        if not imei1:
+            QMessageBox.warning(self, "Ýalňyşlyk", "IMEI 1 giriziň.")
+            return
+        if imei2 and imei1 == imei2:
+            QMessageBox.warning(self, "Ýalňyşlyk", "IMEI 1 we IMEI 2 birmeňzeş bolup bilmez.")
+            return
+
+        for rec in self.imei_list:
+            existing_set = {rec["imei1"]}
+            if rec.get("imei2"):
+                existing_set.add(rec["imei2"])
+            if imei1 in existing_set or (imei2 and imei2 in existing_set):
+                QMessageBox.warning(self, "Gaýtalanma", "Bu IMEI eýýäm sanawa goşuldy.")
+                return
+
+        self.imei_list.append({
+            "imei1": imei1,
+            "imei2": imei2,
+            "serial_number": sn,
+            "condition": cond,
+        })
+        self.imei1_input.clear()
+        self.imei2_input.clear()
+        self.sn_input.clear()
+        self._refresh_table()
+
+    def _remove_selected(self) -> None:
+        row = self.table.currentRow()
+        if 0 <= row < len(self.imei_list):
+            self.imei_list.pop(row)
+            self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        self.counter_label.setText(
+            f"Goşulan IMEI: {len(self.imei_list)} / {self.max_quantity} sany "
+            "(aksessuarlar üçin boş galdyryp bolýar)"
+        )
+        rows = [
+            (
+                r["imei1"],
+                r.get("imei2") or "—",
+                r.get("serial_number") or "—",
+                "Täze" if r.get("condition", "new") == "new" else "B/U",
+            )
+            for r in self.imei_list
+        ]
+        fill_table(self.table, rows)
+
+
+class PurchaseDialog(QDialog):
+    """Окно создания новой закупки с адаптивной вёрсткой, таблицами и визуальным выбором товара."""
+
+    def __init__(self, parent=None, initial_data: dict | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Täze alyş")
+        self.resize(900, 740)
+        self.setMinimumSize(720, 540)
+        self.setStyleSheet(theme.STYLE)
+
+        self.items: list[dict] = []
+        self.payments: list[dict] = []
+        self.products: list[Product] = []
+        self.suppliers: list[str] = []
 
         self._load_products()
         self._build_ui()
+        if initial_data:
+            self._apply_initial_data(initial_data)
 
-    def _load_products(self):
+    def _load_products(self) -> None:
         with SessionLocal() as session:
-            self.products = session.scalars(
-                select(Product)
-                .where(Product.is_active.is_(True))
-                .order_by(Product.name)
+            self.products = list(
+                session.scalars(
+                    select(Product).where(Product.is_active.is_(True)).order_by(Product.name)
+                ).all()
+            )
+            raw_sups = session.scalars(
+                select(Purchase.supplier_name)
+                .where(Purchase.supplier_name.is_not(None))
+                .distinct()
+                .order_by(Purchase.supplier_name)
             ).all()
+            self.suppliers = [s.strip() for s in raw_sups if s and s.strip()]
 
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
-        root.setSpacing(14)
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        title = QLabel("Новая закупка")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("page")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(24, 20, 24, 16)
+        root.setSpacing(12)
+
+        title = QLabel("Täze alyş")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
         document_form = QFormLayout()
         document_form.setSpacing(10)
+        document_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        self.currency_input = QComboBox()
+        self.supplier_input = style_combo(QComboBox())
+        self.supplier_input.setEditable(True)
+        self.supplier_input.setMinimumHeight(36)
+        self.supplier_input.addItem("")
+        for sup in self.suppliers:
+            self.supplier_input.addItem(sup)
+        if self.supplier_input.lineEdit():
+            self.supplier_input.lineEdit().setPlaceholderText(
+                "Üpjün edijini saýlaň ýa-da ýazyň (hökmany däl)"
+            )
+
+        self.currency_input = style_combo(QComboBox())
+        self.currency_input.setMinimumHeight(36)
         self.currency_input.addItems(["USD", "TMT"])
+        self.currency_input.currentTextChanged.connect(self._on_document_currency_changed)
+
         self.rate_input = rate_input()
 
-        document_form.addRow("Валюта документа", self.currency_input)
-        document_form.addRow("Курс (1 USD = X TMT)", self.rate_input)
+        document_form.addRow("Üpjün ediji", self.supplier_input)
+        document_form.addRow("Resminama walýutasy", self.currency_input)
+        document_form.addRow("Kurs (1 USD = X TMT)", self.rate_input)
         root.addLayout(document_form)
 
-        section = QLabel("Товары")
-        section.setStyleSheet("font-size: 12pt; font-weight: 700;")
-        root.addWidget(section)
+        sec_row = QHBoxLayout()
+        section = QLabel("Harytlar")
+        section.setObjectName("cardTitle")
+        sec_row.addWidget(section, 1)
+
+        low_stock_btn = make_button("⚡ Az galan harytlary doldur")
+        low_stock_btn.clicked.connect(self._fill_low_stock_products)
+        sec_row.addWidget(low_stock_btn)
+        root.addLayout(sec_row)
 
         product_row = QHBoxLayout()
+        product_row.setSpacing(8)
 
-        self.product_input = QComboBox()
-        self.product_input.setMinimumHeight(40)
-        self.product_input.setMinimumWidth(260)
-
-        for product in self.products:
-            self.product_input.addItem(
-                f"{product.name}  •  {product.sku}",
-                product.id,
-            )
+        self.product_input = style_combo(QComboBox())
+        self.product_input.setMinimumHeight(38)
+        self.product_input.setMinimumWidth(220)
+        self.product_input.currentIndexChanged.connect(self._on_product_changed)
 
         self.quantity_input = QSpinBox()
         self.quantity_input.setRange(1, 100000)
         self.quantity_input.setValue(1)
-        self.quantity_input.setMinimumHeight(40)
+        self.quantity_input.setMinimumHeight(38)
 
         self.price_input = money_input()
-        self.price_input.setMinimumWidth(120)
+        self.price_input.setMinimumWidth(110)
 
-        add_item_button = styled_button("+ Добавить товар", True)
+        self._populate_product_combo()
+
+        browse_btn = make_button("🔍 Katalog / + Täze…")
+        browse_btn.setMinimumHeight(38)
+        browse_btn.clicked.connect(self._open_catalog_selector)
+
+        add_item_button = make_button("+ Haryt goş", "primary")
+        add_item_button.setMinimumHeight(38)
         add_item_button.clicked.connect(self._add_item)
 
         product_row.addWidget(self.product_input, 1)
-        product_row.addWidget(QLabel("Кол-во"))
+        product_row.addWidget(browse_btn)
+        product_row.addWidget(QLabel("Sany"))
         product_row.addWidget(self.quantity_input)
-        product_row.addWidget(QLabel("Цена"))
+        product_row.addWidget(QLabel("Baha"))
         product_row.addWidget(self.price_input)
         product_row.addWidget(add_item_button)
         root.addLayout(product_row)
 
         self.items_table = QTableWidget(0, 5)
         self.items_table.setHorizontalHeaderLabels([
-            "Товар", "Количество", "Цена за шт.", "Сумма", "",
+            "Haryt", "Sany", "1 sanynyň bahasy", "Jemi", "IMEI",
         ])
-        configure_table(self.items_table)
-        self.items_table.horizontalHeader().setStretchLastSection(True)
-        self.items_table.horizontalHeader().setSectionResizeMode(
-            0,
-            self.items_table.horizontalHeader().ResizeMode.Stretch,
-        )
-        self.items_table.setMaximumHeight(190)
-        root.addWidget(self.items_table)
+        configure_table(self.items_table, stretch_col=0, row_height=42)
+        self.items_table.setMinimumHeight(145)
+        self.items_table.cellDoubleClicked.connect(self._edit_item_imeis)
+        root.addWidget(self.items_table, 2)
 
-        remove_item_button = styled_button("Удалить выбранную позицию")
+        item_actions = QHBoxLayout()
+        imei_button = make_button("📱 Saýlanan setir üçin IMEI görkez")
+        imei_button.clicked.connect(self._open_imei_for_selected)
+        remove_item_button = make_button("Saýlanan setiri poz", "danger")
         remove_item_button.clicked.connect(self._remove_item)
-        root.addWidget(
-            remove_item_button,
-            alignment=Qt.AlignmentFlag.AlignRight,
-        )
+        item_actions.addWidget(imei_button)
+        item_actions.addStretch()
+        item_actions.addWidget(remove_item_button)
+        root.addLayout(item_actions)
 
-        self.total_label = QLabel("Итого: 0.00")
+        self.total_label = QLabel("Jemi: 0.00 USD")
         self.total_label.setStyleSheet(
-            f"font-size: 15pt; font-weight: 700; color: {theme.NAVY};"
+            f"font-size: 14.5pt; font-weight: 700; color: {theme.NAVY};"
         )
         root.addWidget(self.total_label)
 
-        payment_title = QLabel("Первоначальная оплата")
-        payment_title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        payment_title = QLabel("Başlangyç töleg")
+        payment_title.setObjectName("cardTitle")
         root.addWidget(payment_title)
 
         payment_row = QHBoxLayout()
+        payment_row.setSpacing(8)
 
-        self.payment_currency = QComboBox()
+        self.payment_currency = style_combo(QComboBox())
+        self.payment_currency.setMinimumHeight(36)
         self.payment_currency.addItems(["USD", "TMT"])
         self.payment_amount = money_input()
-        self.payment_amount.setMinimumWidth(130)
+        self.payment_amount.setMinimumWidth(120)
         self.payment_rate = rate_input()
 
-        add_payment_button = styled_button("+ Добавить оплату")
+        add_payment_button = make_button("+ Töleg goş")
+        add_payment_button.setMinimumHeight(36)
         add_payment_button.clicked.connect(self._add_payment)
 
-        payment_row.addWidget(QLabel("Валюта"))
+        payment_row.addWidget(QLabel("Walýuta"))
         payment_row.addWidget(self.payment_currency)
-        payment_row.addWidget(QLabel("Сумма"))
-        payment_row.addWidget(self.payment_amount)
-        payment_row.addWidget(QLabel("Курс"))
+        payment_row.addWidget(QLabel("Jemi"))
+        payment_row.addWidget(self.payment_amount, 1)
+        payment_row.addWidget(QLabel("Kurs"))
         payment_row.addWidget(self.payment_rate)
         payment_row.addWidget(add_payment_button)
         root.addLayout(payment_row)
 
         self.payments_table = QTableWidget(0, 3)
-        self.payments_table.setHorizontalHeaderLabels([
-            "Валюта", "Сумма", "Курс",
-        ])
-        configure_table(self.payments_table)
-        self.payments_table.horizontalHeader().setStretchLastSection(True)
-        self.payments_table.setMaximumHeight(120)
-        root.addWidget(self.payments_table)
+        self.payments_table.setHorizontalHeaderLabels(["Walýuta", "Jemi", "Kurs"])
+        configure_table(self.payments_table, stretch_col=1, row_height=40)
+        self.payments_table.setMinimumHeight(110)
+        root.addWidget(self.payments_table, 1)
 
-        remove_payment_button = styled_button("Удалить выбранную оплату")
+        pay_actions = QHBoxLayout()
+        pay_actions.addStretch()
+        remove_payment_button = make_button("Saýlanan tölegi poz", "danger")
         remove_payment_button.clicked.connect(self._remove_payment)
-        root.addWidget(
-            remove_payment_button,
-            alignment=Qt.AlignmentFlag.AlignRight,
-        )
+        pay_actions.addWidget(remove_payment_button)
+        root.addLayout(pay_actions)
 
         note_form = QFormLayout()
         self.note_input = QLineEdit()
-        self.note_input.setPlaceholderText("Необязательно")
-        note_form.addRow("Примечание", self.note_input)
+        self.note_input.setMinimumHeight(36)
+        self.note_input.setPlaceholderText("Hökmany däl")
+        note_form.addRow("Bellik", self.note_input)
         root.addLayout(note_form)
 
-        buttons = QHBoxLayout()
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        footer_bar = QWidget()
+        footer_bar.setStyleSheet(
+            f"background: white; border-top: 1px solid {theme.BORDER};"
+        )
+        buttons = QHBoxLayout(footer_bar)
+        buttons.setContentsMargins(24, 12, 24, 12)
         buttons.addStretch()
 
-        cancel_button = styled_button("Отмена")
+        cancel_button = make_button("Ýatyr")
         cancel_button.clicked.connect(self.reject)
-
-        save_button = styled_button("Сохранить закупку", True)
+        save_button = make_button("Alyşy ýatda sakla", "primary")
         save_button.clicked.connect(self._save)
 
         buttons.addWidget(cancel_button)
         buttons.addWidget(save_button)
-        root.addLayout(buttons)
+        outer.addWidget(footer_bar)
 
-    def _add_item(self):
-        product_id = self.product_input.currentData()
+    def _populate_product_combo(self) -> None:
+        cur_id = self.product_input.currentData()
+        self.product_input.blockSignals(True)
+        self.product_input.clear()
+        for product in self.products:
+            self.product_input.addItem(f"{product.name}  •  {product.sku}", product.id)
+        idx = self.product_input.findData(cur_id)
+        if idx >= 0:
+            self.product_input.setCurrentIndex(idx)
+        self.product_input.blockSignals(False)
+        self._on_product_changed()
 
-        if product_id is None:
-            QMessageBox.warning(
+    def _resolve_last_unit_cost(self, product_id: int) -> Decimal:
+        with SessionLocal() as session:
+            row = session.execute(
+                select(PurchaseItem.unit_cost)
+                .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+                .where(
+                    PurchaseItem.product_id == product_id,
+                    Purchase.status == "active",
+                )
+                .order_by(Purchase.purchase_date.desc(), PurchaseItem.id.desc())
+            ).first()
+            if row and row[0] is not None:
+                return Decimal(str(row[0]))
+        default_cost = SettingsService.get_product_default_cost(product_id)
+        if default_cost is not None:
+            return default_cost[0]
+        return Decimal("0.00")
+
+    def _on_product_changed(self, *_args) -> None:
+        if not hasattr(self, "price_input"):
+            return
+        pid = self.product_input.currentData()
+        if pid is not None:
+            last_cost = self._resolve_last_unit_cost(pid)
+            self.price_input.setValue(float(last_cost))
+
+    def _fill_low_stock_products(self) -> None:
+        low_products = get_low_stock_products()
+        if not low_products:
+            QMessageBox.information(
                 self,
-                "Нет товаров",
-                "Сначала добавьте товар в каталог.",
+                "Az galan haryt ýok",
+                "Skladda iň az çäkden pes galyndyly haryt ýok.",
             )
+            return
+        added = 0
+        for prod in low_products:
+            if any(it["product_id"] == prod.id for it in self.items):
+                continue
+            needed_qty = max(1, (prod.min_stock_quantity - prod.stock_quantity) or 1)
+            cost = self._resolve_last_unit_cost(prod.id)
+            self.items.append({
+                "product_id": prod.id,
+                "name": prod.name,
+                "quantity": needed_qty,
+                "unit_cost": cost,
+                "imeis": [],
+            })
+            added += 1
+        self._refresh_items()
+        QMessageBox.information(
+            self,
+            "Az galan harytlar goşuldy",
+            f"Sklady doldurmak üçin goşulan setirler: {added}.",
+        )
+
+    def _apply_initial_data(self, data: dict) -> None:
+        if data.get("supplier_name"):
+            self.supplier_input.setCurrentText(data["supplier_name"])
+        if data.get("currency") in ("USD", "TMT"):
+            self.currency_input.setCurrentText(data["currency"])
+        if data.get("exchange_rate"):
+            self.rate_input.setValue(float(data["exchange_rate"]))
+        for it in data.get("items", []):
+            self.items.append({
+                "product_id": it["product_id"],
+                "name": it["name"],
+                "quantity": it["quantity"],
+                "unit_cost": Decimal(str(it["unit_cost"])),
+                "imeis": [],
+            })
+        self._refresh_items()
+
+    def _open_catalog_selector(self) -> None:
+        dlg = CatalogProductSelectorDialog(
+            title="Alyş üçin haryt saýlamak",
+            parent=self,
+        )
+        if dlg.exec() and dlg.selected_product:
+            self._load_products()
+            self._populate_product_combo()
+            idx = self.product_input.findData(dlg.selected_product["id"])
+            if idx >= 0:
+                self.product_input.setCurrentIndex(idx)
+
+    def _on_document_currency_changed(self, _text: str) -> None:
+        self._refresh_items()
+
+    def _add_item(self) -> None:
+        product_id = self.product_input.currentData()
+        if product_id is None:
+            QMessageBox.warning(self, "Haryt ýok", "Ilki katalogdan haryt saýlaň ýa-da dörediň.")
             return
 
         quantity = self.quantity_input.value()
@@ -342,13 +539,12 @@ class PurchaseDialog(QDialog):
 
         existing = next(
             (
-                item for item in self.items
-                if item["product_id"] == product_id
-                and item["unit_cost"] == unit_cost
+                item
+                for item in self.items
+                if item["product_id"] == product_id and item["unit_cost"] == unit_cost
             ),
             None,
         )
-
         if existing:
             existing["quantity"] += quantity
         else:
@@ -358,34 +554,58 @@ class PurchaseDialog(QDialog):
                 "name": product_name,
                 "quantity": quantity,
                 "unit_cost": unit_cost,
+                "imeis": [],
             })
-
         self._refresh_items()
 
-    def _remove_item(self):
+    def _open_imei_for_selected(self) -> None:
         row = self.items_table.currentRow()
         if row < 0:
+            QMessageBox.warning(
+                self,
+                "Setir saýlanmadyk",
+                "IMEI görkezmek üçin alyş tablisasyndan haryt setirini saýlaň.",
+            )
             return
+        self._edit_item_imeis(row, 4)
 
-        self.items.pop(row)
-        self._refresh_items()
+    def _edit_item_imeis(self, row: int, _col: int) -> None:
+        if not (0 <= row < len(self.items)):
+            return
+        item = self.items[row]
+        dlg = ImeiEntryDialog(
+            product_name=item["name"],
+            max_quantity=item["quantity"],
+            existing_imeis=item.get("imeis", []),
+            parent=self,
+        )
+        if dlg.exec():
+            item["imeis"] = dlg.imei_list
+            self._refresh_items()
 
-    def _refresh_items(self):
+    def _remove_item(self) -> None:
+        row = self.items_table.currentRow()
+        if 0 <= row < len(self.items):
+            self.items.pop(row)
+            self._refresh_items()
+
+    def _refresh_items(self) -> None:
         self.items_table.setRowCount(len(self.items))
         total = Decimal("0.00")
 
         for row, item in enumerate(self.items):
             line_total = item["unit_cost"] * item["quantity"]
             total += line_total
+            imei_count = len(item.get("imeis", []))
+            imei_text = f"{imei_count} IMEI" if imei_count > 0 else "—"
 
             values = [
                 item["name"],
                 str(item["quantity"]),
-                money(item["unit_cost"]),
-                money(line_total),
-                "×",
+                money_str(item["unit_cost"]),
+                money_str(line_total),
+                imei_text,
             ]
-
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 if column > 0:
@@ -393,18 +613,13 @@ class PurchaseDialog(QDialog):
                 self.items_table.setItem(row, column, cell)
 
         self.total_label.setText(
-            f"Итого: {money(total)} {self.currency_input.currentText()}"
+            f"Jemi: {money_str(total)} {self.currency_input.currentText()}"
         )
 
-    def _add_payment(self):
+    def _add_payment(self) -> None:
         amount = Decimal(str(self.payment_amount.value()))
-
         if amount <= 0:
-            QMessageBox.warning(
-                self,
-                "Некорректная сумма",
-                "Укажи сумму платежа больше нуля.",
-            )
+            QMessageBox.warning(self, "Nädogry mukdar", "Noldan uly töleg mukdaryny görkeziň.")
             return
 
         self.payments.append({
@@ -415,38 +630,29 @@ class PurchaseDialog(QDialog):
         self._refresh_payments()
         self.payment_amount.setValue(0)
 
-    def _remove_payment(self):
+    def _remove_payment(self) -> None:
         row = self.payments_table.currentRow()
-        if row < 0:
-            return
+        if 0 <= row < len(self.payments):
+            self.payments.pop(row)
+            self._refresh_payments()
 
-        self.payments.pop(row)
-        self._refresh_payments()
-
-    def _refresh_payments(self):
+    def _refresh_payments(self) -> None:
         self.payments_table.setRowCount(len(self.payments))
-
         for row, payment in enumerate(self.payments):
             values = [
                 payment["currency"],
-                money(payment["amount"]),
-                money(payment["exchange_rate"]),
+                money_str(payment["amount"]),
+                money_str(payment["exchange_rate"]),
             ]
-
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
                 cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.payments_table.setItem(row, column, cell)
 
-    def _save(self):
+    def _save(self) -> None:
         if not self.items:
-            QMessageBox.warning(
-                self,
-                "Нет товаров",
-                "Добавь хотя бы одну товарную позицию.",
-            )
+            QMessageBox.warning(self, "Haryt ýok", "Iň bolmanda bir haryt setirini goşuň.")
             return
-
         try:
             purchase_id = create_purchase(
                 items=[
@@ -454,6 +660,7 @@ class PurchaseDialog(QDialog):
                         "product_id": item["product_id"],
                         "quantity": item["quantity"],
                         "unit_cost": item["unit_cost"],
+                        "imeis": item.get("imeis", []),
                     }
                     for item in self.items
                 ],
@@ -461,92 +668,74 @@ class PurchaseDialog(QDialog):
                 exchange_rate=self.rate_input.value(),
                 payments=self.payments,
                 note=self.note_input.text().strip() or None,
+                supplier_name=self.supplier_input.currentText().strip() or None,
             )
-
             QMessageBox.information(
                 self,
-                "Закупка сохранена",
-                f"Закупка №{purchase_id} успешно создана.",
+                "Alyş ýatda saklandy",
+                f"Alyş №{purchase_id} üstünlikli döredildi.",
             )
             self.accept()
-
         except (ValueError, TypeError, KeyError) as error:
-            QMessageBox.warning(self, "Проверь данные", str(error))
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(error))
         except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка сохранения",
-                f"Не удалось сохранить закупку:\n{error}",
-            )
+            QMessageBox.critical(self, "Ýatda saklama ýalňyşlygy", f"Alyşy ýatda saklap bolmady:\n{error}")
 
 
 class RefundDialog(QDialog):
     """Регистрация возврата денег от поставщика."""
 
-    def __init__(self, purchase_currency: str, parent=None):
+    def __init__(self, purchase_currency: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Возврат денег от поставщика")
+        self.setWindowTitle("Üpjün edijiden puluň yzyna gaýtarylmasy")
         self.setMinimumWidth(440)
         self.setStyleSheet(theme.STYLE)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
 
-        title = QLabel("Регистрация возврата")
+        title = QLabel("Yzyna gaýtarmany hasaba almak")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
         info = QLabel(
-            f"Валюта закупки: {purchase_currency}\n"
-            "Укажи фактически полученную сумму и курс на дату возврата."
+            f"Alyş walýutasy: {purchase_currency}\n"
+            "Hakyky alnan mukdary we gaýtarylan günki kursy görkeziň."
         )
         info.setObjectName("mutedText")
         info.setWordWrap(True)
         root.addWidget(info)
 
         form = QFormLayout()
-        form.setSpacing(12)
-
-        self.currency_input = QComboBox()
+        form.setSpacing(10)
+        self.currency_input = style_combo(QComboBox())
         self.currency_input.addItems(["USD", "TMT"])
-
         self.amount_input = money_input()
         self.rate_input = rate_input()
-
         self.description_input = QLineEdit()
-        self.description_input.setPlaceholderText(
-            "Необязательно"
-        )
+        self.description_input.setPlaceholderText("Hökmany däl")
 
-        form.addRow("Валюта возврата", self.currency_input)
-        form.addRow("Сумма возврата", self.amount_input)
-        form.addRow("Курс (1 USD = X TMT)", self.rate_input)
-        form.addRow("Примечание", self.description_input)
+        form.addRow("Gaýtarma walýutasy", self.currency_input)
+        form.addRow("Gaýtarma mukdary", self.amount_input)
+        form.addRow("Kurs (1 USD = X TMT)", self.rate_input)
+        form.addRow("Bellik", self.description_input)
         root.addLayout(form)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-
-        cancel_button = styled_button("Отмена")
+        cancel_button = make_button("Ýatyr")
         cancel_button.clicked.connect(self.reject)
-
-        save_button = styled_button("Зарегистрировать возврат", True)
+        save_button = make_button("Gaýtarmany hasaba al", "primary")
         save_button.clicked.connect(self._validate)
-
         buttons.addWidget(cancel_button)
         buttons.addWidget(save_button)
         root.addLayout(buttons)
 
-    def _validate(self):
+    def _validate(self) -> None:
         if self.amount_input.value() <= 0:
-            QMessageBox.warning(
-                self,
-                "Некорректная сумма",
-                "Сумма возврата должна быть больше нуля.",
-            )
+            QMessageBox.warning(self, "Nädogry mukdar", "Gaýtarma mukdary noldan uly bolmaly.")
             return
-
         self.accept()
 
     def get_data(self) -> dict:
@@ -559,26 +748,34 @@ class RefundDialog(QDialog):
 
 
 class PurchaseDetailsDialog(QDialog):
-    """Просмотр закупки, платежей, аннулирования и возвратов."""
+    """Просмотр закупки, платежей, аннулирования и возвратов с адаптивной прокруткой."""
 
-    def __init__(self, purchase_id: int, parent=None):
+    def __init__(self, purchase_id: int, parent=None) -> None:
         super().__init__(parent)
         self.purchase_id = purchase_id
 
-        self.setWindowTitle(f"Закупка №{purchase_id}")
-        self.setMinimumSize(820, 820)
-        self.resize(900, 900)
+        self.setWindowTitle(f"Alyş №{purchase_id}")
+        self.resize(860, 740)
+        self.setMinimumSize(700, 520)
         self.setStyleSheet(theme.STYLE)
 
         self._build_ui()
         self._load_data()
 
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("page")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(24, 20, 24, 16)
         root.setSpacing(12)
 
-        self.title_label = QLabel(f"Закупка №{self.purchase_id}")
+        self.title_label = QLabel(f"Alyş №{self.purchase_id}")
         self.title_label.setObjectName("pageTitle")
         root.addWidget(self.title_label)
 
@@ -588,16 +785,9 @@ class PurchaseDetailsDialog(QDialog):
         root.addWidget(self.info_label)
 
         self.status_label = QLabel()
-        self.status_label.setStyleSheet(
-            "font-weight: 700; padding: 8px 12px; "
-            "background: #F2F3F5; border-radius: 8px;"
-        )
         root.addWidget(self.status_label)
 
         self.balance_label = QLabel()
-        self.balance_label.setStyleSheet(
-            f"font-size: 16pt; font-weight: 700; color: {theme.ACCENT};"
-        )
         root.addWidget(self.balance_label)
 
         self.cancellation_label = QLabel()
@@ -605,33 +795,24 @@ class PurchaseDetailsDialog(QDialog):
         self.cancellation_label.setObjectName("mutedText")
         root.addWidget(self.cancellation_label)
 
-        items_title = QLabel("Состав закупки")
-        items_title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        items_title = QLabel("Alyşyň düzümi")
+        items_title.setObjectName("cardTitle")
         root.addWidget(items_title)
 
         self.items_table = QTableWidget(0, 4)
-        self.items_table.setHorizontalHeaderLabels([
-            "Товар", "Количество", "Цена", "Сумма",
-        ])
-        configure_table(self.items_table)
-        self.items_table.horizontalHeader().setSectionResizeMode(
-            0,
-            self.items_table.horizontalHeader().ResizeMode.Stretch,
-        )
-        self.items_table.setMaximumHeight(170)
+        self.items_table.setHorizontalHeaderLabels(["Haryt", "Sany", "Baha", "Jemi"])
+        configure_table(self.items_table, stretch_col=0, row_height=42)
+        self.items_table.setMinimumHeight(130)
         root.addWidget(self.items_table)
 
-        payments_title = QLabel("История платежей")
-        payments_title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        payments_title = QLabel("Tölegler taryhy")
+        payments_title.setObjectName("cardTitle")
         root.addWidget(payments_title)
 
         self.payments_table = QTableWidget(0, 4)
-        self.payments_table.setHorizontalHeaderLabels([
-            "Дата", "Валюта", "Сумма", "Курс",
-        ])
-        configure_table(self.payments_table)
-        self.payments_table.horizontalHeader().setStretchLastSection(True)
-        self.payments_table.setMaximumHeight(135)
+        self.payments_table.setHorizontalHeaderLabels(["Sene", "Walýuta", "Jemi", "Kurs"])
+        configure_table(self.payments_table, stretch_col=0, row_height=40)
+        self.payments_table.setMinimumHeight(110)
         root.addWidget(self.payments_table)
 
         self.payment_section = QWidget()
@@ -639,128 +820,91 @@ class PurchaseDetailsDialog(QDialog):
         payment_layout.setContentsMargins(0, 0, 0, 0)
         payment_layout.setSpacing(8)
 
-        payment_title = QLabel("Добавить платёж")
-        payment_title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        payment_title = QLabel("Üpjün edijä töleg goşmak")
+        payment_title.setObjectName("cardTitle")
         payment_layout.addWidget(payment_title)
 
         payment_row = QHBoxLayout()
-
-        self.payment_currency = QComboBox()
+        self.payment_currency = style_combo(QComboBox())
         self.payment_currency.addItems(["USD", "TMT"])
         self.payment_amount = money_input()
         self.payment_rate = rate_input()
-
-        add_payment_button = styled_button("Добавить платёж", True)
+        add_payment_button = make_button("Töleg goş", "primary")
         add_payment_button.clicked.connect(self._add_payment)
 
-        payment_row.addWidget(QLabel("Валюта"))
+        payment_row.addWidget(QLabel("Walýuta"))
         payment_row.addWidget(self.payment_currency)
-        payment_row.addWidget(QLabel("Сумма"))
-        payment_row.addWidget(self.payment_amount)
-        payment_row.addWidget(QLabel("Курс"))
+        payment_row.addWidget(QLabel("Jemi"))
+        payment_row.addWidget(self.payment_amount, 1)
+        payment_row.addWidget(QLabel("Kurs"))
         payment_row.addWidget(self.payment_rate)
         payment_row.addWidget(add_payment_button)
         payment_layout.addLayout(payment_row)
-
         root.addWidget(self.payment_section)
 
-        refunds_title = QLabel("История возвратов")
-        refunds_title.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        refunds_title = QLabel("Üpjün edijiden yzyna gaýtarmalar taryhy")
+        refunds_title.setObjectName("cardTitle")
         root.addWidget(refunds_title)
 
         self.refunds_table = QTableWidget(0, 4)
-        self.refunds_table.setHorizontalHeaderLabels([
-            "Дата", "Валюта", "Сумма", "Примечание",
-        ])
-        configure_table(self.refunds_table)
-        self.refunds_table.horizontalHeader().setSectionResizeMode(
-            3,
-            self.refunds_table.horizontalHeader().ResizeMode.Stretch,
-        )
-        self.refunds_table.setMaximumHeight(130)
+        self.refunds_table.setHorizontalHeaderLabels(["Sene", "Walýuta", "Jemi", "Bellik"])
+        configure_table(self.refunds_table, stretch_col=3, row_height=40)
+        self.refunds_table.setMinimumHeight(105)
         root.addWidget(self.refunds_table)
 
         self.refund_section = QWidget()
         refund_layout = QVBoxLayout(self.refund_section)
         refund_layout.setContentsMargins(0, 0, 0, 0)
-
         self.refund_hint = QLabel()
         self.refund_hint.setObjectName("mutedText")
         self.refund_hint.setWordWrap(True)
         refund_layout.addWidget(self.refund_hint)
-
-        self.refund_button = styled_button(
-            "Зарегистрировать возврат",
-            True,
-        )
+        self.refund_button = make_button("Gaýtarmany hasaba al", "primary")
         self.refund_button.clicked.connect(self._open_refund)
-        refund_layout.addWidget(
-            self.refund_button,
-            alignment=Qt.AlignmentFlag.AlignLeft,
-        )
-
+        refund_layout.addWidget(self.refund_button, alignment=Qt.AlignmentFlag.AlignLeft)
         root.addWidget(self.refund_section)
 
-        buttons = QHBoxLayout()
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        footer = QWidget()
+        footer.setStyleSheet(f"background: white; border-top: 1px solid {theme.BORDER};")
+        buttons = QHBoxLayout(footer)
+        buttons.setContentsMargins(24, 12, 24, 12)
         buttons.addStretch()
 
-        self.cancel_purchase_button = styled_button(
-            "Аннулировать закупку"
-        )
-        self.cancel_purchase_button.setStyleSheet(f"""
-            QPushButton {{
-                background: white;
-                color: {theme.RED};
-                border: 1px solid {theme.RED};
-                border-radius: 8px;
-                padding: 9px 14px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background: #FFF0F0;
-            }}
-        """)
-        self.cancel_purchase_button.clicked.connect(
-            self._cancel_purchase
-        )
-
-        close_button = styled_button("Закрыть")
+        self.cancel_purchase_button = make_button("Alyşy ýatyr", "danger")
+        self.cancel_purchase_button.clicked.connect(self._cancel_purchase)
+        close_button = make_button("Ýap")
         close_button.clicked.connect(self.accept)
 
         buttons.addWidget(self.cancel_purchase_button)
         buttons.addWidget(close_button)
-        root.addLayout(buttons)
+        outer.addWidget(footer)
 
-    def _load_data(self):
+    def _load_data(self) -> None:
         with SessionLocal() as session:
             purchase = session.get(Purchase, self.purchase_id)
-
             if purchase is None:
-                QMessageBox.warning(
-                    self,
-                    "Закупка не найдена",
-                    "Документ не существует.",
-                )
+                QMessageBox.warning(self, "Alyş tapylmady", "Resminama ýok.")
                 self.reject()
                 return
 
             self.currency = purchase.currency
-            self.total_amount = Decimal(str(purchase.total_amount))
             self.status = purchase.status
             self.document_rate = Decimal(str(purchase.exchange_rate))
-
-            self.info_label.setText(
-                f"Дата: {purchase.purchase_date:%d.%m.%Y %H:%M}   "
-                f"Валюта: {purchase.currency}   "
-                f"Курс: {purchase.exchange_rate}"
+            self.cancelled_at = purchase.cancelled_at if purchase.status == "cancelled" else None
+            self.cancellation_reason = (
+                purchase.cancellation_reason if purchase.status == "cancelled" else None
             )
 
-            if purchase.status == "cancelled":
-                self.cancelled_at = purchase.cancelled_at
-                self.cancellation_reason = purchase.cancellation_reason
-            else:
-                self.cancelled_at = None
-                self.cancellation_reason = None
+            supplier_text = purchase.supplier_name or "Görkezilmedik"
+            self.info_label.setText(
+                f"Sene: {purchase.purchase_date:%d.%m.%Y %H:%M}   |   "
+                f"Üpjün ediji: {supplier_text}   |   "
+                f"Walýuta: {purchase.currency}   |   "
+                f"Kurs: {purchase.exchange_rate}"
+            )
 
             items = session.execute(
                 select(PurchaseItem, Product.name)
@@ -781,43 +925,27 @@ class PurchaseDetailsDialog(QDialog):
             ).all()
 
             item_rows = [
-                (
-                    name,
-                    item.quantity,
-                    money(item.unit_cost),
-                    money(item.total_cost),
-                )
+                (name, item.quantity, money_str(item.unit_cost), money_str(item.total_cost))
                 for item, name in items
             ]
-
             payment_rows = [
                 (
-                    payment.payment_date.strftime("%d.%m.%Y %H:%M"),
-                    payment.currency,
-                    money(payment.amount),
-                    money(payment.exchange_rate),
+                    p.payment_date.strftime("%d.%m.%Y %H:%M"),
+                    p.currency,
+                    money_str(p.amount),
+                    money_str(p.exchange_rate),
                 )
-                for payment in payments
+                for p in payments
             ]
-
             refund_rows = [
                 (
-                    refund.refund_date.strftime("%d.%m.%Y %H:%M"),
-                    refund.currency,
-                    money(refund.amount),
-                    refund.description or "—",
+                    r.refund_date.strftime("%d.%m.%Y %H:%M"),
+                    r.currency,
+                    money_str(r.amount),
+                    r.description or "—",
                 )
-                for refund in refunds
+                for r in refunds
             ]
-
-            paid = Decimal("0.00")
-            for payment in payments:
-                paid += convert_currency(
-                    Decimal(str(payment.amount)),
-                    payment.currency,
-                    purchase.currency,
-                    Decimal(str(payment.exchange_rate)),
-                )
 
         fill_table(self.items_table, item_rows)
         fill_table(self.payments_table, payment_rows)
@@ -825,91 +953,48 @@ class PurchaseDetailsDialog(QDialog):
 
         if self.status == "cancelled":
             debt = get_supplier_debt(self.purchase_id)
-
-            self.status_label.setText("Аннулирована")
+            self.status_label.setText("Status: Ýatyryldy")
             self.status_label.setStyleSheet(
-                "font-weight: 700; color: #737B86; "
-                "background: #F0F1F3; padding: 8px 12px; "
-                "border-radius: 8px;"
+                "font-weight: 700; color: #737B86; background: #F0F1F3; padding: 8px 12px; border-radius: 8px;"
             )
-
-            self.balance_label.setText(
-                f"Задолженность поставщика: "
-                f"{money(debt)} {self.currency}"
-            )
+            self.balance_label.setText(f"Üpjün edijiniň bergisi: {money_str(debt)} {self.currency}")
             self.balance_label.setStyleSheet(
-                f"font-size: 16pt; font-weight: 700; color: {theme.RED};"
+                f"font-size: 15pt; font-weight: 700; color: {theme.RED};"
             )
-
-            cancelled_text = "Дата аннулирования: "
+            cancelled_text = "Ýatyrylan senesi: "
             if self.cancelled_at:
-                cancelled_text += (
-                    self.cancelled_at.strftime("%d.%m.%Y %H:%M")
-                )
-            cancelled_text += (
-                f"\nПричина: {self.cancellation_reason or '—'}"
-            )
+                cancelled_text += self.cancelled_at.strftime("%d.%m.%Y %H:%M")
+            cancelled_text += f"   |   Sebäbi: {self.cancellation_reason or '—'}"
             self.cancellation_label.setText(cancelled_text)
 
             self.payment_section.hide()
             self.cancel_purchase_button.hide()
             self.refund_section.show()
-
             self.refund_hint.setText(
-                f"Поставщик должен вернуть: {money(debt)} "
-                f"{self.currency}. Возвраты могут быть частичными."
+                f"Üpjün ediji gaýtarmaly: {money_str(debt)} {self.currency}. Gaýtarmalar bölekleýin bolup biler."
             )
             self.refund_button.setEnabled(debt > 0)
-
         else:
             balance = get_purchase_balance(self.purchase_id)
-
-            self.status_label.setText(
-                "Оплачено" if balance == 0 else "Активная закупка"
-            )
+            self.status_label.setText("Status: Tölendi" if balance == 0 else "Status: Işjeň alyş")
             self.status_label.setStyleSheet(
-                f"font-weight: 700; color: {theme.GREEN}; "
-                "background: #EAF7EF; padding: 8px 12px; "
-                "border-radius: 8px;"
+                f"font-weight: 700; color: {theme.GREEN}; background: #EAF7EF; padding: 8px 12px; border-radius: 8px;"
             )
-
-            self.balance_label.setText(
-                f"Остаток долга магазина: "
-                f"{money(balance)} {self.currency}"
-            )
+            self.balance_label.setText(f"Dükanyň galan bergisi: {money_str(balance)} {self.currency}")
             self.balance_label.setStyleSheet(
-                f"font-size: 16pt; font-weight: 700; color: {theme.ACCENT};"
+                f"font-size: 15pt; font-weight: 700; color: {theme.ACCENT};"
             )
-
             self.cancellation_label.clear()
             self.payment_section.show()
             self.cancel_purchase_button.show()
             self.refund_section.hide()
-
             self.payment_rate.setValue(float(self.document_rate))
 
-        self._update_table_height(self.items_table, 170)
-        self._update_table_height(self.payments_table, 135)
-        self._update_table_height(self.refunds_table, 130)
-
-    @staticmethod
-    def _update_table_height(table, maximum):
-        row_height = table.verticalHeader().defaultSectionSize()
-        header_height = table.horizontalHeader().height()
-        height = header_height + table.rowCount() * row_height + 4
-        table.setFixedHeight(min(maximum, max(65, height)))
-
-    def _add_payment(self):
+    def _add_payment(self) -> None:
         amount = Decimal(str(self.payment_amount.value()))
-
         if amount <= 0:
-            QMessageBox.warning(
-                self,
-                "Некорректная сумма",
-                "Сумма платежа должна быть больше нуля.",
-            )
+            QMessageBox.warning(self, "Nädogry mukdar", "Töleg mukdary noldan uly bolmaly.")
             return
-
         try:
             add_purchase_payment(
                 purchase_id=self.purchase_id,
@@ -919,85 +1004,47 @@ class PurchaseDetailsDialog(QDialog):
             )
             self.payment_amount.setValue(0)
             self._load_data()
-
         except (ValueError, TypeError) as error:
-            QMessageBox.warning(self, "Проверь данные", str(error))
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(error))
         except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка платежа",
-                f"Не удалось добавить платёж:\n{error}",
-            )
+            QMessageBox.critical(self, "Töleg ýalňyşlygy", f"Tölegi goşup bolmady:\n{error}")
 
-    def _cancel_purchase(self):
+    def _cancel_purchase(self) -> None:
         reason, accepted = QInputDialog.getText(
-            self,
-            "Аннулирование закупки",
-            "Укажи причину аннулирования:",
+            self, "Alyşy ýatyrmak", "Ýatyrmagyň sebäbini görkeziň:"
         )
-
         if not accepted:
             return
-
         if not reason.strip():
-            QMessageBox.warning(
-                self,
-                "Не указана причина",
-                "Для аннулирования необходимо указать причину.",
-            )
+            QMessageBox.warning(self, "Sebäp görkezilmedik", "Ýatyrmak üçin sebäbini görkezmek hökmany.")
             return
 
         confirmation = QMessageBox.question(
             self,
-            "Подтверждение аннулирования",
-            "Аннулировать закупку?\n\n"
-            "Товары будут списаны со склада. "
-            "Неоплаченный долг магазина будет обнулён, "
-            "а уже выплаченные деньги станут задолженностью "
-            "поставщика перед магазином.\n\n"
-            "Это действие нельзя отменить.",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
+            "Ýatyrmagy tassyklamak",
+            "Alyşy ýatyrmalymy?\n\n"
+            "Harytlar skladdan aýrylar. Dükanyň tölenmedik bergisi nollanar, "
+            "eýýäm tölenen pul bolsa üpjün edijiniň dükana bergisi bolar.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-
         if confirmation != QMessageBox.StandardButton.Yes:
             return
 
         try:
-            cancel_purchase(
-                self.purchase_id,
-                reason,
-            )
-
-            QMessageBox.information(
-                self,
-                "Закупка аннулирована",
-                "Закупка успешно аннулирована.",
-            )
+            cancel_purchase(self.purchase_id, reason)
+            QMessageBox.information(self, "Alyş ýatyryldy", "Alyş üstünlikli ýatyryldy.")
             self._load_data()
-
         except (ValueError, TypeError) as error:
-            QMessageBox.warning(
-                self,
-                "Невозможно аннулировать закупку",
-                str(error),
-            )
+            QMessageBox.warning(self, "Alyşy ýatyryp bolmaýar", str(error))
         except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка",
-                f"Не удалось аннулировать закупку:\n{error}",
-            )
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Alyşy ýatyryp bolmady:\n{error}")
 
-    def _open_refund(self):
+    def _open_refund(self) -> None:
         dialog = RefundDialog(self.currency, self)
-
         if not dialog.exec():
             return
-
         data = dialog.get_data()
-
         try:
             add_purchase_refund(
                 purchase_id=self.purchase_id,
@@ -1006,253 +1053,240 @@ class PurchaseDetailsDialog(QDialog):
                 exchange_rate=data["exchange_rate"],
                 description=data["description"],
             )
-
-            QMessageBox.information(
-                self,
-                "Возврат зарегистрирован",
-                "Деньги добавлены в кассовый журнал.",
-            )
+            QMessageBox.information(self, "Gaýtarma hasaba alyndy", "Pul kassa žurnalyna goşuldy.")
             self._load_data()
-
         except (ValueError, TypeError) as error:
-            QMessageBox.warning(
-                self,
-                "Невозможно зарегистрировать возврат",
-                str(error),
-            )
+            QMessageBox.warning(self, "Gaýtarmany hasaba alyp bolmaýar", str(error))
         except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка возврата",
-                f"Не удалось зарегистрировать возврат:\n{error}",
-            )
+            QMessageBox.critical(self, "Gaýtarma ýalňyşlygy", f"Gaýtarmany hasaba alyp bolmady:\n{error}")
 
 
 class PurchasePage(QWidget):
-    """Журнал закупок."""
+    """Alyşlar žurnaly."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.setObjectName("page")
-        self.purchases = []
+        self.purchases: list[dict] = []
 
         self._build_ui()
         self._load_data()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(18)
+        root.setSpacing(16)
 
         header = QHBoxLayout()
-
-        title = QLabel("Закупки")
+        title = QLabel("Alyşlar")
         title.setObjectName("pageTitle")
         header.addWidget(title)
         header.addStretch()
 
-        self.count_label = QLabel("Документов: 0")
+        self.count_label = QLabel("Resminamalar: 0")
         self.count_label.setObjectName("mutedText")
         header.addWidget(self.count_label)
 
-        refresh_button = styled_button("↻  Обновить")
+        refresh_button = make_button("↻ Täzele")
         refresh_button.clicked.connect(self._load_data)
         header.addWidget(refresh_button)
 
-        add_button = styled_button("+ Новая закупка", True)
+        add_button = make_button("+ Täze alyş", "primary")
         add_button.clicked.connect(self._open_new_purchase)
         header.addWidget(add_button)
-
         root.addLayout(header)
 
         stats = QHBoxLayout()
         stats.setSpacing(14)
-
         self.total_value = QLabel("0")
         self.debt_usd_value = QLabel("0.00 USD")
         self.debt_tmt_value = QLabel("0.00 TMT")
 
-        stats.addWidget(self._stat_card(
-            "Всего закупок",
-            self.total_value,
-            theme.NAVY,
-        ))
-        stats.addWidget(self._stat_card(
-            "Долг в USD",
-            self.debt_usd_value,
-            theme.ACCENT,
-        ))
-        stats.addWidget(self._stat_card(
-            "Долг в TMT",
-            self.debt_tmt_value,
-            theme.RED,
-        ))
-
+        stats.addWidget(make_stat_card("Jemi alyşlar", self.total_value, theme.NAVY))
+        stats.addWidget(make_stat_card("Üpjün edijilere USD bergi", self.debt_usd_value, theme.ACCENT))
+        stats.addWidget(make_stat_card("Üpjün edijilere TMT bergi", self.debt_tmt_value, theme.RED))
         root.addLayout(stats)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText(
-            "Поиск по номеру закупки или примечанию..."
-        )
+        self.search_input.setPlaceholderText("Alyş belgisi, üpjün ediji ýa-da bellik boýunça gözleg...")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setMinimumHeight(42)
+        self.search_input.setMinimumHeight(40)
         self.search_input.textChanged.connect(self._filter_data)
         root.addWidget(self.search_input)
 
-        self.table = QTableWidget(0, 7)
+        self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels([
             "№",
-            "Дата",
-            "Валюта",
-            "Сумма",
-            "Оплачено",
-            "Остаток долга",
-            "Состояние",
+            "Sene",
+            "Üpjün ediji",
+            "Walýuta",
+            "Jemi",
+            "Tölendi",
+            "Galan bergi",
+            "Ýagdaýy",
         ])
-        configure_table(self.table)
-        self.table.horizontalHeader().setSectionResizeMode(
-            1,
-            self.table.horizontalHeader().ResizeMode.Stretch,
-        )
+        configure_table(self.table, stretch_col=2, row_height=46)
         self.table.cellDoubleClicked.connect(self._open_selected)
         root.addWidget(self.table, 1)
 
-        hint = QLabel("Дважды щёлкни по закупке, чтобы открыть документ.")
+        actions = QHBoxLayout()
+        open_btn = make_button("📄 Saýlanan alyşy aç", "primary")
+        open_btn.clicked.connect(self._open_selected_button)
+        actions.addWidget(open_btn)
+
+        repeat_btn = make_button("🔁 Saýlanan alyşy gaýtala")
+        repeat_btn.clicked.connect(self._repeat_selected_purchase)
+        actions.addWidget(repeat_btn)
+
+        actions.addStretch()
+
+        hint = QLabel("Resminamany açmak, töleg geçirmek ýa-da ýatyrmak üçin alyşy iki gezek basyň.")
         hint.setObjectName("mutedText")
-        root.addWidget(hint)
+        actions.addWidget(hint)
+        root.addLayout(actions)
 
-    def _stat_card(self, title: str, value: QLabel, color: str) -> Card:
-        card = Card(margins=(18, 14, 18, 14), spacing=6)
-
-        label = QLabel(title)
-        label.setObjectName("mutedText")
-        value.setStyleSheet(
-            f"font-size: 20pt; font-weight: 700; color: {color};"
-        )
-
-        card.body.addWidget(label)
-        card.body.addWidget(value)
-        return card
-
-    def _load_data(self):
+    def _load_data(self) -> None:
         with SessionLocal() as session:
             purchases = session.scalars(
                 select(Purchase).order_by(Purchase.purchase_date.desc())
             ).all()
-
             self.purchases = [
                 {
-                    "id": purchase.id,
-                    "date": purchase.purchase_date,
-                    "currency": purchase.currency,
-                    "total": Decimal(str(purchase.total_amount)),
-                    "note": purchase.note or "",
-                    "status": purchase.status,
+                    "id": p.id,
+                    "date": p.purchase_date,
+                    "supplier": p.supplier_name or "—",
+                    "currency": p.currency,
+                    "total": Decimal(str(p.total_amount)),
+                    "note": p.note or "",
+                    "status": p.status,
                 }
-                for purchase in purchases
+                for p in purchases
             ]
 
         debt_usd = Decimal("0.00")
         debt_tmt = Decimal("0.00")
-
         for purchase in self.purchases:
             purchase["balance"] = get_purchase_balance(purchase["id"])
-
             if purchase["status"] == "cancelled":
                 purchase["paid"] = Decimal("0.00")
             else:
-                purchase["paid"] = (
-                    purchase["total"] - purchase["balance"]
-                )
-
+                purchase["paid"] = purchase["total"] - purchase["balance"]
                 if purchase["currency"] == "USD":
                     debt_usd += purchase["balance"]
                 else:
                     debt_tmt += purchase["balance"]
 
         self.total_value.setText(str(len(self.purchases)))
-        self.debt_usd_value.setText(f"{money(debt_usd)} USD")
-        self.debt_tmt_value.setText(f"{money(debt_tmt)} TMT")
-        self.count_label.setText(
-            f"Документов: {len(self.purchases)}"
-        )
-
+        self.debt_usd_value.setText(f"{money_str(debt_usd)} USD")
+        self.debt_tmt_value.setText(f"{money_str(debt_tmt)} TMT")
+        self.count_label.setText(f"Resminamalar: {len(self.purchases)}")
         self._filter_data()
 
-    def _filter_data(self, *_args):
+    def _filter_data(self, *_args) -> None:
         query = self.search_input.text().strip().lower()
-
         filtered = [
-            purchase
-            for purchase in self.purchases
+            p
+            for p in self.purchases
             if (
-                query in str(purchase["id"]).lower()
-                or query in purchase["note"].lower()
+                query in str(p["id"]).lower()
+                or query in p["note"].lower()
+                or query in p["supplier"].lower()
             )
         ]
 
         self.table.setRowCount(len(filtered))
-
         for row, purchase in enumerate(filtered):
             balance = purchase["balance"]
             cancelled = purchase["status"] == "cancelled"
 
             if cancelled:
-                status = "Аннулирована"
+                status = "Ýatyryldy"
                 status_color = "#858B94"
                 paid_text = "—"
                 balance_text = "—"
             else:
-                status = "Оплачено" if balance == 0 else "Есть долг"
-                status_color = (
-                    theme.GREEN if balance == 0 else theme.ACCENT
-                )
-                paid_text = money(purchase["paid"])
-                balance_text = money(balance)
+                status = "Tölendi" if balance == 0 else "Bergi bar"
+                status_color = theme.GREEN if balance == 0 else theme.ACCENT
+                paid_text = money_str(purchase["paid"])
+                balance_text = money_str(balance)
 
             values = [
                 str(purchase["id"]),
                 purchase["date"].strftime("%d.%m.%Y %H:%M"),
+                purchase["supplier"],
                 purchase["currency"],
-                money(purchase["total"]),
+                money_str(purchase["total"]),
                 paid_text,
                 balance_text,
                 status,
             ]
-
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-
-                if column in (0, 2, 3, 4, 5):
+                if column in (0, 3, 4, 5, 6):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                if column == 6:
+                if column == 7:
                     cell.setForeground(QColor("white"))
                     cell.setBackground(QColor(status_color))
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                if cancelled and column != 6:
+                if cancelled and column != 7:
                     cell.setForeground(QColor("#858B94"))
-
                 self.table.setItem(row, column, cell)
 
-            self.table.item(row, 0).setData(
-                Qt.ItemDataRole.UserRole,
-                purchase["id"],
-            )
+            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, purchase["id"])
 
-    def _open_new_purchase(self):
+    def _open_new_purchase(self) -> None:
         dialog = PurchaseDialog(self)
-
         if dialog.exec():
             self._load_data()
 
-    def _open_selected(self, row: int, _column: int):
-        item = self.table.item(row, 0)
+    def _open_selected_button(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Alyş saýlaň", "Tablisadan alyş setirini saýlaň.")
+            return
+        self._open_selected(row, 0)
 
+    def _repeat_selected_purchase(self) -> None:
+        row = self.table.currentRow()
+        if row < 0 or self.table.item(row, 0) is None:
+            QMessageBox.information(
+                self,
+                "Alyş saýlaň",
+                "Gaýtalamak isleýän alyşyňyzy tablisadan saýlaň.",
+            )
+            return
+        purchase_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        with SessionLocal() as session:
+            pur = session.get(Purchase, purchase_id)
+            if pur is None:
+                return
+            p_items = session.execute(
+                select(PurchaseItem, Product.name)
+                .join(Product, PurchaseItem.product_id == Product.id)
+                .where(PurchaseItem.purchase_id == pur.id, Product.is_active.is_(True))
+            ).all()
+            init_data = {
+                "supplier_name": pur.supplier_name or "",
+                "currency": pur.currency,
+                "exchange_rate": Decimal(str(pur.exchange_rate)),
+                "items": [
+                    {
+                        "product_id": pi.product_id,
+                        "name": p_name,
+                        "quantity": pi.quantity,
+                        "unit_cost": Decimal(str(pi.unit_cost)),
+                    }
+                    for pi, p_name in p_items
+                ],
+            }
+        dlg = PurchaseDialog(self, initial_data=init_data)
+        if dlg.exec():
+            self._load_data()
+
+    def _open_selected(self, row: int, _column: int) -> None:
+        item = self.table.item(row, 0)
         if item is None:
             return
-
         purchase_id = item.data(Qt.ItemDataRole.UserRole)
         dialog = PurchaseDetailsDialog(purchase_id, self)
         dialog.exec()

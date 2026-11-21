@@ -1,136 +1,65 @@
-
 from PySide6.QtWidgets import (
     QDialog,
     QFormLayout,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
     QVBoxLayout,
 )
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.database.engine import SessionLocal
-from app.models.category import Category
+from app.repositories.product_repository import create_category
+from app.ui import theme
+from app.ui.widgets import make_button
 
 
 class CategoryDialog(QDialog):
-    """Окно добавления категории."""
+    """Окно создания новой категории товаров."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+        self.setWindowTitle("Täze kategoriýa")
+        self.setMinimumWidth(380)
+        self.setStyleSheet(theme.STYLE)
+        self.created_category_id: int | None = None
 
-        self.setWindowTitle("Новая категория")
-        self.setMinimumWidth(350)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(14)
 
-        self.created_category_id = None
+        title = QLabel("Kategoriýa döretmek")
+        title.setObjectName("cardTitle")
+        root.addWidget(title)
 
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #F6F7F9;
-                color: #1D2939;
-            }
-            QLineEdit {
-                background-color: white;
-                color: #1D2939;
-                border: 1px solid #E8EBF0;
-                border-radius: 8px;
-                padding: 8px;
-            }
-            QPushButton {
-                background-color: #F58A2E;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 9px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background-color: #E87922;
-            }
-        """)
-
-        layout = QVBoxLayout(self)
         form = QFormLayout()
-
+        form.setSpacing(10)
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Например, Смартфоны")
+        self.name_input.setPlaceholderText("Mysal: Smartfonlar, Çehollar, Zarýad enjamlary")
+        form.addRow("Kategoriýanyň ady *", self.name_input)
+        root.addLayout(form)
 
-        form.addRow("Название категории *", self.name_input)
-        layout.addLayout(form)
-
-        self.save_button = QPushButton("Создать категорию")
-        self.cancel_button = QPushButton("Отмена")
-
-        self.save_button.clicked.connect(self._save_category)
-        self.cancel_button.clicked.connect(self.reject)
-
-        layout.addWidget(self.save_button)
-        layout.addWidget(self.cancel_button)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = make_button("Ýatyr")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = make_button("Kategoriýa döret", "primary")
+        save_btn.clicked.connect(self._save_category)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        root.addLayout(buttons)
 
     def _save_category(self) -> None:
-        name = self.name_input.text().strip()
-
-        if not name:
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Введите название категории.",
-            )
-            return
-
         try:
-            with SessionLocal() as session:
-                existing = session.scalar(
-                    select(Category).where(
-                        func.lower(Category.name) == name.lower()
-                    )
-                )
-
-                if existing:
-                    QMessageBox.warning(
-                        self,
-                        "Категория существует",
-                        "Категория с таким названием уже есть.",
-                    )
-                    return
-
-                codes = session.scalars(
-                    select(Category.code)
-                ).all()
-
-                numbers = [
-                    int(code.replace("CAT_", ""))
-                    for code in codes
-                    if code.startswith("CAT_")
-                    and code.replace("CAT_", "").isdigit()
-                ]
-
-                next_number = max(numbers, default=0) + 1
-                code = f"CAT_{next_number:03d}"
-
-                category = Category(
-                    name=name,
-                    code=code,
-                )
-
-                session.add(category)
-                session.commit()
-                session.refresh(category)
-
-                self.created_category_id = category.id
-
+            category = create_category(self.name_input.text())
+            self.created_category_id = category.id
             QMessageBox.information(
                 self,
-                "Готово",
-                f"Категория «{name}» создана.",
+                "Taýýar",
+                f"«{category.name}» kategoriýasy üstünlikli döredildi.",
             )
-
             self.accept()
-
-        except IntegrityError:
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Не удалось создать категорию. Возможно, такой код уже существует.",
-            )
+        except ValueError as err:
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
+        except SQLAlchemyError as err:
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Kategoriýa döredip bolmady:\n{err}")

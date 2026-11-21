@@ -1,211 +1,759 @@
-from decimal import Decimal
-from PySide6.QtCore import Qt
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QWidget,
-    QVBoxLayout,
+    QButtonGroup,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
-    QLineEdit,
-    QComboBox,
-    QDoubleSpinBox,
-    QMessageBox,
-    QInputDialog,
     QTabWidget,
-    QHeaderView,
-    QGridLayout,
+    QVBoxLayout,
+    QWidget,
 )
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.engine import SessionLocal
 from app.models.product import Product
-from app.models.stock_item import StockItem
-from app.models.cash_register import CashRegister
 from app.models.sale import Sale
 from app.models.sale_item import SaleItem
-from app.services.sales_service import SalesService
+from app.models.sale_payment import SalePayment
+from app.models.stock_item import StockItem
+from app.services.sales_service import SalesService, _convert_currency
+from app.services.settings_service import SettingsService
 from app.ui import theme
-from app.ui.widgets import Card
+from app.ui.receipt_printer import export_sale_receipt_pdf
+from app.ui.selection_dialogs import InventorySelectorDialog
+from app.ui.widgets import (
+    Card,
+    configure_table,
+    make_button,
+    money_str,
+    style_combo,
+)
 
 
-def money_str(value) -> str:
-    try:
-        return f"{Decimal(str(value)):,.2f}"
-    except Exception:
-        return "0.00"
+class HeldCartsDialog(QDialog):
+    """Окно просмотра и восстановления отложенных чеков (черновиков продаж)."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Garaşýan çekler")
+        self.setMinimumSize(640, 400)
+        self.setStyleSheet(theme.STYLE)
+        self.carts = SettingsService.get_held_carts()
+        self.selected_cart: dict | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 18)
+        root.setSpacing(12)
+
+        title = QLabel("Garaşýan çekler (garalamalar)")
+        title.setObjectName("cardTitle")
+        root.addWidget(title)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["Wagt", "Müşderi / Bellik", "Setirler", "Jemi"])
+        configure_table(self.table, stretch_col=1, row_height=42)
+        self.table.cellDoubleClicked.connect(lambda _r, _c: self._restore_selected())
+        root.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        del_btn = make_button("Garalamany poz", "danger")
+        del_btn.clicked.connect(self._delete_selected)
+        footer.addWidget(del_btn)
+        footer.addStretch()
+
+        close_btn = make_button("Ýap")
+        close_btn.clicked.connect(self.reject)
+        restore_btn = make_button("Çeki kassa gaýtar", "primary")
+        restore_btn.clicked.connect(self._restore_selected)
+        footer.addWidget(close_btn)
+        footer.addWidget(restore_btn)
+        root.addLayout(footer)
+
+        self._refresh_table()
+
+    def _refresh_table(self) -> None:
+        self.table.setRowCount(len(self.carts))
+        for r, c in enumerate(self.carts):
+            items = c.get("items", [])
+            total = sum(
+                Decimal(str(i.get("quantity", 1))) * Decimal(str(i.get("unit_price", "0")))
+                for i in items
+            )
+            cur = c.get("currency", "TMT")
+            label = c.get("customer_name") or c.get("comment") or "Atsyz müşderi"
+            vals = [
+                c.get("created_at", "—"),
+                label,
+                f"{len(items)} setir",
+                f"{money_str(total)} {cur}",
+            ]
+            for col, v in enumerate(vals):
+                cell = QTableWidgetItem(v)
+                if col in (0, 2, 3):
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(r, col, cell)
+        if self.carts:
+            self.table.selectRow(0)
+
+    def _restore_selected(self) -> None:
+        row = self.table.currentRow()
+        if not (0 <= row < len(self.carts)):
+            return
+        self.selected_cart = self.carts.pop(row)
+        SettingsService.save_held_carts(self.carts)
+        self.accept()
+
+    def _delete_selected(self) -> None:
+        row = self.table.currentRow()
+        if not (0 <= row < len(self.carts)):
+            return
+        self.carts.pop(row)
+        SettingsService.save_held_carts(self.carts)
+        self._refresh_table()
 
 
-def configure_table(table: QTableWidget) -> None:
-    table.setStyleSheet(f"""
-        QTableWidget {{
-            background: white;
-            color: {theme.TEXT};
-            border: 1px solid {theme.BORDER};
-            border-radius: 12px;
-            gridline-color: transparent;
-            selection-background-color: {theme.ACCENT_BG};
-            selection-color: {theme.TEXT};
-            alternate-background-color: #FAFBFC;
-            outline: none;
-        }}
-        QHeaderView::section {{
-            background: #F8F9FB;
-            color: {theme.MUTED};
-            padding: 11px 10px;
-            border: none;
-            border-bottom: 1px solid {theme.BORDER};
-            font-weight: 600;
-        }}
-        QTableWidget::item {{
-            padding: 10px;
-            border: none;
-            border-bottom: 1px solid #F0F1F3;
-        }}
-        QTableWidget::item:selected {{
-            background: {theme.ACCENT_BG};
-            color: {theme.TEXT};
-        }}
-    """)
-    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-    table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-    table.setAlternatingRowColors(True)
-    table.setShowGrid(False)
-    table.verticalHeader().setVisible(False)
-    table.verticalHeader().setDefaultSectionSize(46)
+class SaleDetailsDialog(QDialog):
+    """Просмотр чека продажи, печать PDF, история платежей, долг клиента и отмена."""
+
+    def __init__(self, sale_id: int, parent=None) -> None:
+        super().__init__(parent)
+        self.sale_id = sale_id
+
+        self.setWindowTitle(f"Çek №{sale_id}")
+        self.resize(860, 720)
+        self.setMinimumSize(700, 520)
+        self.setStyleSheet(theme.STYLE)
+
+        self._build_ui()
+        self._load_data()
+
+    def _build_ui(self) -> None:
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("page")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(24, 20, 24, 16)
+        root.setSpacing(12)
+
+        top_bar = QHBoxLayout()
+        self.title_label = QLabel()
+        self.title_label.setObjectName("pageTitle")
+        top_bar.addWidget(self.title_label, 1)
+
+        print_btn = make_button("🖨 Çap et / PDF çek", "primary")
+        print_btn.clicked.connect(lambda: export_sale_receipt_pdf(self.sale_id, self))
+        top_bar.addWidget(print_btn)
+        root.addLayout(top_bar)
+
+        self.info_label = QLabel()
+        self.info_label.setObjectName("mutedText")
+        self.info_label.setWordWrap(True)
+        root.addWidget(self.info_label)
+
+        self.status_label = QLabel()
+        root.addWidget(self.status_label)
+
+        self.debt_label = QLabel()
+        root.addWidget(self.debt_label)
+
+        self.cancel_info_label = QLabel()
+        self.cancel_info_label.setObjectName("mutedText")
+        self.cancel_info_label.setWordWrap(True)
+        root.addWidget(self.cancel_info_label)
+
+        items_title = QLabel("Çekiň setirleri")
+        items_title.setObjectName("cardTitle")
+        root.addWidget(items_title)
+
+        self.items_table = QTableWidget(0, 6)
+        self.items_table.setHorizontalHeaderLabels([
+            "Haryt", "IMEI", "Sany", "Baha", "Öz bahasy", "Jemi",
+        ])
+        configure_table(self.items_table, stretch_col=0, row_height=42)
+        self.items_table.setMinimumHeight(130)
+        root.addWidget(self.items_table)
+
+        payments_title = QLabel("Tölegler we hasaplaşyklar taryhy")
+        payments_title.setObjectName("cardTitle")
+        root.addWidget(payments_title)
+
+        self.payments_table = QTableWidget(0, 5)
+        self.payments_table.setHorizontalHeaderLabels([
+            "Sene", "Görnüş", "Walýuta", "Jemi", "Kurs",
+        ])
+        configure_table(self.payments_table, stretch_col=1, row_height=40)
+        self.payments_table.setMinimumHeight(110)
+        root.addWidget(self.payments_table)
+
+        self.pay_debt_section = QWidget()
+        p_layout = QVBoxLayout(self.pay_debt_section)
+        p_layout.setContentsMargins(0, 0, 0, 0)
+        p_layout.setSpacing(8)
+
+        p_title = QLabel("Müşderiniň bergisinden töleg kabul etmek")
+        p_title.setObjectName("cardTitle")
+        p_layout.addWidget(p_title)
+
+        p_row = QHBoxLayout()
+        self.pay_curr_combo = style_combo(QComboBox())
+        self.pay_curr_combo.addItems(["TMT", "USD"])
+        self.pay_amt_spin = QDoubleSpinBox()
+        self.pay_amt_spin.setRange(0, 10000000)
+        self.pay_amt_spin.setDecimals(2)
+        self.pay_rate_spin = QDoubleSpinBox()
+        self.pay_rate_spin.setRange(0.0001, 100000)
+        self.pay_rate_spin.setDecimals(4)
+        self.pay_rate_spin.setValue(19.5)
+
+        add_pay_btn = make_button("Tölegi kabul et", "primary")
+        add_pay_btn.clicked.connect(self._add_customer_payment)
+
+        p_row.addWidget(QLabel("Walýuta:"))
+        p_row.addWidget(self.pay_curr_combo)
+        p_row.addWidget(QLabel("Jemi:"))
+        p_row.addWidget(self.pay_amt_spin, 1)
+        p_row.addWidget(QLabel("Kurs:"))
+        p_row.addWidget(self.pay_rate_spin)
+        p_row.addWidget(add_pay_btn)
+        p_layout.addLayout(p_row)
+        root.addWidget(self.pay_debt_section)
+
+        self.settle_store_debt_section = QWidget()
+        s_layout = QVBoxLayout(self.settle_store_debt_section)
+        s_layout.setContentsMargins(0, 0, 0, 0)
+        s_layout.setSpacing(8)
+
+        s_title = QLabel("Dükanyň müşderä bergisini tölemek (ýatyrylan çek)")
+        s_title.setObjectName("cardTitle")
+        s_layout.addWidget(s_title)
+
+        s_row = QHBoxLayout()
+        self.settle_curr_combo = style_combo(QComboBox())
+        self.settle_curr_combo.addItems(["TMT", "USD"])
+        self.settle_amt_spin = QDoubleSpinBox()
+        self.settle_amt_spin.setRange(0, 10000000)
+        self.settle_amt_spin.setDecimals(2)
+        self.settle_rate_spin = QDoubleSpinBox()
+        self.settle_rate_spin.setRange(0.0001, 100000)
+        self.settle_rate_spin.setDecimals(4)
+        self.settle_rate_spin.setValue(19.5)
+
+        settle_btn = make_button("Tölegi hasaba al", "primary")
+        settle_btn.clicked.connect(self._settle_store_debt)
+
+        s_row.addWidget(QLabel("Walýuta:"))
+        s_row.addWidget(self.settle_curr_combo)
+        s_row.addWidget(QLabel("Jemi:"))
+        s_row.addWidget(self.settle_amt_spin, 1)
+        s_row.addWidget(QLabel("Kurs:"))
+        s_row.addWidget(self.settle_rate_spin)
+        s_row.addWidget(settle_btn)
+        s_layout.addLayout(s_row)
+        root.addWidget(self.settle_store_debt_section)
+
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+
+        footer_bar = QWidget()
+        footer_bar.setStyleSheet(f"background: white; border-top: 1px solid {theme.BORDER};")
+        footer = QHBoxLayout(footer_bar)
+        footer.setContentsMargins(24, 12, 24, 12)
+        footer.addStretch()
+
+        self.cancel_sale_btn = make_button("Çeki ýatyr", "danger")
+        self.cancel_sale_btn.clicked.connect(self._cancel_sale)
+        close_btn = make_button("Ýap")
+        close_btn.clicked.connect(self.accept)
+
+        footer.addWidget(self.cancel_sale_btn)
+        footer.addWidget(close_btn)
+        outer.addWidget(footer_bar)
+
+    def _load_data(self) -> None:
+        with SessionLocal() as session:
+            sale = session.get(Sale, self.sale_id)
+            if sale is None:
+                QMessageBox.warning(self, "Tapylmady", "Çek tapylmady.")
+                self.reject()
+                return
+
+            self.title_label.setText(f"Çek {sale.receipt_number}")
+            customer_str = sale.customer_name or "Bölek müşderi"
+            if sale.customer_phone:
+                customer_str += f" ({sale.customer_phone})"
+
+            self.info_label.setText(
+                f"Sene: {sale.sale_date:%d.%m.%Y %H:%M}   |   "
+                f"Müşderi: {customer_str}   |   "
+                f"Walýuta: {sale.currency} (Kurs: {sale.exchange_rate})   |   "
+                f"Çekiň jemi: {money_str(sale.total_amount)} {sale.currency}"
+            )
+
+            self.pay_rate_spin.setValue(float(Decimal(str(sale.exchange_rate or 19.5))))
+            self.settle_rate_spin.setValue(float(Decimal(str(sale.exchange_rate or 19.5))))
+
+            item_rows = session.execute(
+                select(SaleItem, Product.name)
+                .join(Product, SaleItem.product_id == Product.id)
+                .where(SaleItem.sale_id == sale.id)
+            ).all()
+
+            self.items_table.setRowCount(len(item_rows))
+            for idx, (s_item, p_name) in enumerate(item_rows):
+                line_sum = Decimal(str(s_item.unit_price)) * s_item.quantity - Decimal(str(s_item.discount))
+                cost_txt = f"{money_str(s_item.unit_cost)} {s_item.cost_currency}"
+                vals = [
+                    p_name,
+                    s_item.imei or "—",
+                    str(s_item.quantity),
+                    f"{money_str(s_item.unit_price)} {s_item.currency}",
+                    cost_txt,
+                    f"{money_str(line_sum)} {s_item.currency}",
+                ]
+                for c, val in enumerate(vals):
+                    cell = QTableWidgetItem(val)
+                    if c >= 2:
+                        cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.items_table.setItem(idx, c, cell)
+
+            payments = session.scalars(
+                select(SalePayment)
+                .where(SalePayment.sale_id == sale.id)
+                .order_by(SalePayment.payment_date)
+            ).all()
+            self.payments_table.setRowCount(len(payments))
+            type_labels = {
+                "payment": "Müşderiniň tölegi",
+                "reversal": "Ýatyrmada yzyna gaýtarma",
+                "customer_debt_settlement": "Dükanyň bergisini ýapmak",
+            }
+            for idx, pay in enumerate(payments):
+                p_date = pay.payment_date.strftime("%d.%m.%Y %H:%M") if pay.payment_date else "—"
+                vals = [
+                    p_date,
+                    type_labels.get(pay.payment_type, pay.payment_type),
+                    pay.currency,
+                    money_str(pay.amount),
+                    f"{Decimal(str(pay.exchange_rate)):,.4f}",
+                ]
+                for c, val in enumerate(vals):
+                    cell = QTableWidgetItem(val)
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.payments_table.setItem(idx, c, cell)
+
+            customer_debt = SalesService.get_customer_debt(session, sale)
+            store_debt = SalesService.get_store_debt_to_customer(session, sale)
+            paid_amt = SalesService.get_sale_paid_amount(session, sale)
+
+            if sale.status == "cancelled":
+                self.status_label.setText("Status: Ýatyryldy")
+                self.status_label.setStyleSheet(
+                    "font-weight: 700; color: #737B86; background: #F0F1F3; padding: 8px 12px; border-radius: 8px;"
+                )
+                self.debt_label.setText(
+                    f"Dükanyň müşderä bergisi: {money_str(store_debt)} {sale.currency}"
+                )
+                self.debt_label.setStyleSheet(
+                    f"font-size: 15pt; font-weight: 700; color: {theme.RED if store_debt > 0 else theme.GREEN};"
+                )
+                c_date = sale.cancelled_at.strftime("%d.%m.%Y %H:%M") if sale.cancelled_at else "—"
+                self.cancel_info_label.setText(
+                    f"Ýatyrylan senesi: {c_date}   |   Sebäbi: {sale.cancellation_reason or '—'}"
+                )
+                self.pay_debt_section.hide()
+                self.cancel_sale_btn.hide()
+                self.settle_store_debt_section.setVisible(store_debt > Decimal("0.00"))
+            else:
+                self.status_label.setText(
+                    "Status: Doly tölendi"
+                    if customer_debt == Decimal("0.00")
+                    else f"Status: Bölekleýin töleg / Bergä (tölendi: {money_str(paid_amt)} {sale.currency})"
+                )
+                self.status_label.setStyleSheet(
+                    f"font-weight: 700; color: {theme.GREEN if customer_debt == 0 else theme.ACCENT}; "
+                    "background: #EAF7EF; padding: 8px 12px; border-radius: 8px;"
+                )
+                self.debt_label.setText(
+                    f"Müşderiniň galan bergisi: {money_str(customer_debt)} {sale.currency}"
+                )
+                self.debt_label.setStyleSheet(
+                    f"font-size: 15pt; font-weight: 700; color: {theme.ACCENT if customer_debt > 0 else theme.GREEN};"
+                )
+                self.cancel_info_label.clear()
+                self.pay_debt_section.setVisible(customer_debt > Decimal("0.00"))
+                self.settle_store_debt_section.hide()
+                self.cancel_sale_btn.show()
+
+    def _add_customer_payment(self) -> None:
+        amt = Decimal(f"{self.pay_amt_spin.value():.2f}")
+        if amt <= 0:
+            QMessageBox.warning(self, "Ýalňyşlyk", "Noldan uly töleg mukdaryny giriziň.")
+            return
+        try:
+            with SessionLocal() as session:
+                SalesService.add_sale_payment(
+                    session=session,
+                    sale_id=self.sale_id,
+                    currency=self.pay_curr_combo.currentText(),
+                    amount=amt,
+                    exchange_rate=Decimal(f"{self.pay_rate_spin.value():.4f}"),
+                )
+                session.commit()
+            self.pay_amt_spin.setValue(0)
+            self._load_data()
+            QMessageBox.information(self, "Taýýar", "Töleg üstünlikli kabul edildi.")
+        except (ValueError, TypeError, SQLAlchemyError) as e:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(e))
+
+    def _settle_store_debt(self) -> None:
+        amt = Decimal(f"{self.settle_amt_spin.value():.2f}")
+        if amt <= 0:
+            QMessageBox.warning(self, "Ýalňyşlyk", "Noldan uly töleg mukdaryny giriziň.")
+            return
+        try:
+            with SessionLocal() as session:
+                SalesService.settle_store_debt_to_customer(
+                    session=session,
+                    sale_id=self.sale_id,
+                    currency=self.settle_curr_combo.currentText(),
+                    amount=amt,
+                    exchange_rate=Decimal(f"{self.settle_rate_spin.value():.4f}"),
+                )
+                session.commit()
+            self.settle_amt_spin.setValue(0)
+            self._load_data()
+            QMessageBox.information(self, "Taýýar", "Müşderä bergi tölegi hasaba alyndy.")
+        except (ValueError, TypeError, SQLAlchemyError) as e:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(e))
+
+    def _cancel_sale(self) -> None:
+        reason, ok = QInputDialog.getText(self, "Çeki ýatyrmak", "Ýatyrmagyň sebäbini görkeziň:")
+        if not ok or not reason.strip():
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Ýatyrmagy tassyklamak",
+            "Satyş çekini ýatyrmalymy?\n\n"
+            "Harytlar sklada gaýdyp geler. Müşderiniň tölenmedik bergisi nollanar, "
+            "müşderiden eýýäm alnan pul bolsa dükanyň müşderä bergisi bolar.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            with SessionLocal() as session:
+                SalesService.cancel_sale(session, self.sale_id, reason)
+                session.commit()
+            self._load_data()
+            QMessageBox.information(self, "Ýatyryldy", "Satyş üstünlikli ýatyryldy.")
+        except (ValueError, TypeError, SQLAlchemyError) as e:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
 
 class SalesPage(QWidget):
-    """Страница «Продажи и Касса»."""
+    """Скоростная страница «Продажи и Касса» — продажа в 1 ввод цены торга с автооплатой и расчётом прибыли."""
 
-    def __init__(self, parent=None):
+    COL_ID = 0
+    COL_NAME = 1
+    COL_IMEI = 2
+    COL_QTY = 3
+    COL_COST = 4
+    COL_PRICE = 5
+    COL_SUM_PROFIT = 6
+
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.cart_items = []
+        self.setObjectName("page")
+        self.cart_items: list[dict] = []
+        self.register_map: dict[str, int] = {}
+        self.auto_full_payment: bool = True
+        self._updating_table: bool = False
+        self.last_created_sale_id: int | None = None
+
         self._build_ui()
+        self._setup_shortcuts()
         self.refresh_data()
 
-    def _build_ui(self):
+    def _setup_shortcuts(self) -> None:
+        QShortcut(QKeySequence("F2"), self, activated=lambda: self._open_inventory_selector(""))
+        QShortcut(QKeySequence("F3"), self, activated=self._focus_search)
+        QShortcut(QKeySequence("F4"), self, activated=self._edit_selected_price)
+        QShortcut(QKeySequence("F9"), self, activated=self._process_checkout)
+        QShortcut(QKeySequence("Delete"), self, activated=self._remove_cart_item)
+
+    def _focus_search(self) -> None:
+        self.tabs.setCurrentIndex(0)
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+
+    def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(16)
+        root.setContentsMargins(28, 22, 28, 22)
+        root.setSpacing(12)
 
-        # Верхняя панель
         top_layout = QHBoxLayout()
-        title = QLabel("Продажи и Касса")
+        title_col = QVBoxLayout()
+        title_col.setSpacing(2)
+        title = QLabel("Satyş we kassa")
         title.setObjectName("pageTitle")
-        top_layout.addWidget(title)
-        top_layout.addStretch()
+        sub = QLabel(
+            "Haryt saýlaň → tablisada satyş bahasyny giriziň → «Satyşy geçir (F9)» basyň"
+        )
+        sub.setObjectName("mutedText")
+        title_col.addWidget(title)
+        title_col.addWidget(sub)
+        top_layout.addLayout(title_col, 1)
 
-        self.balances_label = QLabel("Загрузка...")
-        self.balances_label.setStyleSheet(f"font-weight: 600; color: {theme.TEXT};")
+        self.hold_btn = make_button("⏸ Çeki goý")
+        self.hold_btn.clicked.connect(self._hold_current_cart)
+        top_layout.addWidget(self.hold_btn)
+
+        self.held_list_btn = make_button("📂 Garaşýanlar (0)")
+        self.held_list_btn.clicked.connect(self._open_held_carts_dialog)
+        top_layout.addWidget(self.held_list_btn)
+
+        self.balances_label = QLabel("Ýüklenýär...")
+        self.balances_label.setObjectName("datePill")
+        self.balances_label.setStyleSheet(f"font-weight: 700; color: {theme.NAVY};")
         top_layout.addWidget(self.balances_label)
         root.addLayout(top_layout)
 
-        # Вкладки
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._create_pos_tab(), "Новая продажа")
-        self.tabs.addTab(self._create_history_tab(), "История чеков")
+        self.tabs.addTab(self._create_pos_tab(), "Täze satyş")
+        self.tabs.addTab(self._create_history_tab(), "Çekler taryhy")
         root.addWidget(self.tabs, 1)
 
     def _create_pos_tab(self) -> QWidget:
         widget = QWidget()
         layout = QHBoxLayout(widget)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(16)
 
-        # Левая часть: поиск и корзина
+        # Çep tarap: gözleg, çalt harytlar, tablisa
         left = QVBoxLayout()
+        left.setSpacing(8)
+
         search_row = QHBoxLayout()
+        search_row.setSpacing(8)
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Поиск по IMEI, SKU или названию...")
-        self.search_input.setMinimumHeight(42)
+        self.search_input.setPlaceholderText(
+            "Doly ýa-da soňky sanlar boýunça IMEI, SKU, at gözlegi (F3)..."
+        )
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setMinimumHeight(40)
         self.search_input.returnPressed.connect(self._add_product_by_search)
-        
-        search_btn = QPushButton("Найти / Добавить")
-        search_btn.setObjectName("primaryBtn")
-        search_btn.setMinimumHeight(42)
+
+        search_btn = make_button("Skladdan tap / Saýla (F2)…", "primary")
+        search_btn.setMinimumHeight(40)
         search_btn.clicked.connect(self._add_product_by_search)
-        
+
         search_row.addWidget(self.search_input, 1)
         search_row.addWidget(search_btn)
         left.addLayout(search_row)
 
-        self.cart_table = QTableWidget()
-        self.cart_table.setColumnCount(6)
-        self.cart_table.setHorizontalHeaderLabels(["ID", "Товар", "IMEI", "Кол-во", "Цена", "Сумма"])
-        configure_table(self.cart_table)
-        self.cart_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.cart_table.cellDoubleClicked.connect(self._edit_cart_cell)
+        # Çalt harytlar paneli
+        self.quick_products_bar = QHBoxLayout()
+        self.quick_products_bar.setSpacing(6)
+        left.addLayout(self.quick_products_bar)
+
+        self.cart_table = QTableWidget(0, 7)
+        self.cart_table.setHorizontalHeaderLabels([
+            "ID",
+            "Haryt",
+            "IMEI",
+            "Sany ✎",
+            "Öz bahasy ✎",
+            "Satyş bahasy ✎",
+            "Jemi (Peýda)",
+        ])
+        configure_table(self.cart_table, stretch_col=1, row_height=46)
+        self.cart_table.setEditTriggers(
+            QTableWidget.EditTrigger.DoubleClicked
+            | QTableWidget.EditTrigger.SelectedClicked
+            | QTableWidget.EditTrigger.AnyKeyPressed
+        )
+        self.cart_table.itemChanged.connect(self._on_cart_item_changed)
         left.addWidget(self.cart_table, 1)
 
-        remove_btn = QPushButton("Удалить выбранную позицию")
+        cart_actions = QHBoxLayout()
+        cart_actions.setSpacing(8)
+
+        price_btn = make_button("✎ Satyş bahasyny giriz (F4)", "primary")
+        price_btn.clicked.connect(self._edit_selected_price)
+        cart_actions.addWidget(price_btn)
+
+        clear_btn = make_button("Çeki arassala")
+        clear_btn.clicked.connect(self._clear_cart)
+        cart_actions.addWidget(clear_btn)
+
+        cart_actions.addStretch()
+
+        remove_btn = make_button("Saýlanan setiri poz (Del)", "danger")
         remove_btn.clicked.connect(self._remove_cart_item)
-        left.addWidget(remove_btn)
+        cart_actions.addWidget(remove_btn)
+        left.addLayout(cart_actions)
+
         layout.addLayout(left, 3)
 
-        # Правая часть: оплата
-        right = Card()
-        rl = QVBoxLayout(right)
-        
-        title = QLabel("Оформление чека")
-        title.setStyleSheet("font-size: 16px; font-weight: 700;")
+        # Sag tarap: jemi, arassa peýda we töleg usuly
+        right = Card(margins=(18, 16, 18, 16), spacing=10)
+        rl = right.body
+
+        title = QLabel("Satyş jemi we resmileşdiriş")
+        title.setObjectName("cardTitle")
         rl.addWidget(title)
 
         grid = QGridLayout()
-        grid.addWidget(QLabel("Валюта чека:"), 0, 0)
-        self.currency_combo = QComboBox()
+        grid.setVerticalSpacing(8)
+        grid.addWidget(QLabel("Çekiň walýutasy:"), 0, 0)
+        self.currency_combo = style_combo(QComboBox())
         self.currency_combo.addItems(["TMT", "USD"])
-        self.currency_combo.currentTextChanged.connect(self._recalculate_totals)
+        self.currency_combo.setCurrentText(SettingsService.get("default_currency", "TMT"))
+        self.currency_combo.currentTextChanged.connect(self._on_currency_changed)
         grid.addWidget(self.currency_combo, 0, 1)
 
-        grid.addWidget(QLabel("Курс TMT/USD:"), 1, 0)
+        grid.addWidget(QLabel("Kurs (1 USD = X TMT):"), 1, 0)
         self.rate_spin = QDoubleSpinBox()
-        self.rate_spin.setRange(0.0001, 1000)
-        self.rate_spin.setValue(19.5)
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
         self.rate_spin.setDecimals(4)
-        self.rate_spin.valueChanged.connect(self._recalculate_totals)
+        self.rate_spin.valueChanged.connect(self._on_rate_changed)
         grid.addWidget(self.rate_spin, 1, 1)
 
-        grid.addWidget(QLabel("ИТОГО:"), 2, 0)
+        grid.addWidget(QLabel("JEMI (SATYŞ BAHASY):"), 2, 0)
         self.total_label = QLabel("0.00")
-        self.total_label.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {theme.ACCENT};")
+        self.total_label.setStyleSheet(
+            f"font-size: 16.5pt; font-weight: 800; color: {theme.ACCENT};"
+        )
         grid.addWidget(self.total_label, 2, 1)
+
+        grid.addWidget(QLabel("Arassa peýda:"), 3, 0)
+        self.profit_label = QLabel("+0.00")
+        self.profit_label.setStyleSheet(
+            f"font-size: 12.5pt; font-weight: 700; color: {theme.GREEN};"
+        )
+        grid.addWidget(self.profit_label, 3, 1)
         rl.addLayout(grid)
 
-        rl.addSpacing(10)
-        rl.addWidget(QLabel("Оплата:"))
+        mode_label = QLabel("Töleg usuly:")
+        mode_label.setStyleSheet("font-weight: 600;")
+        rl.addWidget(mode_label)
+
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        self.mode_group = QButtonGroup(self)
+
+        self.full_pay_mode_btn = QPushButton("✔ Doly tölendi (1 basyş)")
+        self.full_pay_mode_btn.setObjectName("chip")
+        self.full_pay_mode_btn.setCheckable(True)
+        self.full_pay_mode_btn.setChecked(True)
+        self.full_pay_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.full_pay_mode_btn.clicked.connect(lambda: self._set_payment_mode(True))
+
+        self.custom_pay_mode_btn = QPushButton("⚖ Bergä / 2 walýuta / Gaýtargy")
+        self.custom_pay_mode_btn.setObjectName("chip")
+        self.custom_pay_mode_btn.setCheckable(True)
+        self.custom_pay_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.custom_pay_mode_btn.clicked.connect(lambda: self._set_payment_mode(False))
+
+        self.mode_group.addButton(self.full_pay_mode_btn)
+        self.mode_group.addButton(self.custom_pay_mode_btn)
+        mode_row.addWidget(self.full_pay_mode_btn, 1)
+        mode_row.addWidget(self.custom_pay_mode_btn, 1)
+        rl.addLayout(mode_row)
+
+        self.auto_pay_banner = QLabel(
+            "✔ Töleg mukdary satyş bahasy boýunça awtomatiki goýulýar. Goşmaça zat girizmek gerek däl."
+        )
+        self.auto_pay_banner.setWordWrap(True)
+        self.auto_pay_banner.setStyleSheet(
+            f"padding: 8px 10px; border-radius: 8px; background: #EAF7EF; color: {theme.GREEN}; font-weight: 600; font-size: 9pt;"
+        )
+        rl.addWidget(self.auto_pay_banner)
+
+        self.manual_pay_box = QWidget()
+        mp_layout = QVBoxLayout(self.manual_pay_box)
+        mp_layout.setContentsMargins(0, 0, 0, 0)
+        mp_layout.setSpacing(6)
+
+        pay_header = QHBoxLayout()
+        pay_header.addWidget(QLabel("Hakyky kabul edilen:"))
+        pay_header.addStretch()
+        zero_btn = make_button("Hemmesi bergä (0)", "link")
+        zero_btn.clicked.connect(self._fill_zero_payment)
+        exact_btn = make_button("Çek boýunça takyk", "link")
+        exact_btn.clicked.connect(self._fill_exact_payment)
+        pay_header.addWidget(zero_btn)
+        pay_header.addWidget(exact_btn)
+        mp_layout.addLayout(pay_header)
+
         self.pay_usd_spin = QDoubleSpinBox()
-        self.pay_usd_spin.setRange(0, 1000000)
+        self.pay_usd_spin.setRange(0, 10000000)
+        self.pay_usd_spin.setDecimals(2)
         self.pay_usd_spin.setPrefix("USD: ")
-        self.pay_usd_spin.setMinimumHeight(38)
+        self.pay_usd_spin.setMinimumHeight(36)
         self.pay_usd_spin.valueChanged.connect(self._recalculate_totals)
-        rl.addWidget(self.pay_usd_spin)
+        mp_layout.addWidget(self.pay_usd_spin)
 
         self.pay_tmt_spin = QDoubleSpinBox()
-        self.pay_tmt_spin.setRange(0, 1000000)
+        self.pay_tmt_spin.setRange(0, 10000000)
+        self.pay_tmt_spin.setDecimals(2)
         self.pay_tmt_spin.setPrefix("TMT: ")
-        self.pay_tmt_spin.setMinimumHeight(38)
+        self.pay_tmt_spin.setMinimumHeight(36)
         self.pay_tmt_spin.valueChanged.connect(self._recalculate_totals)
-        rl.addWidget(self.pay_tmt_spin)
+        mp_layout.addWidget(self.pay_tmt_spin)
 
-        self.change_label = QLabel("Сдача: 0.00")
-        self.change_label.setStyleSheet("font-weight: 600; color: #10B981;")
-        rl.addWidget(self.change_label)
+        self.change_label = QLabel("Gaýtargy: 0.00")
+        self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.GREEN};")
+        mp_layout.addWidget(self.change_label)
+
+        self.manual_pay_box.hide()
+        rl.addWidget(self.manual_pay_box)
+
+        self.customer_name_input = QLineEdit()
+        self.customer_name_input.setPlaceholderText("Müşderiniň ady (diňe bergä satyşda hökmany)...")
+        rl.addWidget(self.customer_name_input)
+
+        self.customer_phone_input = QLineEdit()
+        self.customer_phone_input.setPlaceholderText("Müşderiniň telefony (hökmany däl)...")
+        rl.addWidget(self.customer_phone_input)
 
         self.comment_input = QLineEdit()
-        self.comment_input.setPlaceholderText("Комментарий к чеку...")
+        self.comment_input.setPlaceholderText("Çeke bellik (hökmany däl)...")
         rl.addWidget(self.comment_input)
 
         rl.addStretch()
-        self.checkout_btn = QPushButton("ПОДТВЕРДИТЬ И СОХРАНИТЬ ЧЕК")
-        self.checkout_btn.setObjectName("primaryBtn")
-        self.checkout_btn.setMinimumHeight(50)
-        self.checkout_btn.setStyleSheet(f"background: {theme.ACCENT}; color: white; font-weight: bold; font-size: 14px;")
+
+        self.checkout_btn = make_button("SATYŞY GEÇIR (F9)", "primary")
+        self.checkout_btn.setMinimumHeight(48)
         self.checkout_btn.clicked.connect(self._process_checkout)
         rl.addWidget(self.checkout_btn)
+
+        self.print_last_btn = make_button("🖨 Soňky çeki çap et / PDF")
+        self.print_last_btn.setEnabled(False)
+        self.print_last_btn.clicked.connect(self._print_last_receipt)
+        rl.addWidget(self.print_last_btn)
 
         layout.addWidget(right, 2)
         return widget
@@ -213,108 +761,485 @@ class SalesPage(QWidget):
     def _create_history_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
         header = QHBoxLayout()
-        header.addWidget(QLabel("История продаж"))
-        header.addStretch()
-        
-        refresh_btn = QPushButton("Обновить")
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("Çek belgisi, müşderi ýa-da bellik boýunça gözleg...")
+        self.history_search.setClearButtonEnabled(True)
+        self.history_search.setMinimumHeight(38)
+        self.history_search.textChanged.connect(self._filter_history)
+        header.addWidget(self.history_search, 1)
+
+        print_btn = make_button("🖨 Çap et / PDF çek")
+        print_btn.clicked.connect(self._print_selected_history_sale)
+        header.addWidget(print_btn)
+
+        open_btn = make_button("Çeki aç / Bergi tölegi", "primary")
+        open_btn.clicked.connect(self._open_selected_sale_button)
+        header.addWidget(open_btn)
+
+        refresh_btn = make_button("↻ Täzele")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
-        
-        cancel_btn = QPushButton("Отменить выбранный чек")
-        cancel_btn.setStyleSheet(f"background: {theme.RED}; color: white; border-radius: 6px; padding: 6px 12px;")
+
+        cancel_btn = make_button("Saýlanan çeki ýatyr", "danger")
         cancel_btn.clicked.connect(self._cancel_selected_sale)
         header.addWidget(cancel_btn)
         layout.addLayout(header)
 
-        self.history_table = QTableWidget()
-        self.history_table.setColumnCount(7)
-        self.history_table.setHorizontalHeaderLabels(["ID", "Чек", "Дата", "Валюта", "Сумма", "Статус", "Инфо"])
-        configure_table(self.history_table)
-        self.history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        layout.addWidget(self.history_table)
-        
+        self.history_table = QTableWidget(0, 8)
+        self.history_table.setHorizontalHeaderLabels([
+            "ID", "Çek", "Sene", "Müşderi", "Walýuta", "Jemi", "Bergi / Status", "Bellik",
+        ])
+        configure_table(self.history_table, stretch_col=[1, 3], row_height=44)
+        self.history_table.cellDoubleClicked.connect(self._open_sale_details)
+        layout.addWidget(self.history_table, 1)
+
+        hint = QLabel("Jikme-jik görmek, PDF çap etmek ýa-da goşmaça töleg almak üçin çeki iki gezek basyň.")
+        hint.setObjectName("mutedText")
+        layout.addWidget(hint)
         return widget
 
-    def refresh_data(self):
+    def _set_payment_mode(self, auto_full: bool) -> None:
+        self.auto_full_payment = auto_full
+        self.full_pay_mode_btn.setChecked(auto_full)
+        self.custom_pay_mode_btn.setChecked(not auto_full)
+        self.auto_pay_banner.setVisible(auto_full)
+        self.manual_pay_box.setVisible(not auto_full)
+        self._recalculate_totals()
+
+    def _update_held_button_count(self) -> None:
+        carts = SettingsService.get_held_carts()
+        self.held_list_btn.setText(f"📂 Garaşýanlar ({len(carts)})")
+
+    def _hold_current_cart(self) -> None:
+        if not self.cart_items:
+            QMessageBox.information(self, "Çek boş", "Çeki goýmazdan öň oňa haryt goşuň.")
+            return
+        carts = SettingsService.get_held_carts()
+        serializable_items = [
+            {
+                "product_id": it["product_id"],
+                "name": it["name"],
+                "imei": it["imei"],
+                "quantity": it["quantity"],
+                "unit_price": str(it["unit_price"]),
+                "unit_cost": str(it["unit_cost"]),
+                "cost_currency": it["cost_currency"],
+                "cost_exchange_rate": str(it["cost_exchange_rate"]),
+                "currency": it["currency"],
+            }
+            for it in self.cart_items
+        ]
+        carts.insert(0, {
+            "created_at": datetime.now().strftime("%d.%m %H:%M"),
+            "currency": self.currency_combo.currentText(),
+            "exchange_rate": f"{self.rate_spin.value():.4f}",
+            "customer_name": self.customer_name_input.text().strip(),
+            "customer_phone": self.customer_phone_input.text().strip(),
+            "comment": self.comment_input.text().strip(),
+            "items": serializable_items,
+        })
+        SettingsService.save_held_carts(carts)
+        self._clear_cart()
+        self._update_held_button_count()
+
+    def _open_held_carts_dialog(self) -> None:
+        dlg = HeldCartsDialog(self)
+        if dlg.exec() and dlg.selected_cart:
+            c = dlg.selected_cart
+            self.currency_combo.setCurrentText(c.get("currency", "TMT"))
+            try:
+                self.rate_spin.setValue(float(c.get("exchange_rate", 19.5)))
+            except ValueError:
+                pass
+            self.customer_name_input.setText(c.get("customer_name", ""))
+            self.customer_phone_input.setText(c.get("customer_phone", ""))
+            self.comment_input.setText(c.get("comment", ""))
+            self.cart_items = [
+                {
+                    "product_id": it["product_id"],
+                    "name": it["name"],
+                    "imei": it.get("imei"),
+                    "quantity": int(it.get("quantity", 1)),
+                    "unit_price": Decimal(str(it.get("unit_price", "0.00"))),
+                    "unit_cost": Decimal(str(it.get("unit_cost", "0.00"))),
+                    "cost_currency": it.get("cost_currency", "USD"),
+                    "cost_exchange_rate": Decimal(str(it.get("cost_exchange_rate", "19.5000"))),
+                    "currency": c.get("currency", "TMT"),
+                }
+                for it in c.get("items", [])
+            ]
+            self._update_cart_table()
+        self._update_held_button_count()
+
+    def _rebuild_quick_products_bar(self) -> None:
+        while self.quick_products_bar.count():
+            item = self.quick_products_bar.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
         with SessionLocal() as session:
-            registers = session.scalars(select(CashRegister)).all()
-            self.register_map = {r.currency: r.id for r in registers}
-            usd = next((r.balance for r in registers if r.currency == "USD"), 0)
-            tmt = next((r.balance for r in registers if r.currency == "TMT"), 0)
-            self.balances_label.setText(f"Кассы: USD: ${usd:,.2f} | TMT: {tmt:,.2f} m.")
+            # Топ-5 доступных количественных товаров (аксессуаров/частых позиций)
+            top_rows = session.execute(
+                select(Product, func.coalesce(func.sum(SaleItem.quantity), 0).label("sold_cnt"))
+                .outerjoin(SaleItem, SaleItem.product_id == Product.id)
+                .where(Product.is_active.is_(True), Product.stock_quantity > 0)
+                .group_by(Product.id)
+                .order_by(func.coalesce(func.sum(SaleItem.quantity), 0).desc(), Product.name.asc())
+                .limit(5)
+            ).all()
 
-            sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc()).limit(50)).all()
-            self.history_table.setRowCount(len(sales))
-            for i, s in enumerate(sales):
-                self.history_table.setItem(i, 0, QTableWidgetItem(str(s.id)))
-                self.history_table.setItem(i, 1, QTableWidgetItem(s.receipt_number))
-                self.history_table.setItem(i, 2, QTableWidgetItem(s.sale_date.strftime("%d.%m %H:%M")))
-                self.history_table.setItem(i, 3, QTableWidgetItem(s.currency))
-                self.history_table.setItem(i, 4, QTableWidgetItem(money_str(s.total_amount)))
-                st = QTableWidgetItem(s.status)
-                if s.status == "cancelled": st.setForeground(theme.RED)
-                self.history_table.setItem(i, 5, st)
-                self.history_table.setItem(i, 6, QTableWidgetItem(s.comment or s.cancellation_reason or ""))
-
-    def _add_product_by_search(self):
-        text = self.search_input.text().strip()
-        if not text:
+        if not top_rows:
             return
 
-        # Layout mapping (Safe version)
+        lbl = QLabel("Çalt:")
+        lbl.setObjectName("mutedText")
+        self.quick_products_bar.addWidget(lbl)
+
+        for prod, _cnt in top_rows:
+            btn = QPushButton(f"+ {prod.name} ({prod.stock_quantity})")
+            btn.setObjectName("chip")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, pid=prod.id: self._quick_add_product_id(pid))
+            self.quick_products_bar.addWidget(btn)
+        self.quick_products_bar.addStretch()
+
+    def _quick_add_product_id(self, product_id: int) -> None:
+        with SessionLocal() as session:
+            prod = session.get(Product, product_id)
+            if not prod or prod.stock_quantity <= 0:
+                return
+            in_stock_imeis = session.scalars(
+                select(StockItem).where(
+                    StockItem.product_id == prod.id,
+                    StockItem.status == "in_stock",
+                )
+            ).all()
+            if len(in_stock_imeis) == 1 and prod.stock_quantity == 1:
+                self._append_to_cart(prod, in_stock_imeis[0].imei1)
+            elif len(in_stock_imeis) > 0:
+                self._open_inventory_selector(prod.name)
+            else:
+                self._append_to_cart(prod)
+
+    def refresh_data(self) -> None:
+        self._update_held_button_count()
+        self._rebuild_quick_products_bar()
+        self._all_sales_rows: list[dict] = []
+        with SessionLocal() as session:
+            registers_by_curr = SalesService.ensure_default_registers(session)
+            session.commit()
+            self.register_map = {cur: reg.id for cur, reg in registers_by_curr.items()}
+            usd = registers_by_curr["USD"].balance if "USD" in registers_by_curr else Decimal("0.00")
+            tmt = registers_by_curr["TMT"].balance if "TMT" in registers_by_curr else Decimal("0.00")
+            self.balances_label.setText(f"Kassalar: USD ${usd:,.2f}  |  TMT {tmt:,.2f} m.")
+
+            sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc()).limit(200)).all()
+            for s in sales:
+                date_str = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else "—"
+                if s.status == "cancelled":
+                    store_debt = SalesService.get_store_debt_to_customer(session, s)
+                    status_text = (
+                        f"Ýatyryldy (dükanyň bergisi: {money_str(store_debt)})"
+                        if store_debt > 0
+                        else "Ýatyryldy"
+                    )
+                    status_color = theme.RED
+                else:
+                    cust_debt = SalesService.get_customer_debt(session, s)
+                    if cust_debt > 0:
+                        status_text = f"Müşderiniň bergisi: {money_str(cust_debt)}"
+                        status_color = theme.ACCENT
+                    else:
+                        status_text = "Tölendi"
+                        status_color = theme.GREEN
+
+                self._all_sales_rows.append({
+                    "id": s.id,
+                    "receipt": s.receipt_number,
+                    "date": date_str,
+                    "customer": s.customer_name or "—",
+                    "currency": s.currency,
+                    "total": money_str(s.total_amount),
+                    "status_text": status_text,
+                    "status_color": status_color,
+                    "info": s.comment or s.cancellation_reason or "",
+                })
+
+        self._filter_history()
+
+    def _filter_history(self, *_args) -> None:
+        q = self.history_search.text().strip().lower() if hasattr(self, "history_search") else ""
+        rows = [
+            r
+            for r in getattr(self, "_all_sales_rows", [])
+            if not q or q in f"{r['receipt']} {r['customer']} {r['info']}".lower()
+        ]
+        self.history_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            vals = [
+                str(r["id"]),
+                r["receipt"],
+                r["date"],
+                r["customer"],
+                r["currency"],
+                r["total"],
+                r["status_text"],
+                r["info"],
+            ]
+            for c, val in enumerate(vals):
+                cell = QTableWidgetItem(val)
+                if c in (0, 4, 5, 6):
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 6:
+                    cell.setForeground(QColor(r["status_color"]))
+                self.history_table.setItem(i, c, cell)
+
+    def _open_inventory_selector(self, initial_query: str = "") -> None:
+        dlg = InventorySelectorDialog(
+            title="Çeke skladdan haryt ýa-da enjam saýlamak",
+            initial_query=initial_query,
+            parent=self,
+        )
+        if dlg.exec() and dlg.selected_item:
+            sel = dlg.selected_item
+            with SessionLocal() as session:
+                product = session.get(Product, sel["product_id"])
+                if product:
+                    self._append_to_cart(product, sel["imei"])
+            self.search_input.clear()
+
+    def _add_product_by_search(self) -> None:
+        text = self.search_input.text().strip()
+        if not text:
+            self._open_inventory_selector("")
+            return
+
         ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
         en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
         ru_layout_up = "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё"
         en_layout_up = "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~"
-        
-        # Build transliteration table
+
         trans_map = {}
         for r, e in zip(ru_layout, en_layout):
             trans_map[ord(r)] = ord(e)
         for r, e in zip(ru_layout_up, en_layout_up):
             trans_map[ord(r)] = ord(e)
-            
         text_en = text.translate(trans_map)
 
         with SessionLocal() as session:
-            # 1. Search by IMEI (both layouts)
-            item = session.scalar(select(StockItem).where(
-                (StockItem.imei1 == text) | (StockItem.imei1 == text_en) |
-                (StockItem.imei2 == text) | (StockItem.imei2 == text_en)
-            ))
-
-            if item:
-                if item.status != "in_stock":
-                    QMessageBox.warning(self, "Ошибка", "Товар с этим IMEI уже продан или недоступен.")
+            # 1. Точный или частичный поиск по IMEI (включая последние 4+ цифр)
+            exact_imei = session.scalar(
+                select(StockItem).where(
+                    (StockItem.imei1 == text)
+                    | (StockItem.imei1 == text_en)
+                    | (StockItem.imei2 == text)
+                    | (StockItem.imei2 == text_en)
+                )
+            )
+            if exact_imei:
+                if exact_imei.status != "in_stock":
+                    QMessageBox.warning(self, "Elýeterli däl", "Bu IMEI-li enjam eýýäm satyldy.")
                     return
-                product = session.get(Product, item.product_id)
-                self._append_to_cart(product, item.imei1)
-            else:
-                # 2. Search by SKU or Name
-                product = session.scalar(select(Product).where(
-                    (Product.sku.ilike(f"%{text}%")) | (Product.sku.ilike(f"%{text_en}%")) |
-                    (Product.name.ilike(f"%{text}%")) | (Product.name.ilike(f"%{text_en}%"))
-                ))
-                if product:
-                    if product.stock_quantity <= 0:
-                        QMessageBox.warning(self, "Ошибка", f"Товара '{product.name}' нет в наличии.")
+                product = session.get(Product, exact_imei.product_id)
+                if not product or not product.is_active or product.stock_quantity <= 0:
+                    QMessageBox.warning(self, "Elýeterli däl", "Bu IMEI üçin haryt elýeterli däl.")
+                    return
+                self._append_to_cart(product, exact_imei.imei1)
+                self.search_input.clear()
+                return
+
+            # Частичный IMEI (если ввели >= 4 цифр)
+            if len(text) >= 4 and text.isdigit():
+                partial_imeis = session.scalars(
+                    select(StockItem).where(
+                        StockItem.status == "in_stock",
+                        (StockItem.imei1.ilike(f"%{text}%")) | (StockItem.imei2.ilike(f"%{text}%")),
+                    )
+                ).all()
+                if len(partial_imeis) == 1:
+                    st = partial_imeis[0]
+                    product = session.get(Product, st.product_id)
+                    if product and product.is_active and product.stock_quantity > 0:
+                        self._append_to_cart(product, st.imei1)
+                        self.search_input.clear()
                         return
-                    self._append_to_cart(product)
-                else:
-                    QMessageBox.warning(self, "Не найдено", f"Товар или IMEI '{text}' не найден.")
 
-        self.search_input.clear()
+            # 2. Поиск по SKU или названию
+            matches = session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    Product.stock_quantity > 0,
+                    (Product.sku.ilike(f"%{text}%"))
+                    | (Product.sku.ilike(f"%{text_en}%"))
+                    | (Product.name.ilike(f"%{text}%"))
+                    | (Product.name.ilike(f"%{text_en}%")),
+                )
+                .order_by(Product.name.asc())
+            ).all()
 
-    def _append_to_cart(self, product, imei=None):
-        # Если без IMEI, проверим нет ли уже в корзине
-        if not imei:
+            if len(matches) == 1:
+                prod = matches[0]
+                in_stock_imeis = session.scalars(
+                    select(StockItem).where(
+                        StockItem.product_id == prod.id,
+                        StockItem.status == "in_stock",
+                    )
+                ).all()
+                if len(in_stock_imeis) == 1 and prod.stock_quantity == 1:
+                    self._append_to_cart(prod, in_stock_imeis[0].imei1)
+                    self.search_input.clear()
+                    return
+                if len(in_stock_imeis) == 0:
+                    self._append_to_cart(prod)
+                    self.search_input.clear()
+                    return
+
+        self._open_inventory_selector(text)
+
+    def _get_cart_product_quantity(self, product_id: int, exclude_row: int | None = None) -> int:
+        total_qty = 0
+        for idx, it in enumerate(self.cart_items):
+            if exclude_row is not None and idx == exclude_row:
+                continue
+            if it["product_id"] == product_id:
+                total_qty += int(it["quantity"])
+        return total_qty
+
+    def has_imei_in_cart(self, imei: str) -> bool:
+        clean = (imei or "").strip()
+        if not clean:
+            return False
+        return any((it.get("imei") or "").strip() == clean for it in self.cart_items)
+
+    def add_item_from_mobile(self, item_data: dict) -> tuple[bool, str, dict | None]:
+        """Добавляет подтверждённый на Android-сканере товар с выторгованной ценой в текущий черновик чека."""
+        product_id = int(item_data["product_id"])
+        imei = (str(item_data.get("imei")).strip() or None) if item_data.get("imei") else None
+        qty = 1 if imei else max(1, int(item_data.get("quantity", 1)))
+        raw_price = Decimal(str(item_data["unit_price"])).quantize(Decimal("0.01"))
+        item_curr = str(item_data.get("currency") or self.currency_combo.currentText()).strip().upper()
+
+        if imei and self.has_imei_in_cart(imei):
+            return False, f"IMEI {imei} enjam eýýäm häzirki satyşa goşuldy.", None
+
+        with SessionLocal() as session:
+            product = session.get(Product, product_id)
+            if product is None or not product.is_active:
+                return False, "Haryt tapylmady ýa-da öçürilen.", None
+
+            current_in_cart = self._get_cart_product_quantity(product.id)
+            if current_in_cart + qty > product.stock_quantity:
+                return (
+                    False,
+                    f"Skladda «{product.name}» harydy ýeterlik däl (bar: {product.stock_quantity}, çekde: {current_in_cart}).",
+                    None,
+                )
+
+            st_item = None
+            if imei:
+                st_item = session.scalar(
+                    select(StockItem).where(
+                        StockItem.product_id == product.id,
+                        (StockItem.imei1 == imei) | (StockItem.imei2 == imei),
+                    )
+                )
+                if st_item is None:
+                    return False, f"IMEI {imei} enjam skladda tapylmady.", None
+                if st_item.status != "in_stock":
+                    return False, f"IMEI {imei} enjam eýýäm satyldy.", None
+
+            # Если корзина пуста, подстраиваем валюту чека под выбранную на смартфоне
+            if not self.cart_items and item_curr in ("USD", "TMT"):
+                self.currency_combo.blockSignals(True)
+                self.currency_combo.setCurrentText(item_curr)
+                self.currency_combo.blockSignals(False)
+
+            receipt_curr = self.currency_combo.currentText()
+            rate = Decimal(f"{self.rate_spin.value():.4f}")
+            unit_price_doc = _convert_currency(raw_price, item_curr, receipt_curr, rate)
+
+            unit_cost, cost_curr, cost_rate = SalesService._resolve_item_cost_basis(
+                session=session,
+                product_id=product.id,
+                stock_item=st_item,
+                fallback_currency=receipt_curr,
+                fallback_rate=rate,
+            )
+
+        self.tabs.setCurrentIndex(0)
+        self.cart_items.append({
+            "product_id": product.id,
+            "name": product.name,
+            "imei": imei,
+            "quantity": qty,
+            "unit_price": unit_price_doc,
+            "unit_cost": unit_cost,
+            "cost_currency": cost_curr,
+            "cost_exchange_rate": cost_rate,
+            "currency": receipt_curr,
+        })
+        self._update_cart_table()
+        self.cart_table.selectRow(len(self.cart_items) - 1)
+
+        cart_total = sum(
+            (int(it["quantity"]) * Decimal(str(it["unit_price"])) for it in self.cart_items),
+            Decimal("0.00"),
+        )
+        msg = f"«{product.name}» harydy häzirki satyşa goşuldy ({money_str(unit_price_doc)} {receipt_curr})"
+        return True, msg, {
+            "cart_items_count": len(self.cart_items),
+            "cart_total": f"{cart_total:.2f}",
+            "currency": receipt_curr,
+        }
+
+    def _append_to_cart(self, product: Product, imei: str | None = None) -> None:
+        if imei:
             for it in self.cart_items:
+                if it.get("imei") == imei:
+                    QMessageBox.warning(self, "Eýýäm çekde", f"IMEI {imei} enjam eýýäm çeke goşuldy.")
+                    return
+
+        current_in_cart = self._get_cart_product_quantity(product.id)
+        if current_in_cart + 1 > product.stock_quantity:
+            QMessageBox.warning(
+                self,
+                "Skladda ýeterlik däl",
+                f"Skladda «{product.name}» harydy ýeterlik däl (elýeterli: {product.stock_quantity}).",
+            )
+            return
+
+        if not imei:
+            for idx, it in enumerate(self.cart_items):
                 if it["product_id"] == product.id and not it["imei"]:
                     it["quantity"] += 1
                     self._update_cart_table()
+                    self._focus_price_cell(idx)
                     return
+
+        cur = self.currency_combo.currentText()
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+
+        with SessionLocal() as session:
+            st_item = None
+            if imei:
+                st_item = session.scalar(
+                    select(StockItem).where(
+                        StockItem.product_id == product.id,
+                        (StockItem.imei1 == imei) | (StockItem.imei2 == imei),
+                    )
+                )
+            unit_cost, cost_curr, cost_rate = SalesService._resolve_item_cost_basis(
+                session=session,
+                product_id=product.id,
+                stock_item=st_item,
+                fallback_currency=cur,
+                fallback_rate=rate,
+            )
 
         self.cart_items.append({
             "product_id": product.id,
@@ -322,113 +1247,430 @@ class SalesPage(QWidget):
             "imei": imei,
             "quantity": 1,
             "unit_price": Decimal("0.00"),
-            "currency": self.currency_combo.currentText()
+            "unit_cost": unit_cost,
+            "cost_currency": cost_curr,
+            "cost_exchange_rate": cost_rate,
+            "currency": cur,
         })
         self._update_cart_table()
+        self._focus_price_cell(len(self.cart_items) - 1)
 
-    def _update_cart_table(self):
+    def _focus_price_cell(self, row: int) -> None:
+        """Сразу переводит курсор в ячейку «Цена торга» для мгновенного ввода с клавиатуры."""
+        if not (0 <= row < self.cart_table.rowCount()):
+            return
+        self.cart_table.setCurrentCell(row, self.COL_PRICE)
+        item = self.cart_table.item(row, self.COL_PRICE)
+        if item is not None:
+            QTimer.singleShot(10, lambda: self.cart_table.editItem(item))
+
+    def _item_cost_in_receipt_currency(self, item: dict) -> Decimal:
+        cur = self.currency_combo.currentText()
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+        cost_amt = Decimal(str(item.get("unit_cost", "0.00")))
+        cost_cur = item.get("cost_currency", cur)
+        return _convert_currency(cost_amt, cost_cur, cur, rate)
+
+    def _on_currency_changed(self, new_currency: str) -> None:
+        for it in self.cart_items:
+            it["currency"] = new_currency
+        self._update_cart_table()
+
+    def _on_rate_changed(self) -> None:
+        self._update_cart_table()
+
+    def _update_cart_table(self) -> None:
+        self._updating_table = True
+        self.cart_table.blockSignals(True)
         self.cart_table.setRowCount(len(self.cart_items))
+        cur = self.currency_combo.currentText()
+
         for i, item in enumerate(self.cart_items):
-            self.cart_table.setItem(i, 0, QTableWidgetItem(str(item["product_id"])))
-            self.cart_table.setItem(i, 1, QTableWidgetItem(item["name"]))
-            self.cart_table.setItem(i, 2, QTableWidgetItem(item["imei"] or "—"))
-            self.cart_table.setItem(i, 3, QTableWidgetItem(str(item["quantity"])))
-            self.cart_table.setItem(i, 4, QTableWidgetItem(money_str(item["unit_price"])))
-            self.cart_table.setItem(i, 5, QTableWidgetItem(money_str(item["quantity"] * item["unit_price"])))
+            qty = int(item["quantity"])
+            unit_price = Decimal(str(item["unit_price"]))
+            unit_cost_doc = self._item_cost_in_receipt_currency(item)
+            line_sum = unit_price * qty
+            line_profit = (unit_price - unit_cost_doc) * qty
+            sign = "+" if line_profit >= 0 else "−"
+            sum_profit_str = f"{money_str(line_sum)} ({sign}{money_str(abs(line_profit))})"
+
+            read_only_flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
+            editable_flags = read_only_flags | Qt.ItemFlag.ItemIsEditable
+
+            c_id = QTableWidgetItem(str(item["product_id"]))
+            c_id.setFlags(read_only_flags)
+            c_id.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            c_name = QTableWidgetItem(item["name"])
+            c_name.setFlags(read_only_flags)
+
+            c_imei = QTableWidgetItem(item["imei"] or "—")
+            c_imei.setFlags(read_only_flags)
+            c_imei.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            c_qty = QTableWidgetItem(str(qty))
+            c_qty.setFlags(read_only_flags if item["imei"] else editable_flags)
+            c_qty.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            c_cost = QTableWidgetItem(f"{unit_cost_doc:.2f}")
+            c_cost.setFlags(editable_flags)
+            c_cost.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_cost.setToolTip(f"1 sanynyň {cur} öz bahasy (şu ýerde üýtgedip bilersiňiz)")
+            c_cost.setForeground(QColor(theme.MUTED))
+
+            c_price = QTableWidgetItem(f"{unit_price:.2f}")
+            c_price.setFlags(editable_flags)
+            c_price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_price.setBackground(QColor("#FFF8F1"))
+            c_price.setForeground(QColor(theme.NAVY))
+            c_price.setToolTip("Ylalaşylan satyş bahasyny giriziň we Enter basyň")
+
+            c_sum = QTableWidgetItem(sum_profit_str)
+            c_sum.setFlags(read_only_flags)
+            c_sum.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_sum.setForeground(QColor(theme.GREEN if line_profit >= 0 else theme.RED))
+
+            self.cart_table.setItem(i, self.COL_ID, c_id)
+            self.cart_table.setItem(i, self.COL_NAME, c_name)
+            self.cart_table.setItem(i, self.COL_IMEI, c_imei)
+            self.cart_table.setItem(i, self.COL_QTY, c_qty)
+            self.cart_table.setItem(i, self.COL_COST, c_cost)
+            self.cart_table.setItem(i, self.COL_PRICE, c_price)
+            self.cart_table.setItem(i, self.COL_SUM_PROFIT, c_sum)
+
+        self.cart_table.blockSignals(False)
+        self._updating_table = False
         self._recalculate_totals()
 
-    def _edit_cart_cell(self, row, col):
-        if col == 4: # Цена
-            val, ok = QInputDialog.getDouble(self, "Цена", "Введите цену продажи:", float(self.cart_items[row]["unit_price"]), 0, 1000000, 2)
-            if ok:
-                self.cart_items[row]["unit_price"] = Decimal(str(val))
-                self._update_cart_table()
-        elif col == 3: # Кол-во
-            if self.cart_items[row]["imei"]: return
-            val, ok = QInputDialog.getInt(self, "Количество", "Введите количество:", self.cart_items[row]["quantity"], 1, 1000)
-            if ok:
-                self.cart_items[row]["quantity"] = val
-                self._update_cart_table()
+    def _on_cart_item_changed(self, cell: QTableWidgetItem) -> None:
+        if self._updating_table:
+            return
+        row = cell.row()
+        col = cell.column()
+        if not (0 <= row < len(self.cart_items)):
+            return
 
-    def _remove_cart_item(self):
+        raw_text = cell.text().strip().replace(",", ".").replace(" ", "")
+        item = self.cart_items[row]
+        cur = self.currency_combo.currentText()
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+
+        if col == self.COL_PRICE:
+            try:
+                val = Decimal(raw_text) if raw_text else Decimal("0.00")
+                if val < 0:
+                    raise ValueError
+                item["unit_price"] = val.quantize(Decimal("0.01"))
+            except (InvalidOperation, ValueError):
+                QMessageBox.warning(self, "Nädogry baha", "Satyş bahasy üçin san giriziň.")
+            self._update_cart_table()
+
+        elif col == self.COL_COST:
+            try:
+                val = Decimal(raw_text) if raw_text else Decimal("0.00")
+                if val < 0:
+                    raise ValueError
+                new_cost = val.quantize(Decimal("0.01"))
+                item["unit_cost"] = new_cost
+                item["cost_currency"] = cur
+                item["cost_exchange_rate"] = rate
+                SettingsService.set_product_default_cost(item["product_id"], new_cost, cur)
+            except (InvalidOperation, ValueError):
+                QMessageBox.warning(self, "Nädogry öz bahasy", "Öz bahasy üçin san giriziň.")
+            self._update_cart_table()
+
+        elif col == self.COL_QTY and not item["imei"]:
+            try:
+                new_qty = int(raw_text)
+                if new_qty <= 0:
+                    raise ValueError
+                other_qty = self._get_cart_product_quantity(item["product_id"], exclude_row=row)
+                with SessionLocal() as session:
+                    prod = session.get(Product, item["product_id"])
+                    max_allowed = max(1, (prod.stock_quantity if prod else 1) - other_qty)
+                if new_qty > max_allowed:
+                    QMessageBox.warning(
+                        self,
+                        "Skladda ýeterlik däl",
+                        f"Skladda iň köp {max_allowed} sany elýeterli.",
+                    )
+                    new_qty = max_allowed
+                item["quantity"] = new_qty
+            except ValueError:
+                QMessageBox.warning(self, "Nädogry mukdar", "Sany 0-dan uly bitin san bolmaly.")
+            self._update_cart_table()
+
+    def _edit_selected_price(self) -> None:
+        row = self.cart_table.currentRow()
+        if not (0 <= row < len(self.cart_items)):
+            if self.cart_items:
+                row = len(self.cart_items) - 1
+            else:
+                QMessageBox.information(self, "Setir saýlaň", "Ilki çeke haryt goşuň.")
+                return
+        self._focus_price_cell(row)
+
+    def _clear_cart(self) -> None:
+        self.cart_items = []
+        self.pay_usd_spin.setValue(0)
+        self.pay_tmt_spin.setValue(0)
+        self.customer_name_input.clear()
+        self.customer_phone_input.clear()
+        self.comment_input.clear()
+        self._update_cart_table()
+
+    def _remove_cart_item(self) -> None:
         row = self.cart_table.currentRow()
         if 0 <= row < len(self.cart_items):
             self.cart_items.pop(row)
             self._update_cart_table()
 
-    def _recalculate_totals(self):
+    def _fill_zero_payment(self) -> None:
+        self.pay_usd_spin.setValue(0)
+        self.pay_tmt_spin.setValue(0)
+
+    def _fill_exact_payment(self) -> None:
+        cur = self.currency_combo.currentText()
+        total = sum(
+            (it["quantity"] * it["unit_price"] for it in self.cart_items),
+            Decimal("0.00"),
+        )
+        self.pay_usd_spin.blockSignals(True)
+        self.pay_tmt_spin.blockSignals(True)
+        if cur == "USD":
+            self.pay_usd_spin.setValue(float(total))
+            self.pay_tmt_spin.setValue(0)
+        else:
+            self.pay_tmt_spin.setValue(float(total))
+            self.pay_usd_spin.setValue(0)
+        self.pay_usd_spin.blockSignals(False)
+        self.pay_tmt_spin.blockSignals(False)
+        self._recalculate_totals()
+
+    def _recalculate_totals(self) -> None:
         cur = self.currency_combo.currentText()
         rate = Decimal(str(self.rate_spin.value()))
-        
+
         total = Decimal("0.00")
+        total_cost = Decimal("0.00")
         for it in self.cart_items:
-            amt = it["quantity"] * it["unit_price"]
-            # Если валюта позиции отличается от валюты чека (но в POS мы обычно ставим валюту чека)
-            total += amt
-        
+            it["currency"] = cur
+            qty = int(it["quantity"])
+            total += qty * Decimal(str(it["unit_price"]))
+            total_cost += qty * self._item_cost_in_receipt_currency(it)
+
+        profit = total - total_cost
         self.total_label.setText(f"{total:,.2f} {cur}")
-        
+
+        p_sign = "+" if profit >= 0 else "−"
+        self.profit_label.setText(f"{p_sign}{abs(profit):,.2f} {cur}")
+        self.profit_label.setStyleSheet(
+            f"font-size: 12.5pt; font-weight: 700; color: {theme.GREEN if profit >= 0 else theme.RED};"
+        )
+
+        # В режиме "Оплачено полностью (1 клик)" автоматически синхронизируем сумму оплаты с итогом
+        if self.auto_full_payment:
+            self.pay_usd_spin.blockSignals(True)
+            self.pay_tmt_spin.blockSignals(True)
+            if cur == "USD":
+                self.pay_usd_spin.setValue(float(total))
+                self.pay_tmt_spin.setValue(0)
+            else:
+                self.pay_tmt_spin.setValue(float(total))
+                self.pay_usd_spin.setValue(0)
+            self.pay_usd_spin.blockSignals(False)
+            self.pay_tmt_spin.blockSignals(False)
+            self.auto_pay_banner.setText(
+                f"✔ Satyş bahasy boýunça doly tölendi: {total:,.2f} {cur} (gaýtargysyz we bergisiz)"
+            )
+
         p_usd = Decimal(str(self.pay_usd_spin.value()))
         p_tmt = Decimal(str(self.pay_tmt_spin.value()))
-        
-        paid = p_usd if cur == "USD" else p_usd * rate
-        paid += p_tmt if cur == "TMT" else p_tmt / rate
-        
-        change = paid - total
-        self.change_label.setText(f"Сдача: {max(0, change):,.2f} {cur}")
 
-    def _process_checkout(self):
+        paid = p_usd if cur == "USD" else p_usd * rate
+        paid += p_tmt if cur == "TMT" else (p_tmt / rate if rate > 0 else Decimal("0.00"))
+
+        diff = paid - total
+        if diff >= Decimal("0.00"):
+            self.change_label.setText(f"Gaýtargy: {diff:,.2f} {cur}")
+            self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.GREEN};")
+        else:
+            self.change_label.setText(f"Bergä (galyndy): {abs(diff):,.2f} {cur}")
+            self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.ACCENT};")
+
+    def _process_checkout(self) -> None:
         if not self.cart_items:
-            QMessageBox.warning(self, "Ошибка", "Корзина пуста.")
+            QMessageBox.warning(self, "Sebet boş", "Çeke iň bolmanda bir haryt goşuň.")
             return
-        
-        with SessionLocal() as session:
-            try:
-                rate = Decimal(str(self.rate_spin.value()))
-                pays = []
-                if self.pay_usd_spin.value() > 0:
-                    pays.append({"cash_register_id": self.register_map["USD"], "amount": Decimal(str(self.pay_usd_spin.value())), "currency": "USD", "exchange_rate": rate})
-                if self.pay_tmt_spin.value() > 0:
-                    pays.append({"cash_register_id": self.register_map["TMT"], "amount": Decimal(str(self.pay_tmt_spin.value())), "currency": "TMT", "exchange_rate": rate})
-                
-                if not pays:
-                    QMessageBox.warning(self, "Ошибка", "Введите сумму оплаты.")
+
+        cur = self.currency_combo.currentText()
+
+        # Проверка нулевой цены или цены ниже себестоимости (Раздел 3.Г)
+        for idx, it in enumerate(self.cart_items):
+            u_price = Decimal(str(it["unit_price"]))
+            u_cost = self._item_cost_in_receipt_currency(it)
+            if u_price <= Decimal("0.00"):
+                ans = QMessageBox.question(
+                    self,
+                    "Satyş bahasy görkezilmedik",
+                    f"«{it['name']}» harydynyň satyş bahasy 0.00 {cur}.\n\n"
+                    "Baha girizmek üçin «No», haryt hakykatdan mugt bolsa «Yes» basyň.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    self._focus_price_cell(idx)
+                    return
+            elif u_cost > Decimal("0.00") and u_price < u_cost:
+                loss = (u_cost - u_price) * int(it["quantity"])
+                ans = QMessageBox.question(
+                    self,
+                    "Baha öz bahasyndan pes",
+                    f"Üns beriň! «{it['name']}» harydynyň satyş bahasy ({u_price:,.2f} {cur}) "
+                    f"öz bahasyndan ({u_cost:,.2f} {cur}) pes.\n"
+                    f"Bu setir boýunça zyýan: −{loss:,.2f} {cur}.\n\n"
+                    "Öz bahasyndan pes satyşy tassyklamalymy?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ans != QMessageBox.StandardButton.Yes:
+                    self._focus_price_cell(idx)
                     return
 
-                SalesService.create_sale(
+        with SessionLocal() as session:
+            try:
+                if "USD" not in self.register_map or "TMT" not in self.register_map:
+                    regs = SalesService.ensure_default_registers(session)
+                    self.register_map = {c: r.id for c, r in regs.items()}
+
+                rate = Decimal(str(self.rate_spin.value()))
+                total = Decimal("0.00")
+                for it in self.cart_items:
+                    it["currency"] = cur
+                    total += int(it["quantity"]) * Decimal(str(it["unit_price"]))
+
+                if self.auto_full_payment:
+                    self._recalculate_totals()
+
+                pays = []
+                if self.pay_usd_spin.value() > 0:
+                    pays.append({
+                        "cash_register_id": self.register_map["USD"],
+                        "amount": Decimal(str(self.pay_usd_spin.value())),
+                        "currency": "USD",
+                        "exchange_rate": rate,
+                    })
+                if self.pay_tmt_spin.value() > 0:
+                    pays.append({
+                        "cash_register_id": self.register_map["TMT"],
+                        "amount": Decimal(str(self.pay_tmt_spin.value())),
+                        "currency": "TMT",
+                        "exchange_rate": rate,
+                    })
+
+                p_usd = Decimal(str(self.pay_usd_spin.value()))
+                p_tmt = Decimal(str(self.pay_tmt_spin.value()))
+                paid = p_usd if cur == "USD" else p_usd * rate
+                paid += p_tmt if cur == "TMT" else (p_tmt / rate if rate > 0 else Decimal("0.00"))
+
+                customer_name = self.customer_name_input.text().strip() or None
+                customer_phone = self.customer_phone_input.text().strip() or None
+                is_credit = paid < total
+
+                if is_credit:
+                    if not customer_name:
+                        QMessageBox.warning(
+                            self,
+                            "Bergä satyş",
+                            "Girizilen töleg çekiň jeminden az.\n"
+                            "Bergä satyş etmek üçin müşderiniň adyny görkeziň.",
+                        )
+                        self.customer_name_input.setFocus()
+                        return
+                    debt_amt = total - paid
+                    ans = QMessageBox.question(
+                        self,
+                        "Bergä satyşy tassyklamak",
+                        f"«{customer_name}» adyna {debt_amt:,.2f} {cur} bergi galyndysy bilen satyşy geçirmelimi?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
+                    )
+                    if ans != QMessageBox.StandardButton.Yes:
+                        return
+
+                sale = SalesService.create_sale(
                     session=session,
                     items=self.cart_items,
                     payments=pays,
-                    currency=self.currency_combo.currentText(),
+                    currency=cur,
                     exchange_rate=rate,
-                    comment=self.comment_input.text()
+                    comment=self.comment_input.text(),
+                    customer_name=customer_name,
+                    customer_phone=customer_phone,
+                    allow_credit=is_credit,
                 )
+                self.last_created_sale_id = sale.id
+                rec_num = sale.receipt_number
                 session.commit()
-                QMessageBox.information(self, "Успех", "Чек успешно подтвержден и сохранен.")
-                self.cart_items = []
-                self.pay_usd_spin.setValue(0)
-                self.pay_tmt_spin.setValue(0)
-                self.comment_input.clear()
-                self._update_cart_table()
-                self.refresh_data()
-            except Exception as e:
-                session.rollback()
-                QMessageBox.critical(self, "Ошибка", str(e))
 
-    def _cancel_selected_sale(self):
+                self.print_last_btn.setEnabled(True)
+                self.print_last_btn.setText(f"🖨 Çeki çap et / PDF ({rec_num})")
+                self._clear_cart()
+                self._set_payment_mode(True)
+                self.refresh_data()
+                self._focus_search()
+            except (ValueError, TypeError, KeyError, SQLAlchemyError) as e:
+                session.rollback()
+                QMessageBox.critical(self, "Ýalňyşlyk", str(e))
+
+    def _print_last_receipt(self) -> None:
+        if self.last_created_sale_id is not None:
+            export_sale_receipt_pdf(self.last_created_sale_id, self)
+
+    def _print_selected_history_sale(self) -> None:
         row = self.history_table.currentRow()
-        if row < 0: return
-        sid = int(self.history_table.item(row, 0).text())
-        reason, ok = QInputDialog.getText(self, "Отмена", "Причина отмены:")
-        if not ok or not reason: return
+        if row < 0:
+            QMessageBox.information(self, "Çek saýlaň", "Satyş taryhy tablisasyndan çek saýlaň.")
+            return
+        item = self.history_table.item(row, 0)
+        if item is not None:
+            export_sale_receipt_pdf(int(item.text()), self)
+
+    def _open_selected_sale_button(self) -> None:
+        row = self.history_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Çek saýlaň", "Satyş taryhy tablisasyndan çek saýlaň.")
+            return
+        self._open_sale_details(row, 0)
+
+    def _open_sale_details(self, row: int, _col: int) -> None:
+        item = self.history_table.item(row, 0)
+        if item is None:
+            return
+        sid = int(item.text())
+        dlg = SaleDetailsDialog(sid, self)
+        dlg.exec()
+        self.refresh_data()
+
+    def _cancel_selected_sale(self) -> None:
+        row = self.history_table.currentRow()
+        if row < 0:
+            QMessageBox.warning(self, "Çek saýlaň", "Ýatyrmak üçin çek saýlaň.")
+            return
+        item = self.history_table.item(row, 0)
+        if item is None:
+            return
+        sid = int(item.text())
+        reason, ok = QInputDialog.getText(self, "Çeki ýatyrmak", "Ýatyrmagyň sebäbi:")
+        if not ok or not reason.strip():
+            return
 
         with SessionLocal() as session:
             try:
-                # Берем кассу TMT для возврата по умолчанию или ту что в базе
-                reg_id = self.register_map.get("TMT") or self.register_map.get("USD")
-                SalesService.cancel_sale(session, sid, reason, reg_id)
+                SalesService.cancel_sale(session, sid, reason)
                 session.commit()
                 self.refresh_data()
-                QMessageBox.information(self, "ОК", "Продажа отменена.")
-            except Exception as e:
-                QMessageBox.critical(self, "Ошибка", str(e))
+                QMessageBox.information(self, "Ýatyryldy", "Satyş üstünlikli ýatyryldy.")
+            except (ValueError, TypeError, KeyError, SQLAlchemyError) as e:
+                session.rollback()
+                QMessageBox.critical(self, "Ýalňyşlyk", str(e))

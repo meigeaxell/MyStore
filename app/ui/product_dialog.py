@@ -1,150 +1,47 @@
-
-import tempfile
-from pathlib import Path
-
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
-    QListView,
     QMessageBox,
-    QPushButton,
+    QSpinBox,
     QVBoxLayout,
 )
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.engine import SessionLocal
-from app.models.category import Category
-from app.models.product import Product
-from app.models.stock_item import StockItem
+from app.models.purchase import Purchase
+from app.models.purchase_item import PurchaseItem
+from app.repositories.product_repository import (
+    deactivate_product,
+    get_product_with_devices,
+    list_categories,
+    save_product,
+)
+from app.services.settings_service import SettingsService
+from app.ui import theme
 from app.ui.category_dialog import CategoryDialog
-
-
-def _make_arrow_icon(color: str = "#F58A2E") -> str:
-    """Рисует стрелку-галочку вниз и возвращает путь к PNG для QSS."""
-    path = Path(tempfile.gettempdir()) / "mobilestore_arrow_down.png"
-    pm = QPixmap(24, 24)
-    pm.fill(Qt.GlobalColor.transparent)
-
-    painter = QPainter(pm)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-    pen = QPen(QColor(color), 2.4)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-
-    painter.setPen(pen)
-    painter.drawPolyline(
-        [
-            QPointF(7, 9.5),
-            QPointF(12, 14.5),
-            QPointF(17, 9.5),
-        ]
-    )
-    painter.end()
-
-    pm.save(str(path))
-    return path.as_posix()
-
-
-DIALOG_STYLE = """
-    QDialog { background-color: #F6F7F9; color: #1D2939; }
-    QLabel { color: #1D2939; }
-
-    QLineEdit, QComboBox {
-        background-color: white;
-        color: #1D2939;
-        border: 1px solid #E8EBF0;
-        border-radius: 8px;
-        padding: 8px;
-    }
-    QLineEdit:focus, QComboBox:focus, QComboBox:on {
-        border: 1px solid #F58A2E;
-    }
-
-    QComboBox::drop-down {
-        background-color: #FFF3E6;
-        border: none;
-        border-left: 1px solid #E8EBF0;
-        width: 32px;
-        border-top-right-radius: 8px;
-        border-bottom-right-radius: 8px;
-    }
-    QComboBox::down-arrow {
-        image: url(__ARROW__);
-        width: 16px;
-        height: 16px;
-    }
-
-    QPushButton {
-        background-color: #F58A2E;
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 9px;
-        font-weight: 600;
-    }
-    QPushButton:hover { background-color: #E87922; }
-"""
-
-
-POPUP_CONTAINER_STYLE = """
-    QFrame#comboPopup {
-        background-color: white;
-        border: 1px solid #E8EBF0;
-        border-radius: 8px;
-    }
-"""
-
-
-POPUP_VIEW_STYLE = """
-    QListView {
-        background-color: white;
-        color: #1D2939;
-        border: none;
-        outline: none;
-        padding: 4px;
-    }
-    QListView::item {
-        min-height: 30px;
-        padding: 0 10px;
-        border-radius: 6px;
-        color: #1D2939;
-        background-color: transparent;
-    }
-    QListView::item:hover, QListView::item:selected {
-        background-color: #FFE6CC;
-        color: #1D2939;
-    }
-"""
+from app.ui.widgets import make_button, style_combo
 
 
 class ProductDialog(QDialog):
-    """Окно добавления и редактирования товара."""
+    """Окно добавления и редактирования карточки товара в едином модуле «Товары и склад»."""
 
-    def __init__(
-        self,
-        parent=None,
-        product_id: int | None = None,
-    ) -> None:
+    def __init__(self, parent=None, product_id: int | None = None) -> None:
         super().__init__(parent)
-
         self.product_id = product_id
+        self.created_product_id: int | None = None
+        self._in_stock_imeis_count = 0
 
-        if self.product_id is None:
-            self.setWindowTitle("Добавление товара")
-        else:
-            self.setWindowTitle("Редактирование товара")
-
-        self.setMinimumWidth(400)
-        self.setStyleSheet(
-            DIALOG_STYLE.replace("__ARROW__", _make_arrow_icon())
+        self.setWindowTitle(
+            "Katalogda täze haryt" if self.product_id is None else "Harydy üýtgetmek"
         )
+        self.setMinimumWidth(460)
+        self.setStyleSheet(theme.STYLE)
 
         self._build_ui()
         self._load_categories()
@@ -152,387 +49,222 @@ class ProductDialog(QDialog):
         if self.product_id is not None:
             self._load_product()
 
-    def _load_product(self) -> None:
-        """Загружает существующий товар в поля формы."""
-        try:
-            with SessionLocal() as session:
-                product = session.get(Product, self.product_id)
-
-                if product is None:
-                    QMessageBox.warning(
-                        self,
-                        "Товар не найден",
-                        "Не удалось найти выбранный товар.",
-                    )
-                    self.reject()
-                    return
-                self.deactivate_button.show()
-
-                self.name_input.setText(product.name)
-                self.brand_input.setText(product.brand or "")
-                self.model_input.setText(product.model or "")
-                self.specification_input.setText(
-                    product.specification or ""
-                )
-                self.stock_input.setText(str(product.stock_quantity))
-                self.min_stock_input.setText(
-                    str(product.min_stock_quantity)
-                )
-
-                index = self.category_input.findData(
-                    product.category_id
-                )
-
-                if index >= 0:
-                    self.category_input.setCurrentIndex(index)
-                else:
-                    category = session.get(
-                        Category,
-                        product.category_id,
-                    )
-                    if category is not None:
-                        self.category_input.addItem(
-                            f"{category.name} (неактивна)",
-                            category.id,
-                        )
-                        self.category_input.setCurrentIndex(
-                            self.category_input.count() - 1
-                        )
-
-        except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка загрузки",
-                f"Не удалось загрузить товар:\n{error}",
-            )
-            self.reject()
-
-    @staticmethod
-    def _style_combo_popup(combo: QComboBox) -> None:
-        """Настраивает светлое оформление выпадающего списка."""
-        view = QListView()
-        combo.setView(view)
-        view.setStyleSheet(POPUP_VIEW_STYLE)
-
-        container = view.window()
-        container.setObjectName("comboPopup")
-        container.setStyleSheet(POPUP_CONTAINER_STYLE)
-        container.setAutoFillBackground(True)
-
-        palette = container.palette()
-        for role in (
-            QPalette.ColorRole.Window,
-            QPalette.ColorRole.Base,
-        ):
-            palette.setColor(role, QColor("white"))
-
-        palette.setColor(
-            QPalette.ColorRole.Text,
-            QColor("#1D2939"),
-        )
-        palette.setColor(
-            QPalette.ColorRole.WindowText,
-            QColor("#1D2939"),
-        )
-
-        container.setPalette(palette)
-        view.setPalette(palette)
-
-    def _add_category(self) -> None:
-        """Открывает окно создания категории."""
-        dialog = CategoryDialog(self)
-
-        if dialog.exec():
-            self._load_categories()
-
-            index = self.category_input.findData(
-                dialog.created_category_id
-            )
-
-            if index >= 0:
-                self.category_input.setCurrentIndex(index)
-
-    def _load_categories(self) -> None:
-        """Загружает активные категории."""
-        with SessionLocal() as session:
-            categories = session.scalars(
-                select(Category)
-                .where(Category.is_active.is_(True))
-                .order_by(Category.name)
-            ).all()
-
-        self.category_input.clear()
-
-        for category in categories:
-            self.category_input.addItem(
-                category.name,
-                category.id,
-            )
-
-        self.category_input.setCurrentIndex(-1)
-
     def _build_ui(self) -> None:
-        """Создаёт элементы формы."""
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
+
+        title = QLabel(
+            "Kataloga haryt goşmak" if self.product_id is None else "Haryt karty"
+        )
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        hint = QLabel(
+            "Telefonlar üçin haryt modelini dörediň, aýratyn enjamlary (IMEI) bolsa "
+            "«+ Enjam goş (IMEI)» arkaly ýa-da alyşda goşuň."
+        )
+        hint.setObjectName("mutedText")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
         form = QFormLayout()
+        form.setSpacing(10)
 
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Например, iPhone 16")
+        self.name_input.setPlaceholderText("Mysal: iPhone 16 Pro 256GB ýa-da Çehol Silicone Case")
+        form.addRow("Harydyň ady *", self.name_input)
 
-        self.category_input = QComboBox()
-        self.category_input.setPlaceholderText(
-            "Выберите категорию"
-        )
-        self._style_combo_popup(self.category_input)
+        cat_row = QHBoxLayout()
+        self.category_input = style_combo(QComboBox())
+        self.category_input.setPlaceholderText("Kategoriýa saýlaň")
+        cat_row.addWidget(self.category_input, 1)
+
+        add_cat_btn = make_button("+ Kategoriýa")
+        add_cat_btn.setToolTip("Täze kategoriýa döretmek")
+        add_cat_btn.clicked.connect(self._add_category)
+        cat_row.addWidget(add_cat_btn)
+        form.addRow("Kategoriýa *", cat_row)
 
         self.brand_input = QLineEdit()
-        self.brand_input.setPlaceholderText("Необязательно")
+        self.brand_input.setPlaceholderText("Mysal: Apple, Samsung, Xiaomi (hökmany däl)")
+        form.addRow("Brend", self.brand_input)
 
         self.model_input = QLineEdit()
-        self.model_input.setPlaceholderText("Необязательно")
+        self.model_input.setPlaceholderText("Mysal: A3102 / S928B (hökmany däl)")
+        form.addRow("Model", self.model_input)
 
         self.specification_input = QLineEdit()
-        self.specification_input.setPlaceholderText(
-            "Необязательно"
-        )
-        self.stock_input = QLineEdit()
-        self.stock_input.setPlaceholderText("0")    
+        self.specification_input.setPlaceholderText("Reňk, ýat, aýratynlyklar (hökmany däl)")
+        form.addRow("Aýratynlyklar", self.specification_input)
 
-        self.min_stock_input = QLineEdit()
-        self.min_stock_input.setPlaceholderText("0")
+        self.stock_spin = QSpinBox()
+        self.stock_spin.setRange(0, 1000000)
+        self.stock_spin.setValue(0)
+        form.addRow("Skladdaky sany", self.stock_spin)
 
-        form.addRow("Название *", self.name_input)
-        
-        
+        cost_row = QHBoxLayout()
+        self.cost_spin = QDoubleSpinBox()
+        self.cost_spin.setRange(0, 10000000)
+        self.cost_spin.setDecimals(2)
+        self.cost_curr_combo = style_combo(QComboBox())
+        self.cost_curr_combo.addItems(["USD", "TMT"])
+        cost_row.addWidget(self.cost_spin, 1)
+        cost_row.addWidget(self.cost_curr_combo)
+        form.addRow("1 sanynyň öz bahasy", cost_row)
 
-        category_layout = QHBoxLayout()
-        category_layout.addWidget(self.category_input)
+        self.min_stock_spin = QSpinBox()
+        self.min_stock_spin.setRange(0, 100000)
+        default_min = SettingsService.get_default_min_stock()
+        self.min_stock_spin.setValue(default_min if self.product_id is None else 0)
+        form.addRow("Iň az galyndy (sany)", self.min_stock_spin)
 
-        self.add_category_button = QPushButton("+")
-        self.add_category_button.setFixedWidth(40)
-        self.add_category_button.setToolTip(
-            "Создать новую категорию"
-        )
-        self.add_category_button.clicked.connect(
-            self._add_category
-        )
+        root.addLayout(form)
 
-        category_layout.addWidget(self.add_category_button)
-        form.addRow("Категория *", category_layout)
+        self.imei_note_label = QLabel()
+        self.imei_note_label.setObjectName("mutedText")
+        self.imei_note_label.setWordWrap(True)
+        self.imei_note_label.hide()
+        root.addWidget(self.imei_note_label)
 
-        form.addRow("Бренд", self.brand_input)
-        form.addRow("Модель", self.model_input)
-        form.addRow("Характеристики", self.specification_input)
-        form.addRow("Количество на складе", self.stock_input)
-        form.addRow("Минимальный остаток", self.min_stock_input)
-
-        layout.addLayout(form)
-
-        self.save_button = QPushButton("Сохранить")
-        self.cancel_button = QPushButton("Отмена")
-        self.deactivate_button = QPushButton("Деактивировать товар")
+        footer = QHBoxLayout()
+        self.deactivate_button = make_button("Öçür (arhiwe geçir)", "danger")
         self.deactivate_button.clicked.connect(self._deactivate_product)
         self.deactivate_button.hide()
+        footer.addWidget(self.deactivate_button)
+        footer.addStretch()
 
-        self.save_button.clicked.connect(self._save_product)
-        self.cancel_button.clicked.connect(self.reject)
+        cancel_btn = make_button("Ýatyr")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = make_button("Harydy ýatda sakla", "primary")
+        save_btn.clicked.connect(self._save_product)
+        footer.addWidget(cancel_btn)
+        footer.addWidget(save_btn)
+        root.addLayout(footer)
 
-        layout.addWidget(self.save_button)
-        layout.addWidget(self.cancel_button)
-        layout.addWidget(self.deactivate_button)
+    def _load_categories(self) -> None:
+        self.category_input.clear()
+        for category in list_categories(active_only=True):
+            self.category_input.addItem(category.name, category.id)
+        if self.category_input.count() > 0 and self.product_id is None:
+            self.category_input.setCurrentIndex(0)
+
+    def _add_category(self) -> None:
+        dlg = CategoryDialog(self)
+        if dlg.exec():
+            self._load_categories()
+            idx = self.category_input.findData(dlg.created_category_id)
+            if idx >= 0:
+                self.category_input.setCurrentIndex(idx)
+
+    def _load_product(self) -> None:
+        try:
+            product, in_stock_imeis, _items = get_product_with_devices(self.product_id)
+            if product is None:
+                QMessageBox.warning(self, "Haryt tapylmady", "Saýlanan haryt tapylmady.")
+                self.reject()
+                return
+
+            self.deactivate_button.show()
+            self._in_stock_imeis_count = in_stock_imeis
+            self.name_input.setText(product.name)
+            self.brand_input.setText(product.brand or "")
+            self.model_input.setText(product.model or "")
+            self.specification_input.setText(product.specification or "")
+            self.stock_spin.setMinimum(in_stock_imeis)
+            self.stock_spin.setValue(product.stock_quantity)
+            self.min_stock_spin.setValue(product.min_stock_quantity)
+
+            saved_cost = SettingsService.get_product_default_cost(product.id)
+            if saved_cost is not None:
+                c_val, c_cur = saved_cost
+                self.cost_spin.setValue(float(c_val))
+                self.cost_curr_combo.setCurrentText(c_cur)
+            else:
+                with SessionLocal() as session:
+                    latest_pi = session.execute(
+                        select(PurchaseItem, Purchase)
+                        .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+                        .where(
+                            PurchaseItem.product_id == product.id,
+                            Purchase.status == "active",
+                        )
+                        .order_by(Purchase.purchase_date.desc(), PurchaseItem.id.desc())
+                    ).first()
+                    if latest_pi:
+                        pi, pur = latest_pi
+                        self.cost_spin.setValue(float(pi.unit_cost))
+                        self.cost_curr_combo.setCurrentText(pur.currency)
+
+            if in_stock_imeis > 0:
+                self.imei_note_label.setText(
+                    f"ℹ Skladda {in_stock_imeis} sany aýratyn enjam (IMEI) hasaba alnan. "
+                    f"Jemi sany {in_stock_imeis} sanydan az bolup bilmez."
+                )
+                self.imei_note_label.show()
+
+            idx = self.category_input.findData(product.category_id)
+            if idx >= 0:
+                self.category_input.setCurrentIndex(idx)
+            else:
+                for cat in list_categories(active_only=False):
+                    if cat.id == product.category_id:
+                        self.category_input.addItem(f"{cat.name} (işjeň däl)", cat.id)
+                        self.category_input.setCurrentIndex(self.category_input.count() - 1)
+                        break
+        except SQLAlchemyError as error:
+            QMessageBox.critical(self, "Ýükleme ýalňyşlygy", f"Harydy ýükläp bolmady:\n{error}")
+            self.reject()
+
+    def _save_product(self) -> None:
+        try:
+            product = save_product(
+                product_id=self.product_id,
+                name=self.name_input.text(),
+                category_id=self.category_input.currentData(),
+                brand=self.brand_input.text(),
+                model=self.model_input.text(),
+                specification=self.specification_input.text(),
+                stock_quantity=self.stock_spin.value(),
+                min_stock_quantity=self.min_stock_spin.value(),
+            )
+            self.created_product_id = product.id
+            if self.cost_spin.value() > 0:
+                SettingsService.set_product_default_cost(
+                    product.id,
+                    self.cost_spin.value(),
+                    self.cost_curr_combo.currentText(),
+                )
+            msg = (
+                f"«{product.name}» ({product.sku}) harydy üstünlikli goşuldy."
+                if self.product_id is None
+                else f"«{product.name}» harydynyň üýtgeşmeleri ýatda saklandy."
+            )
+            QMessageBox.information(self, "Taýýar", msg)
+            self.accept()
+        except ValueError as err:
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
+        except SQLAlchemyError as err:
+            QMessageBox.critical(self, "Ýatda saklama ýalňyşlygy", f"Harydy ýatda saklap bolmady:\n{err}")
 
     def _deactivate_product(self) -> None:
         if self.product_id is None:
             return
-
         answer = QMessageBox.question(
             self,
-            "Деактивация товара",
-            "Вы действительно хотите деактивировать этот товар?\n"
-            "Он исчезнет из активного каталога.",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No,
+            "Harydy öçürmek",
+            "Bu harydy hakykatdan hem öçürmek (arhiwe geçirmek) isleýärsiňizmi?\n"
+            "Ol işjeň katalogdan gizlener.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-
         if answer != QMessageBox.StandardButton.Yes:
             return
-
         try:
-            with SessionLocal() as session:
-                product = session.get(Product, self.product_id)
-
-                if product is None:
-                    QMessageBox.warning(
-                        self,
-                        "Товар не найден",
-                        "Не удалось найти товар.",
-                    )
-                    return
-
-                stock_items = session.scalars(
-                    select(StockItem).where(
-                        StockItem.product_id == self.product_id,
-                        StockItem.status == "in_stock",
-                    )
-                ).first()
-
-                if product.stock_quantity > 0 or stock_items is not None:
-                    QMessageBox.warning(
-                        self,
-                        "Нельзя деактивировать",
-                        "У товара ещё есть остатки на складе.\n"
-                        "Сначала необходимо распродать или списать их.",
-                    )
-                    return
-
-                product.is_active = False
-                session.commit()
-
-            QMessageBox.information(
-                self,
-                "Готово",
-                "Товар успешно деактивирован.",
-            )
+            deactivate_product(self.product_id)
+            QMessageBox.information(self, "Taýýar", "Haryt üstünlikli öçürildi.")
             self.accept()
-
-        except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка",
-                f"Не удалось деактивировать товар:\n{error}",
-            )
-
-    def _save_product(self) -> None:
-        """Создаёт новый товар или сохраняет изменения."""
-        name = self.name_input.text().strip()
-        category_id = self.category_input.currentData()
-        brand = self.brand_input.text().strip() or None
-        model = self.model_input.text().strip() or None
-        specification = (
-            self.specification_input.text().strip() or None
-        )
-
-        if not name:
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Введите название товара.",
-            )
-            return
-
-        if category_id is None:
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Выберите категорию товара.",
-            )
-            return
-
-        min_stock_text = self.min_stock_input.text().strip()
-
-        if not min_stock_text:
-            min_stock_quantity = 0
-        elif not min_stock_text.isdigit():
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Минимальный остаток должен быть целым "
-                "неотрицательным числом.",
-            )
-            return
-        else:
-            min_stock_quantity = int(min_stock_text)
-
-
-
-        stock_text = self.stock_input.text().strip()
-        
-        if not stock_text:
-            stock_quantity = 0
-        elif not stock_text.isdigit():
-            QMessageBox.warning(
-                self,
-                "Ошибка",
-                "Количество на складе должно быть целым "
-                "неотрицательным числом.",
-            )
-            return
-        else:
-            stock_quantity = int(stock_text)
-
-        try:
-            with SessionLocal() as session:
-                if self.product_id is None:
-                    last_product = session.scalar(
-                        select(Product)
-                        .order_by(Product.id.desc())
-                        .limit(1)
-                    )
-
-                    next_number = (
-                        last_product.id + 1
-                        if last_product
-                        else 1
-                    )
-                    sku = f"PRD_{next_number:06d}"
-
-                    product = Product(
-                        category_id=category_id,
-                        sku=sku,
-                        name=name,
-                        brand=brand,
-                        model=model,
-                        specification=specification,
-                        min_stock_quantity=min_stock_quantity,
-                        stock_quantity=stock_quantity,   
-                    )
-
-                    session.add(product)
-                    success_message = (
-                        f"Товар «{name}» успешно добавлен."
-                    )
-
-                else:
-                    product = session.get(
-                        Product,
-                        self.product_id,
-                    )
-
-                    if product is None:
-                        QMessageBox.warning(
-                            self,
-                            "Товар не найден",
-                            "Не удалось найти товар для изменения.",
-                        )
-                        return
-
-                    product.category_id = category_id
-                    product.name = name
-                    product.brand = brand
-                    product.model = model
-                    product.specification = specification
-                    product.stock_quantity = stock_quantity
-                    product.min_stock_quantity = (
-                        min_stock_quantity
-                    )
-
-                    success_message = (
-                        f"Изменения товара «{name}» сохранены."
-                    )
-
-                session.commit()
-
-            QMessageBox.information(
-                self,
-                "Готово",
-                success_message,
-            )
-            self.accept()
-
-        except SQLAlchemyError as error:
-            QMessageBox.critical(
-                self,
-                "Ошибка сохранения",
-                f"Не удалось сохранить товар:\n{error}",
-            )
+        except ValueError as err:
+            QMessageBox.warning(self, "Öçürip bolmaýar", str(err))
+        except SQLAlchemyError as err:
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Harydy öçürip bolmady:\n{err}")

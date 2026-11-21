@@ -3,7 +3,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .venv/
+venv/
 .env
+*.log
 data/*.db
 data/*.db-wal
 data/*.db-shm
@@ -12,6 +14,7 @@ backups/*
 build/
 dist/
 *.spec
+!mobilestore.spec
 .vscode/
 .idea/
 .DS_Store

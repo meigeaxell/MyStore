@@ -1,5 +1,7 @@
 from app.models.cash_movement import CashMovement
+from app.models.cash_register import CashRegister, CashTransaction
 from app.models.category import Category
+from app.models.device_exchange import DeviceExchange
 from app.models.exchange_rate import ExchangeRate
 from app.models.expense import Expense
 from app.models.product import Product
@@ -15,7 +17,10 @@ from app.models.stock_item import StockItem
 
 __all__ = [
     "CashMovement",
+    "CashRegister",
+    "CashTransaction",
     "Category",
+    "DeviceExchange",
     "ExchangeRate",
     "Expense",
     "Product",

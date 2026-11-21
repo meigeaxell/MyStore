@@ -21,7 +21,8 @@ STYLE = f"""
 }}
 
 QMainWindow, QWidget#page,
-QScrollArea, QScrollArea > QWidget > QWidget {{
+QScrollArea, QScrollArea > QWidget > QWidget,
+QTabWidget::pane > QWidget {{
     background: {BG};
 }}
 
@@ -30,8 +31,73 @@ QWidget {{
     font-size: 10pt;
 }}
 
-QDialog {{
+QDialog, QMessageBox, QInputDialog {{
     background: {BG};
+    color: {TEXT};
+}}
+
+/* ---------- Вкладки (QTabWidget / QTabBar) ---------- */
+
+QTabWidget::pane {{
+    background: {BG};
+    border: 1px solid {BORDER};
+    border-radius: 12px;
+    top: -1px;
+}}
+
+QTabBar {{
+    background: transparent;
+}}
+
+QTabBar::tab {{
+    background: #EAECF0;
+    color: {MUTED};
+    border: 1px solid {BORDER};
+    border-bottom: none;
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    padding: 9px 18px;
+    margin-right: 4px;
+    font-weight: 600;
+}}
+
+QTabBar::tab:hover {{
+    background: {ACCENT_BG};
+    color: {NAVY};
+}}
+
+QTabBar::tab:selected {{
+    background: {WHITE};
+    color: {ACCENT};
+    border-color: {BORDER};
+    border-bottom: 2px solid {ACCENT};
+}}
+
+/* ---------- Списки (QListWidget / QListView) ---------- */
+
+QListWidget, QListView {{
+    background-color: {WHITE};
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 4px;
+    outline: none;
+}}
+
+QListWidget::item, QListView::item {{
+    padding: 8px 10px;
+    border-radius: 6px;
+    color: {TEXT};
+}}
+
+QListWidget::item:hover, QListView::item:hover {{
+    background-color: {ACCENT_BG};
+    color: {TEXT};
+}}
+
+QListWidget::item:selected, QListView::item:selected {{
+    background-color: {ACCENT_SOFT};
+    color: {TEXT};
 }}
 
 QLabel {{
@@ -269,6 +335,34 @@ QPushButton#darkBtn {{
 
 QPushButton#darkBtn:hover {{
     background: #26395A;
+}}
+
+QPushButton#dangerBtn {{
+    background: white;
+    color: {RED};
+    border: 1px solid {RED};
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}}
+
+QPushButton#dangerBtn:hover {{
+    background: #FDECEA;
+    border-color: {RED};
+}}
+
+QPushButton#secondaryBtn {{
+    background: white;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}}
+
+QPushButton#secondaryBtn:hover {{
+    background: {ACCENT_BG};
+    border-color: {ACCENT};
 }}
 
 /* ---------- Обычные кнопки ---------- */

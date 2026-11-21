@@ -1,6 +1,6 @@
-from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import datetime
-from sqlalchemy import select
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+
 from sqlalchemy.orm import Session
 
 from app.models.cash_register import CashRegister, CashTransaction
@@ -13,9 +13,9 @@ def _decimal(value) -> Decimal:
     try:
         res = Decimal(str(value))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError("Некорректное числовое значение.") from exc
+        raise ValueError("Nädogry san bahasy.") from exc
     if not res.is_finite():
-        raise ValueError("Число должно быть конечным.")
+        raise ValueError("San çäkli bolmaly.")
     return res
 
 
@@ -26,7 +26,7 @@ def _money(value: Decimal) -> Decimal:
 def _validate_rate(value) -> Decimal:
     rate = _decimal(value)
     if rate <= 0:
-        raise ValueError("Курс обмена должен быть больше нуля.")
+        raise ValueError("Çalyşyk kursy noldan uly bolmaly.")
     return rate.quantize(RATE_PRECISION, rounding=ROUND_HALF_UP)
 
 
@@ -45,16 +45,16 @@ class CashService:
         """Изменяет баланс кассы и создает запись движения денег (CashTransaction)."""
         register = session.get(CashRegister, cash_register_id)
         if not register:
-            raise ValueError(f"Касса с ID {cash_register_id} не найдена.")
+            raise ValueError(f"ID {cash_register_id} kassa tapylmady.")
 
         amount = _money(_decimal(amount))
         if amount <= 0:
-            raise ValueError("Сумма транзакции должна быть больше нуля.")
+            raise ValueError("Amal mukdary noldan uly bolmaly.")
 
         exchange_rate = _validate_rate(exchange_rate)
 
         if transaction_type not in ("income", "expense", "refund"):
-            raise ValueError("Некорректный тип кассовой транзакции.")
+            raise ValueError("Nädogry kassa amalynyň görnüşi.")
 
         if currency == register.currency:
             delta = amount
@@ -63,14 +63,14 @@ class CashService:
         elif currency == "USD" and register.currency == "TMT":
             delta = _money(amount * exchange_rate)
         else:
-            raise ValueError("Несоответствие валют кассы и платежа.")
+            raise ValueError("Kassa we töleg walýutalary gabat gelmeýär.")
 
         if transaction_type == "income":
             register.balance = _money(Decimal(str(register.balance)) + delta)
         elif transaction_type in ("expense", "refund"):
             new_balance = Decimal(str(register.balance)) - delta
             if new_balance < 0:
-                raise ValueError("Недостаточно средств в кассе.")
+                raise ValueError("Kassada ýeterlik pul ýok.")
             register.balance = _money(new_balance)
 
         tx = CashTransaction(

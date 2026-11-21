@@ -211,7 +211,7 @@ def test_supplier_cannot_refund_more_than_debt(product):
         "Проверка переплаты",
     )
 
-    with pytest.raises(ValueError, match="превышает задолженность"):
+    with pytest.raises(ValueError, match="bergisinden köp"):
         purchase_service.add_purchase_refund(
             purchase_id=purchase_id,
             currency="TMT",
@@ -237,7 +237,7 @@ def test_cannot_cancel_purchase_if_stock_is_insufficient(product):
         item.stock_quantity = 1
         session.commit()
 
-    with pytest.raises(ValueError, match="уже выбыла"):
+    with pytest.raises(ValueError, match="eýýäm çykarylan"):
         purchase_service.cancel_purchase(
             purchase_id,
             "Попытка аннулирования",
@@ -259,7 +259,7 @@ def test_cannot_add_payment_to_cancelled_purchase(product):
         "Закупка отменена",
     )
 
-    with pytest.raises(ValueError, match="аннулированную"):
+    with pytest.raises(ValueError, match="Ýatyrylan alyş"):
         purchase_service.add_purchase_payment(
             purchase_id=purchase_id,
             currency="USD",
@@ -280,7 +280,7 @@ def test_refund_is_allowed_only_after_cancellation(product):
         ],
     )
 
-    with pytest.raises(ValueError, match="только по аннулированной"):
+    with pytest.raises(ValueError, match="diňe ýatyrylan alyş"):
         purchase_service.add_purchase_refund(
             purchase_id=purchase_id,
             currency="USD",

@@ -4,11 +4,10 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 class DashboardPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
-        title = QLabel("Главная панель")
+        title = QLabel("Esasy panel")
         title.setObjectName("pageTitle")
         description = QLabel(
-            "Здесь появятся выручка, прибыль, продажи и остатки склада. "
-            "Сейчас мы создаём основу приложения."
+            "Bu ýerde girdeji, peýda, satyşlar we sklad galyndylary görkeziler."
         )
         description.setWordWrap(True)
         description.setObjectName("mutedText")

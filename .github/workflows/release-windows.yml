@@ -1,0 +1,103 @@
+name: Release Windows (Portable ZIP)
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies and PyInstaller
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pyinstaller>=6.10,<7"
+
+      - name: Run linter (ruff)
+        shell: pwsh
+        run: ruff check app tests
+
+      - name: Run unit tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pytest tests/test_models.py tests/test_mobile_protocol.py tests/test_purchase_service.py tests/test_purchase_cancellation.py tests/test_smoke.py -v
+
+      - name: Build Windows portable bundle (PyInstaller)
+        shell: pwsh
+        run: pyinstaller --clean --noconfirm mobilestore.spec
+
+      - name: Bundle user guide into portable folder
+        shell: pwsh
+        run: |
+          if (Test-Path "USER_GUIDE_AND_OVERVIEW.txt") {
+            Copy-Item "USER_GUIDE_AND_OVERVIEW.txt" -Destination "dist/MobileStore/"
+          }
+
+      - name: Smoke test compiled MobileStore.exe on clean database
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $smokeDir = Join-Path $env:RUNNER_TEMP "mobilestore-smoke-data"
+          if (Test-Path $smokeDir) { Remove-Item -Recurse -Force $smokeDir }
+          $env:MOBILESTORE_DATA_DIR = $smokeDir
+          & ".\dist\MobileStore\MobileStore.exe" --smoke-test
+          if ($LASTEXITCODE -ne 0) {
+            $errLog = Join-Path $smokeDir "data\startup_error.log"
+            if (Test-Path $errLog) { Get-Content $errLog }
+            exit $LASTEXITCODE
+          }
+          $dbFile = Join-Path $smokeDir "data\mobilestore.db"
+          if (-not (Test-Path $dbFile)) {
+            Write-Error "Database was not created by MobileStore.exe!"
+            exit 1
+          }
+          Write-Host "Smoke test PASSED: MobileStore.exe created DB at $dbFile"
+
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF_NAME } else { "dev-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $zipName = "MobileStore-Windows-x64-$tag.zip"
+          Compress-Archive -Path "dist\MobileStore" -DestinationPath $zipName -Force
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+          Get-Item $zipName | Select-Object Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MobileStore-Windows-x64
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release (on v* tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ZIP_NAME }}
+          generate_release_notes: true
+          body: |
+            ### MobileStore — Windows (Portable)
+
+            1. Скачайте `${{ env.ZIP_NAME }}` и распакуйте в любую папку (например, `D:\MobileStore`).
+            2. Запустите `MobileStore.exe`.
+            3. База данных (`data\mobilestore.db`) и резервные копии (`backups\`) создаются автоматически рядом с `MobileStore.exe`.
+            4. Подробная инструкция и шпаргалки находятся внутри архива в файле `USER_GUIDE_AND_OVERVIEW.txt`.

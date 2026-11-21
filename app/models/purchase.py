@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -17,17 +18,22 @@ class Purchase(Base):
         nullable=False,
     )
 
+    supplier_name: Mapped[str | None] = mapped_column(
+        String(150),
+        nullable=True,
+    )
+
     currency: Mapped[str] = mapped_column(
         String(3),
         nullable=False,
     )
 
-    exchange_rate: Mapped[float] = mapped_column(
+    exchange_rate: Mapped[Decimal] = mapped_column(
         Numeric(12, 4),
         nullable=False,
     )
 
-    total_amount: Mapped[float] = mapped_column(
+    total_amount: Mapped[Decimal] = mapped_column(
         Numeric(12, 2),
         nullable=False,
     )

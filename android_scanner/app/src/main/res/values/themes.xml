@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.MobileStoreScanner" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">#F6F7F9</item>
+        <item name="android:statusBarColor">#1B2A41</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+    </style>
+</resources>
