@@ -22,6 +22,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
@@ -95,13 +96,16 @@ fun SaleScanScreen(
     val activeCard by vm.activeProductCard.collectAsState()
     val scanSource by vm.activeScanSource.collectAsState()
     val multiMatches by vm.multipleMatches.collectAsState()
+    val saleOcrResult by vm.saleOcrResult.collectAsState()
+    val saleOcrCatFilter by vm.saleOcrCategoryFilter.collectAsState()
     val isBusy by vm.isSaleRequestInFlight.collectAsState()
     val cooldownTrigger by vm.scanCooldownTrigger.collectAsState()
 
     var ocrEnabled by remember { mutableStateOf(true) }
     var showManualDialog by remember { mutableStateOf(false) }
+    var boxCaptureTrigger by remember { mutableIntStateOf(0) }
 
-    val isPaused = activeCard != null || multiMatches.isNotEmpty() || isBusy || showManualDialog
+    val isPaused = activeCard != null || multiMatches.isNotEmpty() || saleOcrResult != null || isBusy || showManualDialog
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (hasCameraPermission) {
@@ -111,7 +115,9 @@ fun SaleScanScreen(
                 burstWindowMs = 550L,
                 cooldownMs = config.scanCooldownMs,
                 cooldownTriggerKey = cooldownTrigger,
+                boxCaptureTriggerKey = boxCaptureTrigger,
                 onDetected = { bundle -> vm.onSaleBundleDetected(bundle) },
+                onBoxTextCaptured = { rawText -> vm.matchAccessoryForSale(rawText) },
                 onCameraStatusChanged = { vm.updateCameraStatus(it) },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -160,34 +166,47 @@ fun SaleScanScreen(
             }
         }
 
-        Row(
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(start = 14.dp, end = 84.dp, bottom = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            FilterChip(
-                selected = ocrEnabled,
-                onClick = { ocrEnabled = !ocrEnabled },
-                label = { Text("OCR IMEI") },
-                colors = FilterChipDefaults.filterChipColors(
-                    containerColor = NavyDark.copy(alpha = 0.80f),
-                    labelColor = Color.White,
-                    selectedContainerColor = AccentOrange,
-                    selectedLabelColor = Color.White,
-                ),
-            )
-            OutlinedButton(
-                onClick = { showManualDialog = true },
-                border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    containerColor = NavyDark.copy(alpha = 0.82f),
-                    contentColor = Color.White,
-                ),
+            Button(
+                onClick = { boxCaptureTrigger += 1 },
+                enabled = !isBusy && hasCameraPermission,
+                colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier.height(44.dp),
             ) {
-                Icon(Icons.Default.Keyboard, contentDescription = null)
+                Icon(Icons.Default.DocumentScanner, contentDescription = null)
                 Spacer(Modifier.width(6.dp))
-                Text("Kod ýaz")
+                Text("Aksessuar OCR (guty)", fontWeight = FontWeight.Bold)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = ocrEnabled,
+                    onClick = { ocrEnabled = !ocrEnabled },
+                    label = { Text("OCR IMEI") },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = NavyDark.copy(alpha = 0.80f),
+                        labelColor = Color.White,
+                        selectedContainerColor = AccentOrange,
+                        selectedLabelColor = Color.White,
+                    ),
+                )
+                OutlinedButton(
+                    onClick = { showManualDialog = true },
+                    border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = NavyDark.copy(alpha = 0.82f),
+                        contentColor = Color.White,
+                    ),
+                ) {
+                    Icon(Icons.Default.Keyboard, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("Kod ýaz")
+                }
             }
         }
 
@@ -198,6 +217,24 @@ fun SaleScanScreen(
             ) {
                 CircularProgressIndicator(color = AccentOrange)
             }
+        }
+    }
+
+    val ocrRes = saleOcrResult
+    if (ocrRes != null) {
+        ModalBottomSheet(
+            containerColor = SurfaceWhite,
+            onDismissRequest = { if (!isBusy) vm.dismissSaleOcr() },
+        ) {
+            AccessoryOcrResultSheet(
+                result = ocrRes,
+                isBusy = isBusy,
+                selectedCategoryId = saleOcrCatFilter,
+                showCreateNewButton = false,
+                onRequery = { editedText, catId -> vm.matchAccessoryForSale(editedText, catId) },
+                onSelectProduct = { chosen -> vm.selectAccessoryForSale(chosen) },
+                onDismiss = { vm.dismissSaleOcr() },
+            )
         }
     }
 
@@ -322,9 +359,16 @@ private fun SaleProductCardSheet(
     onConfirm: (price: String, currency: String, quantity: Int) -> Unit,
     onCancel: () -> Unit,
 ) {
-    var priceText by remember(card.productId, card.imei) { mutableStateOf("") }
+    var priceText by remember(card.productId, card.imei) {
+        mutableStateOf(
+            card.lastSalePrice?.takeIf { it.isNotBlank() && it != "0.00" && it != "0" } ?: ""
+        )
+    }
     var selectedCurrency by remember(card.productId, card.imei) {
-        mutableStateOf(card.defaultCurrency.ifBlank { "TMT" })
+        mutableStateOf(
+            card.lastSaleCurrency?.takeIf { it == "USD" || it == "TMT" }
+                ?: card.defaultCurrency.ifBlank { "TMT" }
+        )
     }
     var quantity by remember(card.productId, card.imei) { mutableIntStateOf(1) }
 

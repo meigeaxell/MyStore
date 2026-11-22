@@ -70,6 +70,7 @@ class BarcodeAndOcrAnalyzer(
     private val onCooldownStarted: (cooldownUntilMs: Long) -> Unit,
     private val onBurstProgress: (String?) -> Unit,
     private val onDetected: (ScanBundle) -> Unit,
+    private val onBoxTextCaptured: ((String) -> Unit)? = null,
 ) : ImageAnalysis.Analyzer {
 
     private val barcodeScanner = BarcodeScanning.getClient(
@@ -90,6 +91,8 @@ class BarcodeAndOcrAnalyzer(
 
     private val isProcessingFrame = AtomicBoolean(false)
     private val globalCooldownUntilMs = AtomicLong(0L)
+    private val pendingBoxCaptureFrames = java.util.concurrent.atomic.AtomicInteger(0)
+    private val capturedBoxLines = LinkedHashSet<String>()
 
     private var frameCounter = 0L
     private var lastEmittedPrimary: String = ""
@@ -109,9 +112,19 @@ class BarcodeAndOcrAnalyzer(
     private var lastOcrCandidate: String = ""
     private var ocrConsensusCount: Int = 0
 
+    fun requestBoxTextCapture(frames: Int = 2) {
+        synchronized(capturedBoxLines) {
+            capturedBoxLines.clear()
+        }
+        resetBurst()
+        pendingBoxCaptureFrames.set(frames.coerceIn(1, 4))
+        onBurstProgress("Guty teksti okalýar…")
+    }
+
     fun triggerCooldown(durationMs: Long = cooldownMsProvider()) {
         val until = System.currentTimeMillis() + durationMs.coerceAtLeast(500L)
         globalCooldownUntilMs.set(until)
+        pendingBoxCaptureFrames.set(0)
         resetBurst()
         onCooldownStarted(until)
     }
@@ -133,7 +146,9 @@ class BarcodeAndOcrAnalyzer(
     @SuppressLint("UnsafeOptInUsageError")
     override fun analyze(imageProxy: ImageProxy) {
         val now = System.currentTimeMillis()
-        if (isPaused() || now < globalCooldownUntilMs.get()) {
+        val wantsBoxCapture = pendingBoxCaptureFrames.get() > 0
+
+        if (!wantsBoxCapture && (isPaused() || now < globalCooldownUntilMs.get())) {
             if (burstStartedAt > 0L) resetBurst()
             imageProxy.close()
             return
@@ -153,6 +168,48 @@ class BarcodeAndOcrAnalyzer(
 
         val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
         frameCounter += 1
+
+        // Режим захвата полного текста коробки аксессуара (2 кадра для защиты от бликов)
+        if (wantsBoxCapture) {
+            textRecognizer.process(inputImage)
+                .addOnSuccessListener { visionText ->
+                    val lines = visionText.text
+                        .lines()
+                        .map { it.trim() }
+                        .filter { it.length >= 2 }
+                    synchronized(capturedBoxLines) {
+                        lines.forEach { capturedBoxLines.add(it) }
+                    }
+                    val left = pendingBoxCaptureFrames.decrementAndGet()
+                    if (left <= 0) {
+                        val merged = synchronized(capturedBoxLines) {
+                            val out = capturedBoxLines.joinToString("\n")
+                            capturedBoxLines.clear()
+                            out
+                        }
+                        onBurstProgress(null)
+                        onBoxTextCaptured?.invoke(merged)
+                    } else {
+                        onBurstProgress("Guty teksti okalýar…")
+                    }
+                }
+                .addOnFailureListener {
+                    val left = pendingBoxCaptureFrames.decrementAndGet()
+                    if (left <= 0) {
+                        val merged = synchronized(capturedBoxLines) {
+                            val out = capturedBoxLines.joinToString("\n")
+                            capturedBoxLines.clear()
+                            out
+                        }
+                        onBurstProgress(null)
+                        onBoxTextCaptured?.invoke(merged)
+                    }
+                }
+                .addOnCompleteListener {
+                    finishFrame(imageProxy)
+                }
+            return
+        }
 
         barcodeScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->

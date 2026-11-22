@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.ListAlt
@@ -103,13 +104,18 @@ fun ReceivingScreen(
     val catalog by vm.catalogProducts.collectAsState()
     val categories by vm.categories.collectAsState()
     val cooldownTrigger by vm.scanCooldownTrigger.collectAsState()
+    val receivingOcrResult by vm.receivingOcrResult.collectAsState()
+    val receivingOcrCatFilter by vm.receivingOcrCategoryFilter.collectAsState()
 
     var cameraStatus by remember { mutableStateOf("Işjeň") }
     var ocrEnabled by remember { mutableStateOf(true) }
     var showPurchaseSheet by remember { mutableStateOf(false) }
     var showProductPicker by remember { mutableStateOf(false) }
     var showCreateProduct by remember { mutableStateOf(false) }
+    var createProductPrefill by remember { mutableStateOf<com.mobilestore.scanner.network.AccessoryDraftSuggestion?>(null) }
+    var createProductOcrRawText by remember { mutableStateOf<String?>(null) }
     var showManualImeiDialog by remember { mutableStateOf(false) }
+    var boxCaptureTrigger by remember { mutableStateOf(0) }
 
     LaunchedEffect(Unit) {
         if (catalog.isEmpty()) vm.loadCatalog()
@@ -122,6 +128,7 @@ fun ReceivingScreen(
     val batchBadge = if (useImeiMode) "$batchCount IMEI" else "$batchCount sany"
 
     val isPaused = pendingDevice != null ||
+        receivingOcrResult != null ||
         showPurchaseSheet ||
         showProductPicker ||
         showCreateProduct ||
@@ -136,7 +143,9 @@ fun ReceivingScreen(
                 burstWindowMs = 800L,
                 cooldownMs = config.scanCooldownMs,
                 cooldownTriggerKey = cooldownTrigger,
+                boxCaptureTriggerKey = boxCaptureTrigger,
                 onDetected = { vm.onReceivingBundleDetected(it) },
+                onBoxTextCaptured = { rawText -> vm.matchAccessoryForReceiving(rawText) },
                 onCameraStatusChanged = { cameraStatus = it },
                 modifier = Modifier.fillMaxSize(),
             )
@@ -195,18 +204,20 @@ fun ReceivingScreen(
                 .padding(start = 14.dp, end = 84.dp, bottom = 14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = ocrEnabled,
-                    onClick = { ocrEnabled = !ocrEnabled },
-                    label = { Text("OCR") },
-                    colors = FilterChipDefaults.filterChipColors(
-                        containerColor = NavyDark.copy(alpha = 0.80f),
-                        labelColor = Color.White,
-                        selectedContainerColor = AccentOrange,
-                        selectedLabelColor = Color.White,
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = { boxCaptureTrigger += 1 },
+                    enabled = !isBusy && hasCameraPermission,
+                    border = BorderStroke(1.dp, AccentOrange),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = NavyDark.copy(alpha = 0.86f),
+                        contentColor = AccentOrange,
                     ),
-                )
+                ) {
+                    Icon(Icons.Default.DocumentScanner, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Guty OCR", maxLines = 1, fontWeight = FontWeight.Bold)
+                }
                 OutlinedButton(
                     onClick = { showProductPicker = true },
                     border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
@@ -216,7 +227,7 @@ fun ReceivingScreen(
                     ),
                 ) {
                     Icon(Icons.Default.Inventory2, contentDescription = null)
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(4.dp))
                     Text("Haryt", maxLines = 1)
                 }
                 OutlinedButton(
@@ -253,6 +264,33 @@ fun ReceivingScreen(
             ) {
                 CircularProgressIndicator(color = AccentOrange)
             }
+        }
+    }
+
+    val recOcrRes = receivingOcrResult
+    if (recOcrRes != null) {
+        ModalBottomSheet(
+            containerColor = SurfaceWhite,
+            onDismissRequest = { if (!isBusy) vm.dismissReceivingOcr() },
+        ) {
+            AccessoryOcrResultSheet(
+                result = recOcrRes,
+                isBusy = isBusy,
+                selectedCategoryId = receivingOcrCatFilter,
+                showCreateNewButton = true,
+                onRequery = { editedText, catId -> vm.matchAccessoryForReceiving(editedText, catId) },
+                onSelectProduct = { chosen ->
+                    vm.selectAccessoryForReceiving(chosen)
+                    showPurchaseSheet = true
+                },
+                onCreateNewFromDraft = { draft, rawText ->
+                    vm.dismissReceivingOcr()
+                    createProductPrefill = draft
+                    createProductOcrRawText = rawText
+                    showCreateProduct = true
+                },
+                onDismiss = { vm.dismissReceivingOcr() },
+            )
         }
     }
 
@@ -499,11 +537,18 @@ fun ReceivingScreen(
     }
 
     if (showCreateProduct) {
+        val hadOcrPrefill = createProductPrefill != null
         ProductEditorDialog(
             categories = categories.filter { it.isActive },
             existing = null,
-            onDismiss = { showCreateProduct = false },
+            prefill = createProductPrefill,
+            onDismiss = {
+                showCreateProduct = false
+                createProductPrefill = null
+                createProductOcrRawText = null
+            },
             onSave = { name, catId, brand, model, mem, color, extra, minStock, cost, costCurr ->
+                val rawAlias = createProductOcrRawText
                 vm.saveProduct(
                     productId = null,
                     name = name,
@@ -516,11 +561,23 @@ fun ReceivingScreen(
                     minStock = minStock,
                     defaultCost = cost,
                     costCurrency = costCurr,
+                    ocrRawText = rawAlias,
                 ) { createdId, createdName ->
                     if (createdId != null) {
-                        vm.updateReceivingMeta(productId = createdId, productName = createdName)
+                        vm.updateReceivingMeta(
+                            productId = createdId,
+                            productName = createdName,
+                            useImeiMode = if (hadOcrPrefill) false else null,
+                            unitCost = cost.takeIf { it.isNotBlank() },
+                            currency = costCurr.takeIf { it == "USD" || it == "TMT" },
+                        )
+                        if (hadOcrPrefill) {
+                            showPurchaseSheet = true
+                        }
                     }
                     showCreateProduct = false
+                    createProductPrefill = null
+                    createProductOcrRawText = null
                 }
             },
         )

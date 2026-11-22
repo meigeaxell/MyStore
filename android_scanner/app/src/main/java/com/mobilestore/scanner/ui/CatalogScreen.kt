@@ -282,6 +282,7 @@ fun CatalogScreen(vm: ScannerViewModel) {
 fun ProductEditorDialog(
     categories: List<CategoryItem>,
     existing: ProductDetailInfo?,
+    prefill: com.mobilestore.scanner.network.AccessoryDraftSuggestion? = null,
     onDismiss: () -> Unit,
     onSave: (
         name: String,
@@ -296,20 +297,30 @@ fun ProductEditorDialog(
         costCurrency: String,
     ) -> Unit,
 ) {
-    var name by remember { mutableStateOf(existing?.name ?: "") }
-    var brand by remember { mutableStateOf(existing?.brand ?: "") }
-    var model by remember { mutableStateOf(existing?.model ?: "") }
+    var name by remember(existing?.id, prefill?.name) {
+        mutableStateOf(existing?.name ?: prefill?.name ?: "")
+    }
+    var brand by remember(existing?.id, prefill?.brand) {
+        mutableStateOf(existing?.brand ?: prefill?.brand ?: "")
+    }
+    var model by remember(existing?.id, prefill?.model) {
+        mutableStateOf(existing?.model ?: prefill?.model ?: "")
+    }
     var memory by remember { mutableStateOf("") }
     var color by remember { mutableStateOf("") }
-    var extraSpecs by remember { mutableStateOf(existing?.specification ?: "") }
+    var extraSpecs by remember(existing?.id, prefill?.specification) {
+        mutableStateOf(existing?.specification ?: prefill?.specification ?: "")
+    }
     var minStockText by remember { mutableStateOf((existing?.minStockQuantity ?: 2).toString()) }
     var defaultCost by remember {
         mutableStateOf(
             existing?.defaultCost?.takeIf { it.isNotBlank() && it != "0.00" && it != "0" } ?: ""
         )
     }
-    var costCurrency by remember { mutableStateOf(existing?.defaultCostCurrency ?: "USD") }
-    var selectedCategoryId by remember { mutableStateOf(existing?.categoryId ?: categories.firstOrNull()?.id) }
+    var costCurrency by remember { mutableStateOf(existing?.defaultCostCurrency ?: "TMT") }
+    var selectedCategoryId by remember(existing?.id, prefill?.categoryId) {
+        mutableStateOf(existing?.categoryId ?: prefill?.categoryId ?: categories.firstOrNull()?.id)
+    }
     var catExpanded by remember { mutableStateOf(false) }
 
     val selectedCatName = categories.firstOrNull { it.id == selectedCategoryId }?.name ?: "Kategoriýa saýlaň"

@@ -25,6 +25,11 @@ from app.repositories.product_repository import (
     rename_category,
     save_product,
 )
+from app.services.accessory_matcher import (
+    _get_last_sale_price,
+    match_accessory_text,
+    record_ocr_alias,
+)
 from app.services.purchase_service import create_purchase
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
@@ -227,6 +232,8 @@ class MobileProtocolProcessor:
         try:
             handlers: dict[str, Callable[[str, str, dict[str, Any]], tuple[dict[str, Any], str]]] = {
                 "scan_code": self._handle_scan_code,
+                "match_accessory_ocr": self._handle_match_accessory_ocr,
+                "confirm_ocr_alias": self._handle_confirm_ocr_alias,
                 "add_to_sale": self._handle_add_to_sale,
                 "cancel_operation": self._handle_cancel_operation,
                 "check_imei": self._handle_check_imei,
@@ -319,6 +326,7 @@ class MobileProtocolProcessor:
             fallback_currency=default_curr,
             fallback_rate=default_rate,
         )
+        last_sale_price, last_sale_curr = _get_last_sale_price(session, product.id)
 
         imei_str = stock_item.imei1 if stock_item else None
         in_cart = bool(imei_str and self._is_imei_in_cart_cb and self._is_imei_in_cart_cb(imei_str))
@@ -354,6 +362,8 @@ class MobileProtocolProcessor:
             "stock_quantity": product.stock_quantity,
             "unit_cost": f"{unit_cost:.2f}",
             "cost_currency": cost_curr,
+            "last_sale_price": f"{last_sale_price:.2f}" if last_sale_price is not None else None,
+            "last_sale_currency": last_sale_curr,
             "default_currency": default_curr,
             "exchange_rate": f"{default_rate:.4f}",
             "photo_url": None,
@@ -644,6 +654,58 @@ class MobileProtocolProcessor:
             f"Skan {primary_code}: tapylmady",
         )
 
+    def _handle_match_accessory_ocr(
+        self,
+        request_id: str,
+        _device_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        raw_text = str(payload.get("raw_text") or "").strip()
+        if not raw_text:
+            return (
+                make_error(request_id, "VALIDATION_ERROR", "Guty teksti okalmady. Täzeden synanyşyň."),
+                "Boş aksessuar OCR haýyşy",
+            )
+        cat_raw = payload.get("category_id")
+        cat_id = int(cat_raw) if cat_raw is not None and str(cat_raw).strip() != "" else None
+        limit = int(payload.get("limit") or 6)
+
+        with SessionLocal() as session:
+            result = match_accessory_text(
+                session=session,
+                raw_text=raw_text,
+                category_id=cat_id,
+                limit=limit,
+            )
+
+        found_n = len(result["items"])
+        parsed_q = result["parsed"].get("cleaned_query") or raw_text[:40]
+        return (
+            make_response("accessory_ocr_matches", request_id, result),
+            f"Aksessuar OCR «{parsed_q}» → {found_n} meňzeş haryt",
+        )
+
+    def _handle_confirm_ocr_alias(
+        self,
+        request_id: str,
+        _device_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        product_id = payload.get("product_id")
+        raw_text = str(payload.get("raw_text") or "").strip()
+        if not product_id or not raw_text:
+            return (
+                make_error(request_id, "VALIDATION_ERROR", "product_id we raw_text görkeziň."),
+                "confirm_ocr_alias ýalňyşlygy",
+            )
+        with SessionLocal() as session, session.begin():
+            alias = record_ocr_alias(session, int(product_id), raw_text)
+        saved = alias is not None
+        return (
+            make_response("operation_ok", request_id, {"saved": saved, "message": "Guty ýatda saklandy"}),
+            f"OCR guty ýatda saklandy (product_id={product_id}, saved={saved})",
+        )
+
     def _handle_add_to_sale(
         self,
         request_id: str,
@@ -714,6 +776,11 @@ class MobileProtocolProcessor:
             low = message.lower()
             err_code = "ALREADY_IN_CART" if ("eýýäm" in low or "уже добавлен" in low) else "OUT_OF_STOCK"
             return make_error(request_id, err_code, message), f"Kassa ret etdi: {message}"
+
+        ocr_raw_text = str(payload.get("ocr_raw_text") or "").strip()
+        if ocr_raw_text:
+            with SessionLocal() as session, session.begin():
+                record_ocr_alias(session, int(product_id), ocr_raw_text)
 
         data = {"message": message, **(extra or {})}
         return make_response("operation_ok", request_id, data), message
@@ -824,6 +891,18 @@ class MobileProtocolProcessor:
             note=note,
             supplier_name=supplier_name,
         )
+        top_ocr = str(payload.get("ocr_raw_text") or "").strip()
+        if top_ocr and items:
+            first_pid = items[0].get("product_id")
+            if first_pid:
+                with SessionLocal() as session, session.begin():
+                    record_ocr_alias(session, int(first_pid), top_ocr)
+        for item in items:
+            item_ocr = str(item.get("ocr_raw_text") or "").strip()
+            if item_ocr and item.get("product_id"):
+                with SessionLocal() as session, session.begin():
+                    record_ocr_alias(session, int(item["product_id"]), item_ocr)
+
         total_units = sum(int(i.get("quantity", 0)) for i in items)
         msg = f"Alyş №{purchase_id} üstünlikli geçirildi ({total_units} sany kabul edildi)"
         return (
@@ -969,6 +1048,11 @@ class MobileProtocolProcessor:
                 str(payload.get("cost_currency") or "USD"),
             )
 
+        ocr_raw_text = str(payload.get("ocr_raw_text") or "").strip()
+        if ocr_raw_text:
+            with SessionLocal() as session, session.begin():
+                record_ocr_alias(session, product.id, ocr_raw_text)
+
         return (
             make_response(
                 "operation_ok",
@@ -1018,6 +1102,11 @@ class MobileProtocolProcessor:
                 Decimal(str(raw_cost)),
                 str(payload.get("cost_currency") or "USD"),
             )
+
+        ocr_raw_text = str(payload.get("ocr_raw_text") or "").strip()
+        if ocr_raw_text:
+            with SessionLocal() as session, session.begin():
+                record_ocr_alias(session, product.id, ocr_raw_text)
 
         return (
             make_response(

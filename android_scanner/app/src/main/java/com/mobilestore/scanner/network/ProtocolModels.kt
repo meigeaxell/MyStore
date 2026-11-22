@@ -60,6 +60,8 @@ data class ProductCardData(
     @SerialName("stock_quantity") val stockQuantity: Int = 0,
     @SerialName("unit_cost") val unitCost: String = "0.00",
     @SerialName("cost_currency") val costCurrency: String = "TMT",
+    @SerialName("last_sale_price") val lastSalePrice: String? = null,
+    @SerialName("last_sale_currency") val lastSaleCurrency: String? = null,
     @SerialName("default_currency") val defaultCurrency: String = "TMT",
     @SerialName("exchange_rate") val exchangeRate: String = "19.5000",
     @SerialName("photo_url") val photoUrl: String? = null,
@@ -158,4 +160,41 @@ data class CategoryItem(
 @Serializable
 data class CategoryListData(
     val categories: List<CategoryItem> = emptyList(),
+)
+
+@Serializable
+data class AccessoryOcrParsed(
+    @SerialName("normalized_text") val normalizedText: String = "",
+    @SerialName("cleaned_query") val cleanedQuery: String = "",
+    val brand: String = "",
+    val model: String = "",
+    @SerialName("accessory_type") val accessoryType: String = "",
+    @SerialName("accessory_type_label") val accessoryTypeLabel: String = "",
+    val features: List<String> = emptyList(),
+)
+
+@Serializable
+data class AccessoryDraftSuggestion(
+    val name: String = "",
+    @SerialName("category_id") val categoryId: Int? = null,
+    val brand: String = "",
+    val model: String = "",
+    val specification: String = "",
+    @SerialName("accessory_type") val accessoryType: String = "",
+    @SerialName("accessory_type_label") val accessoryTypeLabel: String = "",
+)
+
+@Serializable
+data class AccessoryOcrCategoryRef(
+    val id: Int,
+    val name: String = "",
+)
+
+@Serializable
+data class AccessoryOcrMatchResponse(
+    @SerialName("raw_text") val rawText: String = "",
+    val parsed: AccessoryOcrParsed = AccessoryOcrParsed(),
+    @SerialName("draft_suggestion") val draftSuggestion: AccessoryDraftSuggestion = AccessoryDraftSuggestion(),
+    val items: List<ProductCardData> = emptyList(),
+    val categories: List<AccessoryOcrCategoryRef> = emptyList(),
 )

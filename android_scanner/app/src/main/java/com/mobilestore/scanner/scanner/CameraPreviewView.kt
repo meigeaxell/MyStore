@@ -58,7 +58,9 @@ fun CameraPreviewView(
     burstWindowMs: Long = 650L,
     cooldownMs: Long = 2_500L,
     cooldownTriggerKey: Int = 0,
+    boxCaptureTriggerKey: Int = 0,
     onDetected: (ScanBundle) -> Unit,
+    onBoxTextCaptured: ((String) -> Unit)? = null,
     onCameraStatusChanged: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -68,6 +70,7 @@ fun CameraPreviewView(
     val currentOcr by rememberUpdatedState(enableOcr)
     val currentCooldownMs by rememberUpdatedState(cooldownMs)
     val currentOnDetected by rememberUpdatedState(onDetected)
+    val currentOnBoxTextCaptured by rememberUpdatedState(onBoxTextCaptured)
 
     var torchEnabled by remember { mutableStateOf(false) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
@@ -98,12 +101,23 @@ fun CameraPreviewView(
                     currentOnDetected(bundle)
                 }
             },
+            onBoxTextCaptured = { rawText ->
+                ContextCompat.getMainExecutor(context).execute {
+                    currentOnBoxTextCaptured?.invoke(rawText)
+                }
+            },
         )
     }
 
     LaunchedEffect(cooldownTriggerKey) {
         if (cooldownTriggerKey > 0) {
             analyzer.triggerCooldown(currentCooldownMs)
+        }
+    }
+
+    LaunchedEffect(boxCaptureTriggerKey) {
+        if (boxCaptureTriggerKey > 0) {
+            analyzer.requestBoxTextCapture(frames = 2)
         }
     }
 

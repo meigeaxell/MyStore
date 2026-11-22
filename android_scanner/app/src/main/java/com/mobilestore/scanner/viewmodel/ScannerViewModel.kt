@@ -7,6 +7,7 @@ import com.mobilestore.scanner.MobileStoreApp
 import com.mobilestore.scanner.data.ReceivingDraftImei
 import com.mobilestore.scanner.data.ReceivingDraftMeta
 import com.mobilestore.scanner.data.ServerConfig
+import com.mobilestore.scanner.network.AccessoryOcrMatchResponse
 import com.mobilestore.scanner.network.CatalogListData
 import com.mobilestore.scanner.network.CatalogProductItem
 import com.mobilestore.scanner.network.CategoryItem
@@ -76,6 +77,20 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
     private val _multipleMatches = MutableStateFlow<List<ProductCardData>>(emptyList())
     val multipleMatches: StateFlow<List<ProductCardData>> = _multipleMatches.asStateFlow()
+
+    private val _saleOcrResult = MutableStateFlow<AccessoryOcrMatchResponse?>(null)
+    val saleOcrResult: StateFlow<AccessoryOcrMatchResponse?> = _saleOcrResult.asStateFlow()
+
+    private val _saleOcrCategoryFilter = MutableStateFlow<Int?>(null)
+    val saleOcrCategoryFilter: StateFlow<Int?> = _saleOcrCategoryFilter.asStateFlow()
+
+    private val _activeSaleOcrRawText = MutableStateFlow<String?>(null)
+
+    private val _receivingOcrResult = MutableStateFlow<AccessoryOcrMatchResponse?>(null)
+    val receivingOcrResult: StateFlow<AccessoryOcrMatchResponse?> = _receivingOcrResult.asStateFlow()
+
+    private val _receivingOcrCategoryFilter = MutableStateFlow<Int?>(null)
+    val receivingOcrCategoryFilter: StateFlow<Int?> = _receivingOcrCategoryFilter.asStateFlow()
 
     private val _isSaleRequestInFlight = MutableStateFlow(false)
     val isSaleRequestInFlight: StateFlow<Boolean> = _isSaleRequestInFlight.asStateFlow()
@@ -253,6 +268,130 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         _multipleMatches.value = emptyList()
     }
 
+    fun matchAccessoryForSale(rawText: String, categoryId: Int? = null) {
+        val clean = rawText.trim()
+        if (clean.isEmpty()) {
+            showMessage("Gutyda okaljak tekst tapylmady. Ýagtylygy ýa-da burçy üýtgediň.", isError = true)
+            return
+        }
+        feedback.onScanSuccess()
+        _saleOcrCategoryFilter.value = categoryId
+        viewModelScope.launch {
+            _isSaleRequestInFlight.value = true
+            val resp = ws.sendCommand(
+                type = "match_accessory_ocr",
+                payload = buildJsonObject {
+                    put("raw_text", clean)
+                    if (categoryId != null) put("category_id", categoryId)
+                    put("limit", 6)
+                },
+            )
+            _isSaleRequestInFlight.value = false
+            if (!resp.ok || resp.data == null) {
+                showMessage(resp.error?.message ?: "Guty tekstini işläp bolmady", isError = true)
+                return@launch
+            }
+            val parsed = runCatching {
+                ws.json.decodeFromJsonElement<AccessoryOcrMatchResponse>(resp.data)
+            }.getOrNull()
+            if (parsed != null) {
+                _saleOcrResult.value = parsed
+            } else {
+                showMessage("Serweriň jogabyny okap bolmady", isError = true)
+            }
+        }
+    }
+
+    fun selectAccessoryForSale(card: ProductCardData) {
+        val raw = _saleOcrResult.value?.rawText?.trim().takeIf { !it.isNullOrBlank() }
+        _activeSaleOcrRawText.value = raw
+        _saleOcrResult.value = null
+        _saleOcrCategoryFilter.value = null
+        _activeScanSource.value = "ocr_box"
+        currentSaleRequestId = UUID.randomUUID().toString()
+        _activeProductCard.value = card
+    }
+
+    fun dismissSaleOcr() {
+        _saleOcrResult.value = null
+        _saleOcrCategoryFilter.value = null
+        _scanCooldownTrigger.value += 1
+    }
+
+    fun matchAccessoryForReceiving(rawText: String, categoryId: Int? = null) {
+        val clean = rawText.trim()
+        if (clean.isEmpty()) {
+            showMessage("Gutyda okaljak tekst tapylmady. Ýagtylygy ýa-da burçy üýtgediň.", isError = true)
+            return
+        }
+        feedback.onScanSuccess()
+        _receivingOcrCategoryFilter.value = categoryId
+        viewModelScope.launch {
+            _isReceivingBusy.value = true
+            val resp = ws.sendCommand(
+                type = "match_accessory_ocr",
+                payload = buildJsonObject {
+                    put("raw_text", clean)
+                    if (categoryId != null) put("category_id", categoryId)
+                    put("limit", 6)
+                },
+            )
+            _isReceivingBusy.value = false
+            if (!resp.ok || resp.data == null) {
+                showMessage(resp.error?.message ?: "Guty tekstini işläp bolmady", isError = true)
+                return@launch
+            }
+            val parsed = runCatching {
+                ws.json.decodeFromJsonElement<AccessoryOcrMatchResponse>(resp.data)
+            }.getOrNull()
+            if (parsed != null) {
+                _receivingOcrResult.value = parsed
+            } else {
+                showMessage("Serweriň jogabyny okap bolmady", isError = true)
+            }
+        }
+    }
+
+    fun selectAccessoryForReceiving(card: ProductCardData) {
+        val raw = _receivingOcrResult.value?.rawText?.trim().orEmpty()
+        _receivingOcrResult.value = null
+        _receivingOcrCategoryFilter.value = null
+        updateReceivingMeta(
+            productId = card.productId,
+            productName = card.name,
+            useImeiMode = false,
+            unitCost = card.unitCost.takeIf { it != "0.00" },
+            currency = card.costCurrency.takeIf { it == "USD" || it == "TMT" },
+        )
+        if (raw.isNotBlank()) {
+            confirmOcrAlias(card.productId, raw)
+        }
+        showMessage("«${card.name}» kabul ediş üçin saýlandy", isError = false)
+    }
+
+    fun dismissReceivingOcr() {
+        _receivingOcrResult.value = null
+        _receivingOcrCategoryFilter.value = null
+        _scanCooldownTrigger.value += 1
+    }
+
+    fun confirmOcrAlias(productId: Int, rawText: String) {
+        val clean = rawText.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            if (ws.state.value is ConnectionState.Connected) {
+                ws.sendCommand(
+                    type = "confirm_ocr_alias",
+                    payload = buildJsonObject {
+                        put("product_id", productId)
+                        put("raw_text", clean)
+                    },
+                    timeoutMs = 4_000L,
+                )
+            }
+        }
+    }
+
     fun confirmAddToSale(
         card: ProductCardData,
         negotiatedPrice: String,
@@ -265,6 +404,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             showMessage("0-dan uly dogry satyş bahasyny giriziň", isError = true)
             return
         }
+        val ocrRaw = _activeSaleOcrRawText.value
         viewModelScope.launch {
             _isSaleRequestInFlight.value = true
             val resp = ws.sendCommand(
@@ -277,6 +417,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                     put("quantity", if (card.imei != null) 1 else quantity.coerceAtLeast(1))
                     put("unit_price", cleanPrice)
                     put("currency", currency)
+                    if (!ocrRaw.isNullOrBlank()) put("ocr_raw_text", ocrRaw)
                 },
             )
             _isSaleRequestInFlight.value = false
@@ -285,6 +426,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 val msg = resp.data?.jsonObject?.get("message")?.jsonPrimitive?.content
                     ?: "Haryt kompýuterdäki satyşa goşuldy"
                 _activeProductCard.value = null
+                _activeSaleOcrRawText.value = null
                 currentSaleRequestId = UUID.randomUUID().toString()
                 _scanCooldownTrigger.value += 1
                 showMessage(msg, isError = false)
@@ -298,6 +440,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     fun cancelSaleCard() {
         val reqId = currentSaleRequestId
         _activeProductCard.value = null
+        _activeSaleOcrRawText.value = null
         currentSaleRequestId = UUID.randomUUID().toString()
         _scanCooldownTrigger.value += 1
         viewModelScope.launch {
@@ -734,6 +877,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         defaultCost: String,
         costCurrency: String,
         allowDuplicate: Boolean = false,
+        ocrRawText: String? = null,
         onSuccess: (createdId: Int?, createdName: String) -> Unit = { _, _ -> },
     ) {
         val specParts = listOf(memory.trim(), color.trim(), extraSpecs.trim()).filter { it.isNotEmpty() }
@@ -754,6 +898,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                     put("cost_currency", costCurrency)
                 }
                 if (productId == null) put("allow_duplicate", allowDuplicate)
+                if (!ocrRawText.isNullOrBlank()) put("ocr_raw_text", ocrRawText.trim())
             }
 
             val resp = ws.sendCommand(type = type, payload = payload)
