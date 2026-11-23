@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -466,6 +467,216 @@ class ShiftCloseDialog(QDialog):
         )
 
 
+class CashCountDialog(QDialog):
+    """Калькулятор пересчёта всей кассы по номиналам купюр (TMT и USD) с общим итогом по курсу."""
+
+    TMT_DENOMS = (500, 100, 50, 20, 10, 5, 1)
+    USD_DENOMS = (100, 50, 20, 10, 5, 1)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Kassany sana (kupýura kalkulýatory)")
+        self.setMinimumWidth(680)
+        self.setStyleSheet(theme.STYLE)
+
+        self.tmt_spins: dict[int, QSpinBox] = {}
+        self.usd_spins: dict[int, QSpinBox] = {}
+        self.expected_tmt = Decimal("0.00")
+        self.expected_usd = Decimal("0.00")
+
+        with SessionLocal() as session:
+            bal = FinanceService.get_register_balances(session)
+            self.expected_tmt = bal["tmt_balance"]
+            self.expected_usd = bal["usd_balance"]
+
+        self._build_ui()
+        self._recalculate()
+
+    def _build_ui(self) -> None:
+        from PySide6.QtWidgets import QSpinBox
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel("🧮 Kassadaky ähli puly sanamak (TMT + USD)")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(QLabel("Hasaplama kursy (1 USD = X TMT):"))
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setDecimals(4)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        self.rate_spin.valueChanged.connect(self._recalculate)
+        rate_row.addWidget(self.rate_spin)
+        rate_row.addStretch()
+
+        clear_btn = make_button("Arassala")
+        clear_btn.clicked.connect(self._clear_all)
+        rate_row.addWidget(clear_btn)
+        root.addLayout(rate_row)
+
+        cols = QHBoxLayout()
+        cols.setSpacing(16)
+
+        # TMT kupýuralar
+        tmt_card = Card(margins=(14, 12, 14, 12), spacing=8)
+        t_head = QLabel(f"TMT kupýuralar (programmadaky: {self.expected_tmt:,.2f} TMT)")
+        t_head.setObjectName("cardTitle")
+        tmt_card.body.addWidget(t_head)
+
+        t_grid = QGridLayout()
+        t_grid.setSpacing(6)
+        for row_idx, denom in enumerate(self.TMT_DENOMS):
+            t_grid.addWidget(QLabel(f"{denom} TMT  ×"), row_idx, 0)
+            sp = QSpinBox()
+            sp.setRange(0, 100000)
+            sp.setMinimumHeight(30)
+            sp.valueChanged.connect(self._recalculate)
+            self.tmt_spins[denom] = sp
+            t_grid.addWidget(sp, row_idx, 1)
+        t_grid.addWidget(QLabel("Goşmaça / teňňe:"), len(self.TMT_DENOMS), 0)
+        self.tmt_extra = QDoubleSpinBox()
+        self.tmt_extra.setRange(0, 10000000)
+        self.tmt_extra.setDecimals(2)
+        self.tmt_extra.valueChanged.connect(self._recalculate)
+        t_grid.addWidget(self.tmt_extra, len(self.TMT_DENOMS), 1)
+        tmt_card.body.addLayout(t_grid)
+
+        self.tmt_total_lbl = QLabel("Jemi TMT: 0.00")
+        self.tmt_total_lbl.setStyleSheet(f"font-weight: 700; font-size: 11pt; color: {theme.TEAL};")
+        tmt_card.body.addWidget(self.tmt_total_lbl)
+        cols.addWidget(tmt_card, 1)
+
+        # USD kupýuralar
+        usd_card = Card(margins=(14, 12, 14, 12), spacing=8)
+        u_head = QLabel(f"USD kupýuralar (programmadaky: ${self.expected_usd:,.2f})")
+        u_head.setObjectName("cardTitle")
+        usd_card.body.addWidget(u_head)
+
+        u_grid = QGridLayout()
+        u_grid.setSpacing(6)
+        for row_idx, denom in enumerate(self.USD_DENOMS):
+            u_grid.addWidget(QLabel(f"${denom} USD  ×"), row_idx, 0)
+            sp = QSpinBox()
+            sp.setRange(0, 100000)
+            sp.setMinimumHeight(30)
+            sp.valueChanged.connect(self._recalculate)
+            self.usd_spins[denom] = sp
+            u_grid.addWidget(sp, row_idx, 1)
+        u_grid.addWidget(QLabel("Goşmaça / sent:"), len(self.USD_DENOMS), 0)
+        self.usd_extra = QDoubleSpinBox()
+        self.usd_extra.setRange(0, 10000000)
+        self.usd_extra.setDecimals(2)
+        self.usd_extra.valueChanged.connect(self._recalculate)
+        u_grid.addWidget(self.usd_extra, len(self.USD_DENOMS), 1)
+        usd_card.body.addLayout(u_grid)
+
+        self.usd_total_lbl = QLabel("Jemi USD: $0.00")
+        self.usd_total_lbl.setStyleSheet(f"font-weight: 700; font-size: 11pt; color: {theme.NAVY};")
+        usd_card.body.addWidget(self.usd_total_lbl)
+        cols.addWidget(usd_card, 1)
+
+        root.addLayout(cols)
+
+        summary_card = Card(margins=(16, 12, 16, 12), spacing=6)
+        self.grand_total_lbl = QLabel()
+        self.grand_total_lbl.setStyleSheet(f"font-size: 13pt; font-weight: 800; color: {theme.NAVY};")
+        self.diff_lbl = QLabel()
+        self.diff_lbl.setWordWrap(True)
+        summary_card.body.addWidget(self.grand_total_lbl)
+        summary_card.body.addWidget(self.diff_lbl)
+        root.addWidget(summary_card)
+
+        footer = QHBoxLayout()
+        self.apply_btn = make_button("⚖ Kassany sanalan pula deňle", "primary")
+        self.apply_btn.clicked.connect(self._apply_counted_to_registers)
+        footer.addWidget(self.apply_btn)
+        footer.addStretch()
+        close_btn = make_button("Ýap")
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        root.addLayout(footer)
+
+    def _clear_all(self) -> None:
+        for sp in (*self.tmt_spins.values(), *self.usd_spins.values()):
+            sp.setValue(0)
+        self.tmt_extra.setValue(0.0)
+        self.usd_extra.setValue(0.0)
+
+    def _get_totals(self) -> tuple[Decimal, Decimal, Decimal]:
+        tmt_sum = sum(Decimal(d) * sp.value() for d, sp in self.tmt_spins.items()) + Decimal(f"{self.tmt_extra.value():.2f}")
+        usd_sum = sum(Decimal(d) * sp.value() for d, sp in self.usd_spins.items()) + Decimal(f"{self.usd_extra.value():.2f}")
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+        return tmt_sum.quantize(Decimal("0.01")), usd_sum.quantize(Decimal("0.01")), rate
+
+    def _recalculate(self) -> None:
+        tmt_sum, usd_sum, rate = self._get_totals()
+        total_in_tmt = (tmt_sum + usd_sum * rate).quantize(Decimal("0.01"))
+        total_in_usd = (usd_sum + (tmt_sum / rate)).quantize(Decimal("0.01"))
+
+        diff_tmt = tmt_sum - self.expected_tmt
+        diff_usd = usd_sum - self.expected_usd
+
+        self.tmt_total_lbl.setText(f"Sanalan TMT: {tmt_sum:,.2f} TMT  (tapawut: {diff_tmt:+,.2f})")
+        self.usd_total_lbl.setText(f"Sanalan USD: ${usd_sum:,.2f} USD  (tapawut: {diff_usd:+,.2f})")
+        self.grand_total_lbl.setText(
+            f"JEMI SANALAN KASSA:   {total_in_tmt:,.2f} TMT   •   ${total_in_usd:,.2f} USD"
+        )
+
+        sys_total_tmt = (self.expected_tmt + self.expected_usd * rate).quantize(Decimal("0.01"))
+        total_diff_tmt = total_in_tmt - sys_total_tmt
+        self.diff_lbl.setText(
+            f"Programmadaky jemi kassa: {sys_total_tmt:,.2f} TMT   |   "
+            f"Jemi tapawut: {total_diff_tmt:+,.2f} TMT"
+        )
+        self.apply_btn.setEnabled(diff_tmt != Decimal("0.00") or diff_usd != Decimal("0.00"))
+
+    def _apply_counted_to_registers(self) -> None:
+        tmt_sum, usd_sum, rate = self._get_totals()
+        diff_tmt = tmt_sum - self.expected_tmt
+        diff_usd = usd_sum - self.expected_usd
+        ans = QMessageBox.question(
+            self,
+            "Kassany deňlemek",
+            f"Kassa balanslaryny sanalan pula deňlemelimi?\n"
+            f"• TMT düzedişi: {diff_tmt:+,.2f} TMT (täze balans: {tmt_sum:,.2f})\n"
+            f"• USD düzedişi: {diff_usd:+,.2f} USD (täze balans: ${usd_sum:,.2f})",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            with SessionLocal() as session, session.begin():
+                if diff_tmt != Decimal("0.00"):
+                    FinanceService.record_cash_adjustment(
+                        session=session,
+                        direction="income" if diff_tmt > 0 else "expense",
+                        amount=abs(diff_tmt),
+                        currency="TMT",
+                        exchange_rate=rate,
+                        reason="Kupýura sanawy boýunça kassa deňlemesi",
+                    )
+                if diff_usd != Decimal("0.00"):
+                    FinanceService.record_cash_adjustment(
+                        session=session,
+                        direction="income" if diff_usd > 0 else "expense",
+                        amount=abs(diff_usd),
+                        currency="USD",
+                        exchange_rate=rate,
+                        reason="Kupýura sanawy boýunça kassa deňlemesi",
+                    )
+            self.expected_tmt = tmt_sum
+            self.expected_usd = usd_sum
+            self._recalculate()
+            QMessageBox.information(self, "Taýýar", "Kassa balanslary sanalan pula deňlendi.")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+
 class FinancePage(QWidget):
     """Страница «Финансы»: балансы касс, 4 категории долгов, журнал транзакций, расчеты с клиентами и поставщиками."""
 
@@ -505,6 +716,14 @@ class FinancePage(QWidget):
         adjust_btn.clicked.connect(self._open_adjustment_dialog)
         header.addWidget(adjust_btn)
 
+        count_btn = make_button("🧮 Kassany sana")
+        count_btn.clicked.connect(self._open_cash_count_dialog)
+        header.addWidget(count_btn)
+
+        zero_cash_btn = make_button("🧹 Kassany nolla", "danger")
+        zero_cash_btn.clicked.connect(self._zero_cash_dialog)
+        header.addWidget(zero_cash_btn)
+
         shift_btn = make_button("🔒 Smenany ýapmak / Barlag")
         shift_btn.clicked.connect(self._open_shift_close_dialog)
         header.addWidget(shift_btn)
@@ -514,6 +733,13 @@ class FinancePage(QWidget):
         header.addWidget(refresh_btn)
 
         root.addLayout(header)
+
+        self.combined_cash_banner = QLabel("Jemi kassa (ähli walýutalar): 0.00 TMT  •  $0.00 USD")
+        self.combined_cash_banner.setStyleSheet(
+            f"background: #EFF6FF; color: {theme.NAVY}; border: 1px solid #BFDBFE; "
+            "border-radius: 8px; padding: 8px 14px; font-weight: 700; font-size: 10.5pt;"
+        )
+        root.addWidget(self.combined_cash_banner)
 
         cards_grid = QGridLayout()
         cards_grid.setSpacing(12)
@@ -745,6 +971,14 @@ class FinancePage(QWidget):
         open_btn.clicked.connect(self._open_selected_customer_sale)
         top.addWidget(open_btn)
 
+        pay_full_btn = make_button("✔ Doly hasaplaş (kassa)")
+        pay_full_btn.clicked.connect(lambda: self._settle_selected_customer_debt(with_cash=True))
+        top.addWidget(pay_full_btn)
+
+        zero_debt_btn = make_button("🧹 Bergini nolla", "danger")
+        zero_debt_btn.clicked.connect(lambda: self._settle_selected_customer_debt(with_cash=False))
+        top.addWidget(zero_debt_btn)
+
         layout.addLayout(top)
 
         self.cust_table = QTableWidget(0, 9)
@@ -796,6 +1030,14 @@ class FinancePage(QWidget):
         open_btn.clicked.connect(self._open_selected_supplier_purchase)
         top.addWidget(open_btn)
 
+        pay_sup_btn = make_button("✔ Doly hasaplaş (kassa)")
+        pay_sup_btn.clicked.connect(lambda: self._settle_selected_supplier_debt(with_cash=True))
+        top.addWidget(pay_sup_btn)
+
+        zero_sup_btn = make_button("🧹 Bergini nolla", "danger")
+        zero_sup_btn.clicked.connect(lambda: self._settle_selected_supplier_debt(with_cash=False))
+        top.addWidget(zero_sup_btn)
+
         layout.addLayout(top)
 
         self.sup_table = QTableWidget(0, 8)
@@ -821,11 +1063,18 @@ class FinancePage(QWidget):
         return widget
 
     def refresh_data(self) -> None:
+        rate = SettingsService.get_default_exchange_rate()
         with SessionLocal() as session:
             balances = FinanceService.get_register_balances(session)
+            combined = FinanceService.get_combined_cash_totals(session, rate)
             debts = FinanceService.get_all_outstanding_balances(session)
             flow = FinanceService.get_period_cash_summary(session)
             session.commit()
+
+        self.combined_cash_banner.setText(
+            f"💰 Jemi kassa (USD + TMT, kurs {combined['exchange_rate']:.4f}):   "
+            f"{combined['total_in_tmt']:,.2f} TMT   •   ${combined['total_in_usd']:,.2f} USD"
+        )
 
         self.usd_cash_label.setText(f"${balances['usd_balance']:,.2f} USD")
         self.usd_flow_label.setText(
@@ -1023,6 +1272,173 @@ class FinancePage(QWidget):
         dlg = ShiftCloseDialog(parent=self)
         dlg.exec()
         self.refresh_data()
+
+    def _open_cash_count_dialog(self) -> None:
+        dlg = CashCountDialog(parent=self)
+        dlg.exec()
+        self.refresh_data()
+
+    def _zero_cash_dialog(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        rate = SettingsService.get_default_exchange_rate()
+        with SessionLocal() as session:
+            bal = FinanceService.get_register_balances(session)
+
+        options = [
+            f"Kassa TMT ({bal['tmt_balance']:,.2f} TMT)",
+            f"Kassa USD (${bal['usd_balance']:,.2f} USD)",
+            "Iki kassany hem nolla (USD + TMT)",
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Kassany nollamak / Pul almak",
+            "Haýsy kassany nollamaly (0.00 etmeli)?",
+            options,
+            0,
+            False,
+        )
+        if not ok or not choice:
+            return
+
+        reason, ok_r = QInputDialog.getText(
+            self,
+            "Sebäp / Bellik",
+            "Kassany nollamagyň (pul almagyň) sebäbini ýazyň:",
+            text="Kassadan pul almak / nollamak",
+        )
+        if not ok_r or not reason.strip():
+            return
+
+        targets = ["TMT", "USD"] if "Iki kassany" in choice else (["USD"] if "Kassa USD" in choice else ["TMT"])
+        try:
+            cleared = []
+            with SessionLocal() as session, session.begin():
+                for cur in targets:
+                    amt = FinanceService.zero_cash_register(session, cur, rate, reason.strip())
+                    cleared.append(f"{cur}: {amt:,.2f}")
+            self.refresh_data()
+            QMessageBox.information(
+                self,
+                "Kassa nollandy",
+                "Kassa balansy 0.00 edildi.\n" + "\n".join(cleared),
+            )
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+    def _settle_selected_customer_debt(self, with_cash: bool) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        row = self.cust_table.currentRow()
+        if not (0 <= row < len(self.customer_rows)):
+            QMessageBox.information(
+                self,
+                "Çek saýlaň",
+                "Hasaplaşmak ýa-da nollamak üçin tablisadan çek setirini saýlaň.",
+            )
+            return
+        r = self.customer_rows[row]
+        sale_id = r["sale_id"]
+        is_store_debt = r["store_debt_to_customer"] > 0
+        is_cust_debt = r["remaining_customer_debt"] > 0
+
+        if not is_store_debt and not is_cust_debt:
+            QMessageBox.information(self, "Bergi ýok", "Bu çek boýunça açyk bergi ýok.")
+            return
+
+        amount = r["store_debt_to_customer"] if is_store_debt else r["remaining_customer_debt"]
+        label = (
+            f"Dükanyň müşderä bergisi ({amount:,.2f} {r['currency']})"
+            if is_store_debt
+            else f"Müşderiniň bergisi ({amount:,.2f} {r['currency']})"
+        )
+        action_title = "Bergini kassa bilen doly ýapmak" if with_cash else "Bergini kassasyz nollamak (öçürmek)"
+        default_reason = (
+            f"Doly hasaplaşyk ({r['receipt_number']})"
+            if with_cash
+            else f"Bergi nollandy / hasapdan öçürildi ({r['receipt_number']})"
+        )
+
+        reason, ok = QInputDialog.getText(
+            self,
+            action_title,
+            f"{label}\nÇek: {r['receipt_number']} ({r['customer_name']})\n\nBellik / sebäp:",
+            text=default_reason,
+        )
+        if not ok:
+            return
+
+        try:
+            with SessionLocal() as session, session.begin():
+                if is_store_debt:
+                    FinanceService.settle_or_zero_store_debt_to_customer(
+                        session, sale_id, with_cash=with_cash, reason=reason.strip()
+                    )
+                else:
+                    FinanceService.settle_or_zero_customer_debt(
+                        session, sale_id, with_cash=with_cash, reason=reason.strip()
+                    )
+            self.refresh_data()
+            QMessageBox.information(self, "Taýýar", "Bergi üstünlikli ýapyldy (0.00).")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+    def _settle_selected_supplier_debt(self, with_cash: bool) -> None:
+        from PySide6.QtWidgets import QInputDialog
+
+        row = self.sup_table.currentRow()
+        if not (0 <= row < len(self.supplier_rows)):
+            QMessageBox.information(
+                self,
+                "Alyş saýlaň",
+                "Hasaplaşmak ýa-da nollamak üçin tablisadan alyş setirini saýlaň.",
+            )
+            return
+        r = self.supplier_rows[row]
+        purchase_id = r["purchase_id"]
+        is_store_owes = r["store_debt_to_supplier"] > 0
+        is_sup_owes = r["supplier_debt_to_store"] > 0
+
+        if not is_store_owes and not is_sup_owes:
+            QMessageBox.information(self, "Bergi ýok", "Bu alyş boýunça açyk bergi ýok.")
+            return
+
+        amount = r["store_debt_to_supplier"] if is_store_owes else r["supplier_debt_to_store"]
+        label = (
+            f"Dükanyň üpjün edijä bergisi ({amount:,.2f} {r['currency']})"
+            if is_store_owes
+            else f"Üpjün edijiniň dükana bergisi ({amount:,.2f} {r['currency']})"
+        )
+        action_title = "Bergini kassa bilen doly ýapmak" if with_cash else "Bergini kassasyz nollamak"
+        default_reason = (
+            f"Alyş №{purchase_id} doly hasaplaşyk"
+            if with_cash
+            else f"Alyş №{purchase_id} bergisi nollandy"
+        )
+
+        reason, ok = QInputDialog.getText(
+            self,
+            action_title,
+            f"{label}\nAlyş №{purchase_id} ({r['supplier_name']})\n\nBellik / sebäp:",
+            text=default_reason,
+        )
+        if not ok:
+            return
+
+        try:
+            with SessionLocal() as session, session.begin():
+                if is_store_owes:
+                    FinanceService.settle_or_zero_supplier_debt(
+                        session, purchase_id, with_cash=with_cash, reason=reason.strip()
+                    )
+                else:
+                    FinanceService.settle_or_zero_supplier_refund_debt(
+                        session, purchase_id, with_cash=with_cash, reason=reason.strip()
+                    )
+            self.refresh_data()
+            QMessageBox.information(self, "Taýýar", "Üpjün ediji bergisi üstünlikli ýapyldy (0.00).")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
     def _storno_selected_movement(self) -> None:
         row = self.journal_table.currentRow()

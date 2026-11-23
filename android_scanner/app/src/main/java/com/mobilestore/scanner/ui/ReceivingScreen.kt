@@ -547,7 +547,7 @@ fun ReceivingScreen(
                 createProductPrefill = null
                 createProductOcrRawText = null
             },
-            onSave = { name, catId, brand, model, mem, color, extra, minStock, cost, costCurr ->
+            onSave = { name, catId, brand, model, mem, color, extra, bc, minStock, cost, costCurr ->
                 val rawAlias = createProductOcrRawText
                 vm.saveProduct(
                     productId = null,
@@ -562,6 +562,7 @@ fun ReceivingScreen(
                     defaultCost = cost,
                     costCurrency = costCurr,
                     ocrRawText = rawAlias,
+                    barcode = bc,
                 ) { createdId, createdName ->
                     if (createdId != null) {
                         vm.updateReceivingMeta(

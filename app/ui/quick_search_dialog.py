@@ -96,15 +96,17 @@ class QuickSearchDialog(QDialog):
                 prod_stmt = prod_stmt.where(
                     (Product.name.ilike(f"%{q}%"))
                     | (Product.sku.ilike(f"%{q}%"))
+                    | (Product.barcode.ilike(f"%{q}%"))
                     | (Product.brand.ilike(f"%{q}%"))
                     | (Product.model.ilike(f"%{q}%"))
                 )
             for p in session.scalars(prod_stmt.order_by(Product.name).limit(15)).all():
+                bc_part = f"  •  Ştrihkod: {p.barcode}" if p.barcode else ""
                 self.results.append({
                     "kind": "product",
                     "type_label": "Haryt",
                     "title": p.name,
-                    "details": f"SKU: {p.sku}  •  {' / '.join(filter(None, [p.brand, p.model])) or '—'}",
+                    "details": f"SKU: {p.sku}{bc_part}  •  {' / '.join(filter(None, [p.brand, p.model])) or '—'}",
                     "status": f"Skladda: {p.stock_quantity} sany",
                     "color": theme.GREEN if p.stock_quantity > 0 else theme.RED,
                     "product_id": p.id,

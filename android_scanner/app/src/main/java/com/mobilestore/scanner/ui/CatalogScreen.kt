@@ -234,7 +234,7 @@ fun CatalogScreen(vm: ScannerViewModel) {
             categories = categories.filter { it.isActive },
             existing = null,
             onDismiss = { showCreateDialog = false },
-            onSave = { name, catId, brand, model, mem, color, extra, minStock, cost, costCurr ->
+            onSave = { name, catId, brand, model, mem, color, extra, bc, minStock, cost, costCurr ->
                 vm.saveProduct(
                     productId = null,
                     name = name,
@@ -247,6 +247,7 @@ fun CatalogScreen(vm: ScannerViewModel) {
                     minStock = minStock,
                     defaultCost = cost,
                     costCurrency = costCurr,
+                    barcode = bc,
                 ) { _, _ -> showCreateDialog = false }
             },
         )
@@ -258,7 +259,7 @@ fun CatalogScreen(vm: ScannerViewModel) {
             categories = categories.filter { it.isActive },
             existing = editProd,
             onDismiss = { editingProduct = null },
-            onSave = { name, catId, brand, model, mem, color, extra, minStock, cost, costCurr ->
+            onSave = { name, catId, brand, model, mem, color, extra, bc, minStock, cost, costCurr ->
                 vm.saveProduct(
                     productId = editProd.id,
                     name = name,
@@ -271,6 +272,7 @@ fun CatalogScreen(vm: ScannerViewModel) {
                     minStock = minStock,
                     defaultCost = cost,
                     costCurrency = costCurr,
+                    barcode = bc,
                 ) { _, _ -> editingProduct = null }
             },
         )
@@ -292,6 +294,7 @@ fun ProductEditorDialog(
         memory: String,
         color: String,
         extraSpecs: String,
+        barcode: String,
         minStock: Int,
         defaultCost: String,
         costCurrency: String,
@@ -310,6 +313,9 @@ fun ProductEditorDialog(
     var color by remember { mutableStateOf("") }
     var extraSpecs by remember(existing?.id, prefill?.specification) {
         mutableStateOf(existing?.specification ?: prefill?.specification ?: "")
+    }
+    var barcode by remember(existing?.id) {
+        mutableStateOf(existing?.barcode ?: "")
     }
     var minStockText by remember { mutableStateOf((existing?.minStockQuantity ?: 2).toString()) }
     var defaultCost by remember {
@@ -402,9 +408,16 @@ fun ProductEditorDialog(
                     )
                 }
                 OutlinedTextField(
+                    value = barcode,
+                    onValueChange = { barcode = it },
+                    label = { Text("Ştrihkod (Barcode)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
                     value = extraSpecs,
                     onValueChange = { extraSpecs = it },
-                    label = { Text("Goşmaça maglumat / ştrihkod") },
+                    label = { Text("Goşmaça maglumat") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -453,6 +466,7 @@ fun ProductEditorDialog(
                             memory,
                             color,
                             extraSpecs,
+                            barcode,
                             minStockText.toIntOrNull() ?: 2,
                             defaultCost,
                             costCurrency,

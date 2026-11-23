@@ -29,6 +29,12 @@ class Product(Base):
         nullable=False,
     )
 
+    barcode: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
     name: Mapped[str] = mapped_column(String(150), nullable=False)
 
     brand: Mapped[str | None] = mapped_column(String(100), nullable=True)

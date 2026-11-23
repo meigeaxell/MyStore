@@ -22,9 +22,13 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.database.engine import SessionLocal
 from app.repositories.product_repository import (
+    deactivate_product,
+    delete_stock_item,
     get_product_with_devices,
     list_products_inventory,
     register_stock_item,
+    restore_product,
+    update_stock_item,
 )
 from app.services.report_service import ReportService
 from app.services.settings_service import SettingsService
@@ -48,6 +52,167 @@ SOURCES = [
 ]
 
 SOURCE_LABELS = {code: label for label, code in SOURCES}
+
+STOCK_ITEM_STATUSES = [
+    ("Skladda bar (in_stock)", "in_stock"),
+    ("Satyldy (sold)", "sold"),
+    ("Hasapdan çykaryldy (written_off)", "written_off"),
+]
+
+
+class EditStockItemDialog(QDialog):
+    """Полное редактирование отдельного устройства (StockItem) по IMEI."""
+
+    def __init__(self, stock_item_id: int, parent=None) -> None:
+        super().__init__(parent)
+        self.stock_item_id = stock_item_id
+        self.setWindowTitle(f"Enjamy üýtgetmek (ID #{stock_item_id})")
+        self.setMinimumWidth(520)
+        self.setStyleSheet(theme.STYLE)
+
+        self._build_ui()
+        self._load_data()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel(f"Enjamyň (StockItem #{self.stock_item_id}) maglumatlaryny üýtgetmek")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.product_combo = style_combo(QComboBox())
+        form.addRow("Model / Haryt *:", self.product_combo)
+
+        self.imei1_input = QLineEdit()
+        self.imei1_input.setPlaceholderText("IMEI 1 *")
+        form.addRow("IMEI 1 *:", self.imei1_input)
+
+        self.imei2_input = QLineEdit()
+        self.imei2_input.setPlaceholderText("IMEI 2 (hökmany däl)")
+        form.addRow("IMEI 2:", self.imei2_input)
+
+        self.sn_input = QLineEdit()
+        self.sn_input.setPlaceholderText("Seriýa belgisi S/N (hökmany däl)")
+        form.addRow("Seriýa belgisi (S/N):", self.sn_input)
+
+        self.condition_combo = style_combo(QComboBox())
+        self.condition_combo.addItem("Täze", "new")
+        self.condition_combo.addItem("B/U (Ulanylan)", "used")
+        form.addRow("Ýagdaýy:", self.condition_combo)
+
+        self.status_combo = style_combo(QComboBox())
+        for label, code in STOCK_ITEM_STATUSES:
+            self.status_combo.addItem(label, code)
+        form.addRow("Status:", self.status_combo)
+
+        self.source_combo = style_combo(QComboBox())
+        self.source_combo.addItem("— Görkezilmedik —", "")
+        for label, code in SOURCES:
+            self.source_combo.addItem(label, code)
+        form.addRow("Çeşme:", self.source_combo)
+
+        cost_row = QHBoxLayout()
+        self.cost_spin = QDoubleSpinBox()
+        self.cost_spin.setRange(0, 10000000)
+        self.cost_spin.setDecimals(2)
+        self.cost_curr_combo = style_combo(QComboBox())
+        self.cost_curr_combo.addItems(["USD", "TMT"])
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setDecimals(4)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        cost_row.addWidget(self.cost_spin, 1)
+        cost_row.addWidget(self.cost_curr_combo)
+        cost_row.addWidget(QLabel("Kurs:"))
+        cost_row.addWidget(self.rate_spin)
+        form.addRow("Öz bahasy:", cost_row)
+
+        self.notes_input = QLineEdit()
+        self.notes_input.setPlaceholderText("Korpus, batareýa %, komplekt, bellik...")
+        form.addRow("Bellik:", self.notes_input)
+
+        root.addLayout(form)
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        cancel_btn = make_button("Ýatyr")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = make_button("Üýtgeşmeleri ýatda sakla", "primary")
+        save_btn.clicked.connect(self._save)
+        footer.addWidget(cancel_btn)
+        footer.addWidget(save_btn)
+        root.addLayout(footer)
+
+    def _load_data(self) -> None:
+        from app.models.stock_item import StockItem
+
+        products, _cats = list_products_inventory(include_archived=True)
+        self.product_combo.clear()
+        for p in products:
+            suffix = " [ARHIW]" if not p.get("is_active", True) else ""
+            self.product_combo.addItem(f"{p['name']} ({p['sku']}){suffix}", p["id"])
+
+        with SessionLocal() as session:
+            st = session.get(StockItem, self.stock_item_id)
+            if st is None:
+                QMessageBox.warning(self, "Tapylmady", "Enjam bazada tapylmady.")
+                self.reject()
+                return
+
+            idx = self.product_combo.findData(st.product_id)
+            if idx >= 0:
+                self.product_combo.setCurrentIndex(idx)
+            self.imei1_input.setText(st.imei1 or "")
+            self.imei2_input.setText(st.imei2 or "")
+            self.sn_input.setText(st.serial_number or "")
+            c_idx = self.condition_combo.findData("used" if st.condition != "new" else "new")
+            if c_idx >= 0:
+                self.condition_combo.setCurrentIndex(c_idx)
+            s_idx = self.status_combo.findData(st.status)
+            if s_idx >= 0:
+                self.status_combo.setCurrentIndex(s_idx)
+            src_idx = self.source_combo.findData(st.acquisition_source or "")
+            if src_idx >= 0:
+                self.source_combo.setCurrentIndex(src_idx)
+            if st.unit_cost is not None:
+                self.cost_spin.setValue(float(st.unit_cost))
+            if st.cost_currency in ("USD", "TMT"):
+                self.cost_curr_combo.setCurrentText(st.cost_currency)
+            if st.cost_exchange_rate is not None and float(st.cost_exchange_rate) > 0:
+                self.rate_spin.setValue(float(st.cost_exchange_rate))
+            self.notes_input.setText(st.notes or "")
+
+    def _save(self) -> None:
+        pid = self.product_combo.currentData()
+        if pid is None:
+            QMessageBox.warning(self, "Ýalňyşlyk", "Haryt modelini saýlaň.")
+            return
+        try:
+            update_stock_item(
+                stock_item_id=self.stock_item_id,
+                product_id=int(pid),
+                imei1=self.imei1_input.text(),
+                imei2=self.imei2_input.text(),
+                serial_number=self.sn_input.text(),
+                condition=self.condition_combo.currentData(),
+                status=self.status_combo.currentData(),
+                unit_cost=Decimal(f"{self.cost_spin.value():.2f}"),
+                cost_currency=self.cost_curr_combo.currentText(),
+                cost_exchange_rate=Decimal(f"{self.rate_spin.value():.4f}"),
+                acquisition_source=self.source_combo.currentData() or None,
+                notes=self.notes_input.text(),
+            )
+            QMessageBox.information(self, "Taýýar", "Enjamyň maglumatlary üstünlikli täzelendi.")
+            self.accept()
+        except ValueError as err:
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
+        except (IntegrityError, SQLAlchemyError) as err:
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Üýtgeşmeleri saklap bolmady:\n{err}")
 
 
 class StockItemDialog(QDialog):
@@ -104,6 +269,14 @@ class StockItemDialog(QDialog):
         root.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
+        edit_imei_btn = make_button("✏ Saýlanan enjamy üýtget", "primary")
+        edit_imei_btn.clicked.connect(self._edit_selected_stock_item)
+        footer.addWidget(edit_imei_btn)
+
+        del_imei_btn = make_button("🗑 Enjamy poz", "danger")
+        del_imei_btn.clicked.connect(self._delete_selected_stock_item)
+        footer.addWidget(del_imei_btn)
+
         imei_hist_btn = make_button("📜 Saýlanan IMEI-niň doly taryhy")
         imei_hist_btn.clicked.connect(self._open_selected_imei_history)
         footer.addWidget(imei_hist_btn)
@@ -209,7 +382,7 @@ class StockItemDialog(QDialog):
             "Bellik",
         ])
         configure_table(self.table, stretch_col=[1, 7], row_height=42)
-        self.table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected_imei_history())
+        self.table.cellDoubleClicked.connect(lambda _r, _c: self._edit_selected_stock_item())
         layout.addWidget(self.table, 1)
         return tab
 
@@ -298,6 +471,8 @@ class StockItemDialog(QDialog):
             if it.status == "in_stock":
                 days = max(0, (now - it.created_at).days) if it.created_at else 0
                 status_text = f"Bar ({days} gün)"
+            elif it.status == "written_off":
+                status_text = "Hasapdan çykaryldy"
             else:
                 status_text = "Satyldy"
             cond_text = "Täze" if it.condition == "new" else "B/U"
@@ -380,6 +555,51 @@ class StockItemDialog(QDialog):
             QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
         except (IntegrityError, SQLAlchemyError) as err:
             QMessageBox.critical(self, "Ýalňyşlyk", f"Enjamy ýatda saklap bolmady:\n{err}")
+
+    def _edit_selected_stock_item(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self,
+                "Enjam saýlaň",
+                "Üýtgetmek üçin tablisadan enjam setirini saýlaň.",
+            )
+            return
+        id_cell = self.table.item(row, 0)
+        if not id_cell:
+            return
+        dlg = EditStockItemDialog(int(id_cell.text()), self)
+        if dlg.exec():
+            self._load_items()
+
+    def _delete_selected_stock_item(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            QMessageBox.information(
+                self,
+                "Enjam saýlaň",
+                "Pozmak üçin tablisadan enjam setirini saýlaň.",
+            )
+            return
+        id_cell = self.table.item(row, 0)
+        imei_cell = self.table.item(row, 1)
+        if not id_cell or not imei_cell:
+            return
+        ans = QMessageBox.question(
+            self,
+            "Enjamy pozmak",
+            f"IMEI {imei_cell.text()} enjamyny skladyň sanawyndan hakykatdan hem pozmalymy?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            delete_stock_item(int(id_cell.text()))
+            self._load_items()
+            QMessageBox.information(self, "Pozuldy", "Enjam üstünlikli pozuldy.")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Pozup bolmady", str(err))
 
     def _open_selected_imei_history(self) -> None:
         from app.ui.reports_page import ImeiHistoryDialog
@@ -497,7 +717,7 @@ class StockPage(QWidget):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
-            "Ady, brend, model, SKU ýa-da enjamyň IMEI-si boýunça gözleg..."
+            "Ady, brend, model, SKU, ştrihkod ýa-da enjamyň IMEI-si boýunça gözleg..."
         )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(40)
@@ -510,14 +730,15 @@ class StockPage(QWidget):
         self.category_filter.currentIndexChanged.connect(self._filter_products)
 
         self.status_filter = style_combo(QComboBox())
-        self.status_filter.setMinimumWidth(190)
+        self.status_filter.setMinimumWidth(205)
         self.status_filter.setMinimumHeight(40)
-        self.status_filter.addItem("Ähli sklad ýagdaýlary", "all")
+        self.status_filter.addItem("Ähli işjeň harytlar", "all")
         self.status_filter.addItem("Skladda bar", "in_stock")
         self.status_filter.addItem("B/U enjamlar bar", "has_used")
         self.status_filter.addItem("Köp duran (> 30 gün)", "stale_30")
         self.status_filter.addItem("Az galyndy", "low_stock")
         self.status_filter.addItem("Skladda ýok", "out_of_stock")
+        self.status_filter.addItem("📦 Arhiwdäki harytlar", "archived")
         self.status_filter.currentIndexChanged.connect(self._filter_products)
 
         filters.addWidget(self.search_input, 1)
@@ -553,9 +774,9 @@ class StockPage(QWidget):
         edit_btn.clicked.connect(self._edit_selected_product)
         actions_bar.addWidget(edit_btn)
 
-        add_imei_btn = make_button("+ Saýlanan haryda IMEI goş")
-        add_imei_btn.clicked.connect(self._open_selected_imei_dialog)
-        actions_bar.addWidget(add_imei_btn)
+        self.archive_btn = make_button("📦 Arhiwe geçir / ♻ Dikelt")
+        self.archive_btn.clicked.connect(self._toggle_archive_selected_product)
+        actions_bar.addWidget(self.archive_btn)
 
         history_btn = make_button("📜 Hereket taryhy")
         history_btn.clicked.connect(self._open_selected_product_history)
@@ -568,21 +789,22 @@ class StockPage(QWidget):
         layout.addLayout(actions_bar)
 
     def _load_data(self) -> None:
-        self.products, self.categories = list_products_inventory()
+        self.products, self.categories = list_products_inventory(include_archived=True)
         self._update_statistics()
         self._update_category_filter()
         self._filter_products()
 
     def _update_statistics(self) -> None:
-        total = len(self.products)
-        new_devs = sum(p["new_devices"] for p in self.products)
-        used_devs = sum(p["used_devices"] for p in self.products)
+        active_products = [p for p in self.products if p.get("is_active", True)]
+        total = len(active_products)
+        new_devs = sum(p["new_devices"] for p in active_products)
+        used_devs = sum(p["used_devices"] for p in active_products)
         low_stock = sum(
             1
-            for p in self.products
+            for p in active_products
             if p["quantity"] > 0 and p["minimum"] > 0 and p["quantity"] <= p["minimum"]
         )
-        out_of_stock = sum(1 for p in self.products if p["quantity"] == 0)
+        out_of_stock = sum(1 for p in active_products if p["quantity"] == 0)
 
         self.total_value.setText(str(total))
         self.devices_value.setText(f"{new_devs + used_devs} (Täze: {new_devs} • B/U: {used_devs})")
@@ -608,6 +830,13 @@ class StockPage(QWidget):
 
         filtered = []
         for p in self.products:
+            is_active = p.get("is_active", True)
+            if status_mode == "archived":
+                if is_active:
+                    continue
+            else:
+                if not is_active:
+                    continue
             if category_id is not None and p["category_id"] != category_id:
                 continue
             if status_mode == "in_stock" and p["quantity"] <= 0:
@@ -626,6 +855,7 @@ class StockPage(QWidget):
             if search:
                 searchable = " ".join([
                     p["sku"],
+                    p.get("barcode", ""),
                     p["name"],
                     p["brand"],
                     p["model"],
@@ -666,7 +896,10 @@ class StockPage(QWidget):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(row, col, item)
 
-            if p["quantity"] == 0:
+            if not p.get("is_active", True):
+                status = "Arhiw"
+                color = theme.MUTED
+            elif p["quantity"] == 0:
                 status = "Skladda ýok"
                 color = theme.RED
             elif p["minimum"] > 0 and p["quantity"] <= p["minimum"]:
@@ -684,6 +917,7 @@ class StockPage(QWidget):
 
             self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, p["id"])
             self.table.item(row, 1).setData(Qt.ItemDataRole.UserRole, p["name"])
+            self.table.item(row, 7).setData(Qt.ItemDataRole.UserRole, p.get("is_active", True))
 
     def _selected_product(self) -> tuple[int, str] | None:
         row = self.table.currentRow()
@@ -716,6 +950,45 @@ class StockPage(QWidget):
         dlg = ProductDialog(self, product_id=product_id)
         if dlg.exec():
             self._load_data()
+
+    def _toggle_archive_selected_product(self) -> None:
+        sel = self._selected_product()
+        if sel is None:
+            return
+        product_id, prod_name = sel
+        row = self.table.currentRow()
+        status_item = self.table.item(row, 7)
+        is_active = bool(status_item.data(Qt.ItemDataRole.UserRole)) if status_item else True
+
+        if not is_active:
+            try:
+                restore_product(product_id)
+                self._load_data()
+                QMessageBox.information(
+                    self,
+                    "Dikeldildi",
+                    f"«{prod_name}» harydy arhiwden işjeň kataloga gaýtaryldy.",
+                )
+            except (ValueError, SQLAlchemyError) as err:
+                QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+            return
+
+        ans = QMessageBox.question(
+            self,
+            "Harydy arhiwe geçirmek",
+            f"«{prod_name}» harydyny arhiwe geçirmek isleýärsiňizmi?\n"
+            "Skladda galyndy bolsa-da arhiwe geçiriler (galyndylar we taryh saklanar, islendik wagt dikeldip bolýar).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deactivate_product(product_id, force=True)
+            self._load_data()
+            QMessageBox.information(self, "Arhiwe geçirildi", f"«{prod_name}» arhiwe geçirildi.")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
     def _open_category_management(self) -> None:
         dlg = CategoryManagementDialog(self)

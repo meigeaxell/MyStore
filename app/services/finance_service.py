@@ -566,3 +566,273 @@ class FinanceService:
         session.add(movement)
         session.flush()
         return movement
+
+    @staticmethod
+    def get_combined_cash_totals(
+        session: Session,
+        exchange_rate: Decimal | float | str,
+    ) -> dict:
+        """Рассчитывает общую сумму всей кассы (USD + TMT) в обеих валютах по курсу."""
+        rate = _validate_rate(exchange_rate)
+        balances = FinanceService.get_register_balances(session)
+        usd_bal = balances["usd_balance"]
+        tmt_bal = balances["tmt_balance"]
+        total_in_tmt = _money(tmt_bal + (usd_bal * rate))
+        total_in_usd = _money(usd_bal + (tmt_bal / rate))
+        return {
+            "usd_balance": usd_bal,
+            "tmt_balance": tmt_bal,
+            "exchange_rate": rate,
+            "total_in_tmt": total_in_tmt,
+            "total_in_usd": total_in_usd,
+        }
+
+    @staticmethod
+    def zero_cash_register(
+        session: Session,
+        currency: str,
+        exchange_rate: Decimal | float | str,
+        reason: str = "Kassany nollamak / Pul almak",
+    ) -> Decimal:
+        """Обнуляет баланс указанной кассы (USD или TMT) с обязательной записью в журнал."""
+        curr = (currency or "").strip().upper()
+        if curr not in ("USD", "TMT"):
+            raise ValueError("Rugsat berlen walýutalar: USD, TMT.")
+        rate = _validate_rate(exchange_rate)
+        clean_reason = (reason or "").strip() or "Kassany nollamak"
+
+        regs = SalesService.ensure_default_registers(session)
+        register = regs[curr]
+        bal = _money(_decimal(register.balance))
+        if bal == Decimal("0.00"):
+            return Decimal("0.00")
+
+        direction = "expense" if bal > Decimal("0.00") else "income"
+        amt = abs(bal)
+        FinanceService.record_cash_adjustment(
+            session=session,
+            direction=direction,
+            amount=amt,
+            currency=curr,
+            exchange_rate=rate,
+            reason=clean_reason,
+        )
+        return amt
+
+    @staticmethod
+    def settle_or_zero_customer_debt(
+        session: Session,
+        sale_id: int,
+        with_cash: bool = True,
+        exchange_rate: Decimal | float | str | None = None,
+        reason: str | None = None,
+    ) -> Decimal:
+        """Полностью закрывает долг клиента по чеку: через кассу (with_cash=True) или списанием (with_cash=False)."""
+        from app.models.sale_payment import SalePayment
+
+        sale = session.get(Sale, sale_id)
+        if not sale:
+            raise ValueError(f"ID {sale_id} bolan satyş tapylmady.")
+        if sale.status == "cancelled":
+            raise ValueError("Ýatyrylan çekde müşderi bergisi ýok.")
+
+        debt = SalesService.get_customer_debt(session, sale)
+        if debt <= Decimal("0.00"):
+            raise ValueError("Bu çek boýunça açyk bergi ýok.")
+
+        rate = _validate_rate(exchange_rate or sale.exchange_rate or Decimal("19.5000"))
+        if with_cash:
+            desc = (reason or "").strip() or f"Bergini doly ýapmak ({sale.receipt_number})"
+            SalesService.add_sale_payment(
+                session=session,
+                sale_id=sale.id,
+                currency=sale.currency,
+                amount=debt,
+                exchange_rate=rate,
+                description=desc,
+            )
+            return debt
+
+        desc = (reason or "").strip() or f"Bergini nollamak / hasapdan öçürmek ({sale.receipt_number})"
+        session.add(
+            SalePayment(
+                sale_id=sale.id,
+                payment_date=datetime.now(),
+                currency=sale.currency,
+                amount=debt,
+                exchange_rate=rate,
+                cash_register_id=None,
+                payment_type="payment",
+                description=desc[:255],
+            )
+        )
+        session.flush()
+        return debt
+
+    @staticmethod
+    def settle_or_zero_store_debt_to_customer(
+        session: Session,
+        sale_id: int,
+        with_cash: bool = True,
+        exchange_rate: Decimal | float | str | None = None,
+        reason: str | None = None,
+    ) -> Decimal:
+        """Полностью закрывает долг магазина перед клиентом по отменённому чеку (с кассой или обнулением)."""
+        from app.models.sale_payment import SalePayment
+
+        sale = session.get(Sale, sale_id)
+        if not sale:
+            raise ValueError(f"ID {sale_id} bolan satyş tapylmady.")
+        if sale.status != "cancelled":
+            raise ValueError("Dükanyň müşderä bergisi diňe ýatyrylan çekde bolýar.")
+
+        debt = SalesService.get_store_debt_to_customer(session, sale)
+        if debt <= Decimal("0.00"):
+            raise ValueError("Bu çek boýunça dükanyň açyk bergisi ýok.")
+
+        rate = _validate_rate(exchange_rate or sale.exchange_rate or Decimal("19.5000"))
+        if with_cash:
+            desc = (reason or "").strip() or f"Müşderä bergini doly gaýtarmak ({sale.receipt_number})"
+            SalesService.settle_store_debt_to_customer(
+                session=session,
+                sale_id=sale.id,
+                currency=sale.currency,
+                amount=debt,
+                exchange_rate=rate,
+                description=desc,
+            )
+            return debt
+
+        desc = (reason or "").strip() or f"Dükanyň bergisini nollamak ({sale.receipt_number})"
+        session.add(
+            SalePayment(
+                sale_id=sale.id,
+                payment_date=datetime.now(),
+                currency=sale.currency,
+                amount=debt,
+                exchange_rate=rate,
+                cash_register_id=None,
+                payment_type="customer_debt_settlement",
+                description=desc[:255],
+            )
+        )
+        session.flush()
+        return debt
+
+    @staticmethod
+    def settle_or_zero_supplier_debt(
+        session: Session,
+        purchase_id: int,
+        with_cash: bool = True,
+        exchange_rate: Decimal | float | str | None = None,
+        reason: str | None = None,
+    ) -> Decimal:
+        """Закрывает долг магазина перед поставщиком (с оплатой из кассы или списанием без кассы)."""
+        from app.services.purchase_service import _register_payment
+
+        purchase = session.get(Purchase, purchase_id)
+        if not purchase:
+            raise ValueError("Alyş tapylmady.")
+        if purchase.status != "active":
+            raise ValueError("Ýatyrylan alyşda üpjün edijä bergi ýok.")
+
+        paid = _get_purchase_paid_amount(session, purchase)
+        remaining = max(Decimal("0.00"), _money(_decimal(purchase.total_amount) - paid))
+        if remaining <= Decimal("0.00"):
+            raise ValueError("Bu alyş boýunça açyk bergi ýok.")
+
+        rate = _validate_rate(exchange_rate or purchase.exchange_rate or Decimal("19.5000"))
+        if with_cash:
+            _register_payment(
+                session=session,
+                purchase=purchase,
+                currency=purchase.currency,
+                amount=remaining,
+                exchange_rate=rate,
+            )
+            return remaining
+
+        session.add(
+            PurchasePayment(
+                purchase_id=purchase.id,
+                payment_date=datetime.now(),
+                currency=purchase.currency,
+                amount=remaining,
+                exchange_rate=rate,
+            )
+        )
+        session.flush()
+        return remaining
+
+    @staticmethod
+    def settle_or_zero_supplier_refund_debt(
+        session: Session,
+        purchase_id: int,
+        with_cash: bool = True,
+        exchange_rate: Decimal | float | str | None = None,
+        reason: str | None = None,
+    ) -> Decimal:
+        """Закрывает долг поставщика перед магазином по отменённой закупке (возврат в кассу или обнуление)."""
+        from app.models.cash_register import CashTransaction
+
+        purchase = session.get(Purchase, purchase_id)
+        if not purchase:
+            raise ValueError("Alyş tapylmady.")
+        if purchase.status != "cancelled":
+            raise ValueError("Üpjün edijiniň bergisi diňe ýatyrylan alyşda bolýar.")
+
+        debt = _get_supplier_debt_amount(session, purchase)
+        if debt <= Decimal("0.00"):
+            raise ValueError("Üpjün edijiniň açyk bergisi ýok.")
+
+        rate = _validate_rate(exchange_rate or purchase.exchange_rate or Decimal("19.5000"))
+        now = datetime.now()
+        desc = (reason or "").strip() or (
+            f"Alyş №{purchase.id} boýunça üpjün edijiden doly gaýtarma"
+            if with_cash
+            else f"Alyş №{purchase.id} boýunça üpjün ediji bergisini nollamak"
+        )
+
+        refund = PurchaseRefund(
+            purchase_id=purchase.id,
+            refund_date=now,
+            currency=purchase.currency,
+            amount=debt,
+            exchange_rate=rate,
+            description=desc[:255],
+        )
+        session.add(refund)
+        session.flush()
+
+        if with_cash:
+            regs = SalesService.ensure_default_registers(session)
+            reg = regs.get(purchase.currency.strip().upper())
+            reg_id = None
+            if reg is not None:
+                reg.balance = _money(_decimal(reg.balance) + debt)
+                reg_id = reg.id
+                session.add(
+                    CashTransaction(
+                        cash_register_id=reg.id,
+                        transaction_type="income",
+                        amount=debt,
+                        currency=purchase.currency,
+                        exchange_rate=rate,
+                        description=desc[:255],
+                        transaction_date=now,
+                    )
+                )
+            session.add(
+                CashMovement(
+                    movement_date=now,
+                    movement_type="purchase_refund",
+                    currency=purchase.currency,
+                    amount=debt,
+                    exchange_rate=rate,
+                    cash_register_id=reg_id,
+                    purchase_refund_id=refund.id,
+                    description=desc[:255],
+                )
+            )
+            session.flush()
+        return debt

@@ -128,7 +128,7 @@ class CatalogProductSelectorDialog(QDialog):
             if cat_id is not None and p["category_id"] != cat_id:
                 continue
             if q:
-                hay = f"{p['sku']} {p['name']} {p['brand']} {p['model']} {p['category']}".lower()
+                hay = f"{p['sku']} {p.get('barcode', '')} {p['name']} {p['brand']} {p['model']} {p['category']}".lower()
                 if q not in hay:
                     continue
             self.filtered.append(p)

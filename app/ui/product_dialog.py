@@ -20,6 +20,7 @@ from app.repositories.product_repository import (
     deactivate_product,
     get_product_with_devices,
     list_categories,
+    restore_product,
     save_product,
 )
 from app.services.settings_service import SettingsService
@@ -31,16 +32,24 @@ from app.ui.widgets import make_button, style_combo
 class ProductDialog(QDialog):
     """Окно добавления и редактирования карточки товара в едином модуле «Товары и склад»."""
 
-    def __init__(self, parent=None, product_id: int | None = None) -> None:
+    def __init__(
+        self,
+        parent=None,
+        product_id: int | None = None,
+        initial_barcode: str = "",
+    ) -> None:
         super().__init__(parent)
         self.product_id = product_id
+        self.initial_barcode = (initial_barcode or "").strip()
         self.created_product_id: int | None = None
         self._in_stock_imeis_count = 0
+        self._is_active = True
+        self._current_stock_qty = 0
 
         self.setWindowTitle(
             "Katalogda täze haryt" if self.product_id is None else "Harydy üýtgetmek"
         )
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
         self.setStyleSheet(theme.STYLE)
 
         self._build_ui()
@@ -48,6 +57,8 @@ class ProductDialog(QDialog):
 
         if self.product_id is not None:
             self._load_product()
+        elif self.initial_barcode:
+            self.barcode_input.setText(self.initial_barcode)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -94,6 +105,10 @@ class ProductDialog(QDialog):
         self.model_input.setPlaceholderText("Mysal: A3102 / S928B (hökmany däl)")
         form.addRow("Model", self.model_input)
 
+        self.barcode_input = QLineEdit()
+        self.barcode_input.setPlaceholderText("EAN-13 / ştrihkod skan et ýa-da ýaz (hökmany däl)")
+        form.addRow("Ştrihkod (Barcode)", self.barcode_input)
+
         self.specification_input = QLineEdit()
         self.specification_input.setPlaceholderText("Reňk, ýat, aýratynlyklar (hökmany däl)")
         form.addRow("Aýratynlyklar", self.specification_input)
@@ -128,8 +143,8 @@ class ProductDialog(QDialog):
         root.addWidget(self.imei_note_label)
 
         footer = QHBoxLayout()
-        self.deactivate_button = make_button("Öçür (arhiwe geçir)", "danger")
-        self.deactivate_button.clicked.connect(self._deactivate_product)
+        self.deactivate_button = make_button("📦 Arhiwe geçir", "danger")
+        self.deactivate_button.clicked.connect(self._toggle_archive_product)
         self.deactivate_button.hide()
         footer.addWidget(self.deactivate_button)
         footer.addStretch()
@@ -165,11 +180,17 @@ class ProductDialog(QDialog):
                 self.reject()
                 return
 
+            self._is_active = bool(product.is_active)
+            self._current_stock_qty = product.stock_quantity
+            self.deactivate_button.setText(
+                "📦 Arhiwe geçir" if self._is_active else "♻ Arhiwden dikelt"
+            )
             self.deactivate_button.show()
             self._in_stock_imeis_count = in_stock_imeis
             self.name_input.setText(product.name)
             self.brand_input.setText(product.brand or "")
             self.model_input.setText(product.model or "")
+            self.barcode_input.setText(product.barcode or "")
             self.specification_input.setText(product.specification or "")
             self.stock_spin.setMinimum(in_stock_imeis)
             self.stock_spin.setValue(product.stock_quantity)
@@ -227,6 +248,7 @@ class ProductDialog(QDialog):
                 specification=self.specification_input.text(),
                 stock_quantity=self.stock_spin.value(),
                 min_stock_quantity=self.min_stock_spin.value(),
+                barcode=self.barcode_input.text(),
             )
             self.created_product_id = product.id
             if self.cost_spin.value() > 0:
@@ -247,24 +269,41 @@ class ProductDialog(QDialog):
         except SQLAlchemyError as err:
             QMessageBox.critical(self, "Ýatda saklama ýalňyşlygy", f"Harydy ýatda saklap bolmady:\n{err}")
 
-    def _deactivate_product(self) -> None:
+    def _toggle_archive_product(self) -> None:
         if self.product_id is None:
             return
+        if not self._is_active:
+            try:
+                restore_product(self.product_id)
+                QMessageBox.information(self, "Taýýar", "Haryt arhiwden dikeldildi we işjeň kataloga gaýtaryldy.")
+                self.accept()
+            except (ValueError, SQLAlchemyError) as err:
+                QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+            return
+
+        stock_warn = ""
+        if self._current_stock_qty > 0 or self._in_stock_imeis_count > 0:
+            stock_warn = (
+                f"\n\n⚠ Üns beriň: skladda entek {self._current_stock_qty} sany "
+                f"(IMEI: {self._in_stock_imeis_count}) bar.\n"
+                "Arhiwe geçirileninde galyndylar we taryh saklanar, ýöne haryt satyşda görünmez."
+            )
         answer = QMessageBox.question(
             self,
-            "Harydy öçürmek",
-            "Bu harydy hakykatdan hem öçürmek (arhiwe geçirmek) isleýärsiňizmi?\n"
-            "Ol işjeň katalogdan gizlener.",
+            "Harydy arhiwe geçirmek",
+            "Bu harydy arhiwe geçirmek isleýärsiňizmi?\n"
+            "Ol işjeň katalogdan gizlener (islendik wagt arhiwden dikeldip bolýar)."
+            + stock_warn,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            deactivate_product(self.product_id)
-            QMessageBox.information(self, "Taýýar", "Haryt üstünlikli öçürildi.")
+            deactivate_product(self.product_id, force=True)
+            QMessageBox.information(self, "Taýýar", "Haryt arhiwe geçirildi.")
             self.accept()
         except ValueError as err:
-            QMessageBox.warning(self, "Öçürip bolmaýar", str(err))
+            QMessageBox.warning(self, "Arhiwe geçirip bolmaýar", str(err))
         except SQLAlchemyError as err:
-            QMessageBox.critical(self, "Ýalňyşlyk", f"Harydy öçürip bolmady:\n{err}")
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Harydy arhiwe geçirip bolmady:\n{err}")

@@ -28,7 +28,10 @@ from app.models.purchase import Purchase
 from app.models.purchase_item import PurchaseItem
 from app.models.purchase_payment import PurchasePayment
 from app.models.purchase_refund import PurchaseRefund
-from app.repositories.product_repository import get_low_stock_products
+from app.repositories.product_repository import (
+    find_product_by_barcode,
+    get_low_stock_products,
+)
 from app.services.purchase_service import (
     add_purchase_payment,
     add_purchase_refund,
@@ -301,6 +304,22 @@ class PurchaseDialog(QDialog):
         sec_row.addWidget(low_stock_btn)
         root.addLayout(sec_row)
 
+        barcode_row = QHBoxLayout()
+        barcode_row.setSpacing(8)
+        self.barcode_scan_input = QLineEdit()
+        self.barcode_scan_input.setPlaceholderText(
+            "Ştrihkod (Barcode) ýa-da SKU skan et / ýaz we Enter bas — san boýunça +1 goşular..."
+        )
+        self.barcode_scan_input.setClearButtonEnabled(True)
+        self.barcode_scan_input.setMinimumHeight(38)
+        self.barcode_scan_input.returnPressed.connect(self._add_item_by_barcode)
+        barcode_add_btn = make_button("║█║ Ştrihkod bilen +1 goş")
+        barcode_add_btn.setMinimumHeight(38)
+        barcode_add_btn.clicked.connect(self._add_item_by_barcode)
+        barcode_row.addWidget(self.barcode_scan_input, 1)
+        barcode_row.addWidget(barcode_add_btn)
+        root.addLayout(barcode_row)
+
         product_row = QHBoxLayout()
         product_row.setSpacing(8)
 
@@ -524,6 +543,66 @@ class PurchaseDialog(QDialog):
             idx = self.product_input.findData(dlg.selected_product["id"])
             if idx >= 0:
                 self.product_input.setCurrentIndex(idx)
+
+    def _add_item_by_barcode(self) -> None:
+        raw_code = self.barcode_scan_input.text().strip()
+        if not raw_code:
+            return
+
+        ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
+        en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
+        trans_map = {ord(r): ord(e) for r, e in zip(ru_layout, en_layout)}
+        trans_map.update({ord(r.upper()): ord(e.upper()) for r, e in zip(ru_layout, en_layout)})
+        code_en = raw_code.translate(trans_map)
+
+        product = find_product_by_barcode(raw_code) or find_product_by_barcode(code_en)
+        if product is None:
+            from app.ui.product_dialog import ProductDialog
+
+            ans = QMessageBox.question(
+                self,
+                "Ştrihkod tapylmady",
+                f"«{raw_code}» ştrihkodly haryt katalogda tapylmady.\n"
+                "Bu ştrihkod bilen täze haryt döredip alyşa goşmalymy?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                self.barcode_scan_input.selectAll()
+                return
+            dlg = ProductDialog(self, initial_barcode=code_en or raw_code)
+            if not dlg.exec() or dlg.created_product_id is None:
+                return
+            self._load_products()
+            self._populate_product_combo()
+            with SessionLocal() as session:
+                product = session.get(Product, dlg.created_product_id)
+            if product is None:
+                return
+
+        # Если товар уже есть в таблице закупки (без IMEI), увеличиваем количество на +1
+        for existing in self.items:
+            if existing["product_id"] == product.id and not existing.get("imeis"):
+                existing["quantity"] += 1
+                self._refresh_items()
+                self.barcode_scan_input.clear()
+                self.barcode_scan_input.setFocus()
+                return
+
+        unit_cost = self._resolve_last_unit_cost(product.id)
+        self.items.append({
+            "product_id": product.id,
+            "name": product.name,
+            "quantity": 1,
+            "unit_cost": unit_cost,
+            "imeis": [],
+        })
+        self._refresh_items()
+        idx = self.product_input.findData(product.id)
+        if idx >= 0:
+            self.product_input.setCurrentIndex(idx)
+        self.barcode_scan_input.clear()
+        self.barcode_scan_input.setFocus()
 
     def _on_document_currency_changed(self, _text: str) -> None:
         self._refresh_items()

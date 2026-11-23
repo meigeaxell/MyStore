@@ -1,5 +1,5 @@
 
-from PySide6.QtCore import QSettings, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -7,15 +7,20 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
+from sqlalchemy import select
 
 from app.database.engine import SessionLocal
 from app.models.product import Product
+from app.models.sale import Sale
+from app.models.stock_item import StockItem
 from app.services.backup_service import BackupService
 from app.services.mobile_ws_server import MobileWebSocketServer
 from app.services.settings_service import SettingsService
@@ -107,6 +112,13 @@ class MainWindow(QMainWindow):
         self._register_pages()
         self._restore_ui_state()
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_quick_search)
+        QShortcut(QKeySequence("F5"), self, activated=self._refresh_current_page)
+        for idx in range(min(8, len(self.nav_buttons))):
+            QShortcut(
+                QKeySequence(f"Ctrl+{idx + 1}"),
+                self,
+                activated=lambda i=idx: self._switch_page(i),
+            )
         BackupService.run_auto_backup_if_due()
 
         self.scanner_status_label = QLabel("📱 Skaner: öçük")
@@ -245,7 +257,16 @@ class MainWindow(QMainWindow):
                 self._switch_page(index)
                 return
 
+    def _refresh_current_page(self) -> None:
+        widget = self.pages.currentWidget()
+        if hasattr(widget, "refresh_data"):
+            widget.refresh_data()
+        elif hasattr(widget, "_load_data"):
+            widget._load_data()
+        self.statusBar().showMessage("Täzelendi (F5)", 2500)
+
     def _open_quick_search(self, initial_text: str = "") -> None:
+        self._hide_top_search_popup()
         query = initial_text or self.top_search.text().strip()
         dlg = QuickSearchDialog(initial_query=query, parent=self)
         if dlg.exec() and dlg.selected_for_pos:
@@ -263,6 +284,117 @@ class MainWindow(QMainWindow):
         q = self.top_search.text().strip()
         self._open_quick_search(q)
 
+    def _hide_top_search_popup(self) -> None:
+        if hasattr(self, "top_search_popup") and self.top_search_popup is not None:
+            self.top_search_popup.hide()
+
+    def _schedule_top_live_search(self, text: str) -> None:
+        if len(text.strip()) < 2:
+            self._hide_top_search_popup()
+            return
+        self._top_search_timer.start(180)
+
+    def _run_top_live_search(self) -> None:
+        q = self.top_search.text().strip()
+        if len(q) < 2:
+            self._hide_top_search_popup()
+            return
+
+        self.top_search_popup.clear()
+        with SessionLocal() as session:
+            prods = session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    (Product.name.ilike(f"%{q}%"))
+                    | (Product.sku.ilike(f"%{q}%"))
+                    | (Product.barcode.ilike(f"%{q}%"))
+                    | (Product.brand.ilike(f"%{q}%"))
+                    | (Product.model.ilike(f"%{q}%")),
+                )
+                .order_by(Product.stock_quantity.desc(), Product.name.asc())
+                .limit(6)
+            ).all()
+            for p in prods:
+                bc = f" • {p.barcode}" if p.barcode else ""
+                item = QListWidgetItem(f"📦 {p.name} ({p.sku}{bc}) — Skladda: {p.stock_quantity} sany")
+                item.setData(Qt.ItemDataRole.UserRole, {"kind": "product", "product_id": p.id, "imei": None})
+                self.top_search_popup.addItem(item)
+
+            imeis = session.execute(
+                select(StockItem, Product)
+                .join(Product, StockItem.product_id == Product.id)
+                .where(
+                    (StockItem.imei1.ilike(f"%{q}%"))
+                    | (StockItem.imei2.ilike(f"%{q}%"))
+                    | (StockItem.serial_number.ilike(f"%{q}%"))
+                )
+                .order_by(StockItem.id.desc())
+                .limit(5)
+            ).all()
+            for st, prod in imeis:
+                st_lbl = "Bar" if st.status == "in_stock" else "Satyldy"
+                item = QListWidgetItem(f"📱 {prod.name} • IMEI: {st.imei1} [{st_lbl}]")
+                item.setData(
+                    Qt.ItemDataRole.UserRole,
+                    {"kind": "imei", "product_id": prod.id, "imei": st.imei1, "in_stock": st.status == "in_stock"},
+                )
+                self.top_search_popup.addItem(item)
+
+            sales = session.scalars(
+                select(Sale)
+                .where(
+                    (Sale.receipt_number.ilike(f"%{q}%"))
+                    | (Sale.customer_name.ilike(f"%{q}%"))
+                    | (Sale.customer_phone.ilike(f"%{q}%"))
+                )
+                .order_by(Sale.sale_date.desc())
+                .limit(4)
+            ).all()
+            for s in sales:
+                cust = s.customer_name or "Bölek müşderi"
+                item = QListWidgetItem(f"🧾 Çek {s.receipt_number} • {cust} • {s.total_amount} {s.currency}")
+                item.setData(Qt.ItemDataRole.UserRole, {"kind": "sale", "sale_id": s.id})
+                self.top_search_popup.addItem(item)
+
+        if self.top_search_popup.count() == 0:
+            self._hide_top_search_popup()
+            return
+
+        pos = self.top_search.mapToGlobal(QPoint(0, self.top_search.height() + 2))
+        self.top_search_popup.move(pos)
+        self.top_search_popup.setFixedWidth(max(440, self.top_search.width()))
+        h = min(320, self.top_search_popup.count() * 34 + 12)
+        self.top_search_popup.setFixedHeight(h)
+        self.top_search_popup.show()
+
+    def _on_top_live_item_clicked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        self._hide_top_search_popup()
+        self.top_search.clear()
+        kind = data.get("kind")
+        if kind in ("product", "imei"):
+            self.navigate_to_title("Satyş we kassa")
+            current = self.pages.currentWidget()
+            if hasattr(current, "_append_to_cart"):
+                with SessionLocal() as session:
+                    prod = session.get(Product, data["product_id"])
+                    if prod and prod.stock_quantity > 0:
+                        if kind == "imei" and not data.get("in_stock"):
+                            from app.ui.stock_page import StockItemDialog
+
+                            StockItemDialog(product_id=prod.id, product_name=prod.name, parent=self).exec()
+                            return
+                        current._append_to_cart(prod, data.get("imei"))
+                    elif prod:
+                        from app.ui.stock_page import StockItemDialog
+
+                        StockItemDialog(product_id=prod.id, product_name=prod.name, parent=self).exec()
+        elif kind == "sale" and data.get("sale_id"):
+            from app.ui.sales_page import SaleDetailsDialog
+
+            SaleDetailsDialog(data["sale_id"], self).exec()
+
     def _build_topbar(self) -> QFrame:
         bar = QFrame()
         bar.setObjectName("topbar")
@@ -274,9 +406,25 @@ class MainWindow(QMainWindow):
 
         self.top_search = QLineEdit()
         self.top_search.setObjectName("search")
-        self.top_search.setPlaceholderText("Harytlar, IMEI, müşderiler, çekler boýunça gözleg (Ctrl+K)…")
+        self.top_search.setClearButtonEnabled(True)
+        self.top_search.setPlaceholderText("Harytlar, ştrihkod, IMEI, müşderiler, çekler (Ctrl+K)…")
         self.top_search.returnPressed.connect(self._on_global_search)
+        self.top_search.textChanged.connect(self._schedule_top_live_search)
         row.addWidget(self.top_search)
+
+        self._top_search_timer = QTimer(self)
+        self._top_search_timer.setSingleShot(True)
+        self._top_search_timer.timeout.connect(self._run_top_live_search)
+
+        self.top_search_popup = QListWidget(self)
+        self.top_search_popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
+        self.top_search_popup.setStyleSheet(
+            f"QListWidget {{ background: white; border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 4px; }}"
+            "QListWidget::item { padding: 6px 10px; border-radius: 6px; }"
+            f"QListWidget::item:hover, QListWidget::item:selected {{ background: #EFF6FF; color: {theme.NAVY}; }}"
+        )
+        self.top_search_popup.itemClicked.connect(self._on_top_live_item_clicked)
+        self.top_search_popup.hide()
 
         search_btn = QPushButton("🔍 Gözleg (Ctrl+K)")
         search_btn.setCursor(Qt.CursorShape.PointingHandCursor)

@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -13,6 +13,8 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -501,6 +503,8 @@ class SalesPage(QWidget):
         QShortcut(QKeySequence("F4"), self, activated=self._edit_selected_price)
         QShortcut(QKeySequence("F9"), self, activated=self._process_checkout)
         QShortcut(QKeySequence("Delete"), self, activated=self._remove_cart_item)
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=self._hold_current_cart)
+        QShortcut(QKeySequence("Escape"), self, activated=self._hide_live_search_popup)
 
     def _focus_search(self) -> None:
         self.tabs.setCurrentIndex(0)
@@ -558,11 +562,28 @@ class SalesPage(QWidget):
         search_row.setSpacing(8)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
-            "Doly ýa-da soňky sanlar boýunça IMEI, SKU, at gözlegi (F3)..."
+            "Ştrihkod, IMEI, SKU, at boýunça janly gözleg (F3)..."
         )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(40)
         self.search_input.returnPressed.connect(self._add_product_by_search)
+        self.search_input.textChanged.connect(self._schedule_live_search)
+
+        self._live_search_timer = QTimer(self)
+        self._live_search_timer.setSingleShot(True)
+        self._live_search_timer.timeout.connect(self._run_live_search)
+
+        self.live_search_popup = QListWidget(self)
+        self.live_search_popup.setWindowFlags(
+            Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
+        )
+        self.live_search_popup.setStyleSheet(
+            f"QListWidget {{ background: white; border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 4px; }}"
+            "QListWidget::item { padding: 6px 10px; border-radius: 6px; }"
+            f"QListWidget::item:hover, QListWidget::item:selected {{ background: #EFF6FF; color: {theme.NAVY}; }}"
+        )
+        self.live_search_popup.itemClicked.connect(self._on_live_search_item_clicked)
+        self.live_search_popup.hide()
 
         search_btn = make_button("Skladdan tap / Saýla (F2)…", "primary")
         search_btn.setMinimumHeight(40)
@@ -1012,7 +1033,116 @@ class SalesPage(QWidget):
                     self._append_to_cart(product, sel["imei"])
             self.search_input.clear()
 
+    def _hide_live_search_popup(self) -> None:
+        if hasattr(self, "live_search_popup") and self.live_search_popup is not None:
+            self.live_search_popup.hide()
+
+    def _schedule_live_search(self, text: str) -> None:
+        if len(text.strip()) < 2:
+            self._hide_live_search_popup()
+            return
+        self._live_search_timer.start(160)
+
+    def _run_live_search(self) -> None:
+        text = self.search_input.text().strip()
+        if len(text) < 2:
+            self._hide_live_search_popup()
+            return
+
+        ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
+        en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
+        trans_map = {ord(r): ord(e) for r, e in zip(ru_layout, en_layout)}
+        trans_map.update({ord(r.upper()): ord(e.upper()) for r, e in zip(ru_layout, en_layout)})
+        text_en = text.translate(trans_map)
+
+        self.live_search_popup.clear()
+        with SessionLocal() as session:
+            imeis = session.execute(
+                select(StockItem, Product)
+                .join(Product, StockItem.product_id == Product.id)
+                .where(
+                    StockItem.status == "in_stock",
+                    Product.is_active.is_(True),
+                    Product.stock_quantity > 0,
+                    (StockItem.imei1.ilike(f"%{text}%"))
+                    | (StockItem.imei1.ilike(f"%{text_en}%"))
+                    | (StockItem.imei2.ilike(f"%{text}%"))
+                    | (StockItem.serial_number.ilike(f"%{text}%")),
+                )
+                .limit(6)
+            ).all()
+            for st, prod in imeis:
+                cond = "Täze" if st.condition == "new" else "B/U"
+                item = QListWidgetItem(f"📱 {prod.name} • IMEI: {st.imei1} ({cond})")
+                item.setData(Qt.ItemDataRole.UserRole, {"product_id": prod.id, "imei": st.imei1})
+                self.live_search_popup.addItem(item)
+
+            prods = session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    Product.stock_quantity > 0,
+                    (Product.name.ilike(f"%{text}%"))
+                    | (Product.name.ilike(f"%{text_en}%"))
+                    | (Product.sku.ilike(f"%{text}%"))
+                    | (Product.sku.ilike(f"%{text_en}%"))
+                    | (Product.barcode.ilike(f"%{text}%"))
+                    | (Product.barcode.ilike(f"%{text_en}%"))
+                    | (Product.brand.ilike(f"%{text}%"))
+                    | (Product.model.ilike(f"%{text}%")),
+                )
+                .order_by(Product.name.asc())
+                .limit(8)
+            ).all()
+            for p in prods:
+                bc = f" • {p.barcode}" if p.barcode else ""
+                item = QListWidgetItem(f"📦 {p.name} ({p.sku}{bc}) — Bar: {p.stock_quantity} sany")
+                item.setData(Qt.ItemDataRole.UserRole, {"product_id": p.id, "imei": None})
+                self.live_search_popup.addItem(item)
+
+        if self.live_search_popup.count() == 0:
+            self._hide_live_search_popup()
+            return
+
+        pos = self.search_input.mapToGlobal(QPoint(0, self.search_input.height() + 2))
+        self.live_search_popup.move(pos)
+        self.live_search_popup.setFixedWidth(max(440, self.search_input.width()))
+        h = min(300, self.live_search_popup.count() * 34 + 12)
+        self.live_search_popup.setFixedHeight(h)
+        self.live_search_popup.show()
+
+    def _on_live_search_item_clicked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        self._hide_live_search_popup()
+        pid = data.get("product_id")
+        imei = data.get("imei")
+        if pid is None:
+            return
+        with SessionLocal() as session:
+            prod = session.get(Product, int(pid))
+            if not prod or not prod.is_active or prod.stock_quantity <= 0:
+                return
+            if imei:
+                self._append_to_cart(prod, imei)
+                self.search_input.clear()
+                return
+            in_stock_imeis = session.scalars(
+                select(StockItem).where(
+                    StockItem.product_id == prod.id,
+                    StockItem.status == "in_stock",
+                )
+            ).all()
+            if len(in_stock_imeis) == 0:
+                self._append_to_cart(prod)
+                self.search_input.clear()
+            elif len(in_stock_imeis) == 1 and prod.stock_quantity == 1:
+                self._append_to_cart(prod, in_stock_imeis[0].imei1)
+                self.search_input.clear()
+            else:
+                self._open_inventory_selector(prod.name)
+
     def _add_product_by_search(self) -> None:
+        self._hide_live_search_popup()
         text = self.search_input.text().strip()
         if not text:
             self._open_inventory_selector("")
@@ -1068,7 +1198,21 @@ class SalesPage(QWidget):
                         self.search_input.clear()
                         return
 
-            # 2. Поиск по SKU или названию
+            # 2. Точный поиск по штрихкоду (Barcode)
+            exact_barcode = session.scalar(
+                select(Product).where(
+                    Product.is_active.is_(True),
+                    Product.stock_quantity > 0,
+                    (func.lower(Product.barcode) == text.lower())
+                    | (func.lower(Product.barcode) == text_en.lower()),
+                )
+            )
+            if exact_barcode is not None:
+                self._append_to_cart(exact_barcode)
+                self.search_input.clear()
+                return
+
+            # 3. Поиск по SKU, штрихкоду или названию
             matches = session.scalars(
                 select(Product)
                 .where(
@@ -1076,6 +1220,8 @@ class SalesPage(QWidget):
                     Product.stock_quantity > 0,
                     (Product.sku.ilike(f"%{text}%"))
                     | (Product.sku.ilike(f"%{text_en}%"))
+                    | (Product.barcode.ilike(f"%{text}%"))
+                    | (Product.barcode.ilike(f"%{text_en}%"))
                     | (Product.name.ilike(f"%{text}%"))
                     | (Product.name.ilike(f"%{text_en}%")),
                 )

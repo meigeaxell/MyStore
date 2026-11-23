@@ -96,6 +96,7 @@ data class ImeiCheckResultData(
 data class CatalogProductItem(
     val id: Int,
     val sku: String = "",
+    val barcode: String = "",
     val name: String = "",
     @SerialName("category_id") val categoryId: Int? = null,
     val category: String = "",
@@ -118,6 +119,7 @@ data class CatalogListData(
 data class ProductDetailInfo(
     val id: Int,
     val sku: String = "",
+    val barcode: String = "",
     val name: String = "",
     @SerialName("category_id") val categoryId: Int? = null,
     val brand: String = "",

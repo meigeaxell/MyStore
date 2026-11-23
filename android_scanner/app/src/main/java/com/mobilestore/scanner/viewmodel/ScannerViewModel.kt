@@ -878,6 +878,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         costCurrency: String,
         allowDuplicate: Boolean = false,
         ocrRawText: String? = null,
+        barcode: String = "",
         onSuccess: (createdId: Int?, createdName: String) -> Unit = { _, _ -> },
     ) {
         val specParts = listOf(memory.trim(), color.trim(), extraSpecs.trim()).filter { it.isNotEmpty() }
@@ -891,6 +892,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 put("brand", brand.trim())
                 put("model", model.trim())
                 put("specification", composedSpec)
+                if (barcode.trim().isNotEmpty()) put("barcode", barcode.trim())
                 put("min_stock_quantity", minStock)
                 val cleanCost = defaultCost.trim().replace(",", ".")
                 if ((cleanCost.toDoubleOrNull() ?: 0.0) > 0.0) {

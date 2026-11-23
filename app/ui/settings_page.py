@@ -28,6 +28,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from app.services.backup_service import BackupService
 from app.services.mobile_ws_server import MobileWebSocketServer
 from app.services.settings_service import SettingsService
+from app.services.update_service import UpdateService
 from app.ui import theme
 from app.ui.widgets import Card, configure_table, style_combo
 
@@ -223,6 +224,14 @@ class SettingsPage(QWidget):
         )
         restore_selected_btn.clicked.connect(self._restore_selected_backup)
         actions_row.addWidget(restore_selected_btn)
+
+        update_zip_btn = QPushButton("⬆ Programmany täzele (ZIP)")
+        update_zip_btn.setMinimumHeight(40)
+        update_zip_btn.setToolTip(
+            "Täze Windows ZIP wersiýasyndan maglumat bazasyny we ätiýaçlyk nusgalary saklap täzelemek"
+        )
+        update_zip_btn.clicked.connect(self._update_from_zip)
+        actions_row.addWidget(update_zip_btn)
 
         cl.addLayout(actions_row)
         layout.addWidget(cfg_card)
@@ -710,3 +719,42 @@ class SettingsPage(QWidget):
                 "Dikeltme ýalňyşlygy",
                 f"Maglumat bazasyny dikeldip bolmady:\n{e}",
             )
+
+    def _update_from_zip(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Täze MobileStore Windows ZIP arhiwini saýlaň",
+            str(Path.home()),
+            "ZIP Archive (*.zip)",
+        )
+        if not file_path:
+            return
+
+        ok, msg, _prefix = UpdateService.inspect_update_zip(file_path)
+        if not ok:
+            QMessageBox.warning(self, "Nädogry täzeleme arhiwi", msg)
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Programmany täzelemek",
+            f"Saýlanan arhiw: {Path(file_path).name}\n\n"
+            "• Maglumat bazasy (data/) we ätiýaçlyk nusgalar (backups/) SAKLANAR.\n"
+            "• Täzelemekden öň awtomatiki gorag nusgasy (pre_update_*.db) dörediler.\n"
+            "• Täzeleme tamamlanandan soň programma awtomatiki täzeden açylar.\n\n"
+            "Dowam etmelimi?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+
+        launched, result_msg = UpdateService.prepare_and_launch_update(file_path)
+        if launched:
+            QMessageBox.information(self, "Täzeleme başlady", result_msg)
+            app = QApplication.instance()
+            if app is not None:
+                app.quit()
+        else:
+            QMessageBox.information(self, "Täzeleme maglumaty", result_msg)
+            self.refresh_data()

@@ -605,7 +605,9 @@ class MobileProtocolProcessor:
                 prod_exact = session.scalar(
                     select(Product).where(
                         Product.is_active.is_(True),
-                        (Product.sku.ilike(cand)) | (Product.specification.ilike(f"%{cand}%")),
+                        (Product.barcode.ilike(cand))
+                        | (Product.sku.ilike(cand))
+                        | (Product.specification.ilike(f"%{cand}%")),
                     )
                 )
                 if prod_exact is not None:
@@ -928,6 +930,7 @@ class MobileProtocolProcessor:
             if q:
                 hay = " ".join([
                     p["sku"],
+                    p.get("barcode", ""),
                     p["name"],
                     p["brand"],
                     p["model"],
@@ -940,6 +943,7 @@ class MobileProtocolProcessor:
             result.append({
                 "id": p["id"],
                 "sku": p["sku"],
+                "barcode": p.get("barcode", ""),
                 "name": p["name"],
                 "category_id": p["category_id"],
                 "category": p["category"],
@@ -977,6 +981,7 @@ class MobileProtocolProcessor:
         prod_dict = {
             "id": product.id,
             "sku": product.sku,
+            "barcode": product.barcode or "",
             "name": product.name,
             "category_id": product.category_id,
             "brand": product.brand or "",
@@ -1039,6 +1044,7 @@ class MobileProtocolProcessor:
             specification=spec,
             stock_quantity=int(payload.get("stock_quantity") or 0),
             min_stock_quantity=int(payload.get("min_stock_quantity") or SettingsService.get_default_min_stock()),
+            barcode=str(payload.get("barcode") or "").strip() or None,
         )
         raw_cost = payload.get("unit_cost")
         if raw_cost is not None and Decimal(str(raw_cost)) > 0:
@@ -1094,6 +1100,7 @@ class MobileProtocolProcessor:
             specification=str(payload.get("specification") or ""),
             stock_quantity=int(payload.get("stock_quantity") or 0),
             min_stock_quantity=int(payload.get("min_stock_quantity") or 0),
+            barcode=str(payload.get("barcode") or "").strip() or None,
         )
         raw_cost = payload.get("unit_cost")
         if raw_cost is not None and Decimal(str(raw_cost)) > 0:

@@ -134,15 +134,17 @@ def find_duplicate_product(
     return None
 
 
-def list_products_inventory() -> tuple[list[dict], dict[int, str]]:
+def list_products_inventory(include_archived: bool = False) -> tuple[list[dict], dict[int, str]]:
     """Загружает единый список товаров со складскими остатками и разбивкой по IMEI (новые и Б/У)."""
     with SessionLocal() as session:
-        rows = session.execute(
+        stmt = (
             select(Product, Category.name)
             .join(Category, Product.category_id == Category.id)
-            .where(Product.is_active.is_(True))
-            .order_by(Product.name.asc())
-        ).all()
+            .order_by(Product.is_active.desc(), Product.name.asc())
+        )
+        if not include_archived:
+            stmt = stmt.where(Product.is_active.is_(True))
+        rows = session.execute(stmt).all()
 
         stock_items = session.scalars(select(StockItem)).all()
         by_product: dict[int, list[StockItem]] = {}
@@ -175,6 +177,7 @@ def list_products_inventory() -> tuple[list[dict], dict[int, str]]:
             products.append({
                 "id": product.id,
                 "sku": product.sku,
+                "barcode": product.barcode or "",
                 "name": product.name,
                 "category_id": product.category_id,
                 "category": category_name,
@@ -189,9 +192,41 @@ def list_products_inventory() -> tuple[list[dict], dict[int, str]]:
                 "total_devices": len(p_items),
                 "max_days_in_stock": max(0, max_days),
                 "imei_search_blob": imei_blob,
+                "is_active": bool(product.is_active),
             })
 
         return products, cat_map
+
+
+def find_product_by_barcode(code: str) -> Product | None:
+    """Ищет активный товар по штрихкоду (Product.barcode), SKU или упоминанию кода в характеристиках."""
+    clean = (code or "").strip()
+    if not clean:
+        return None
+    with SessionLocal() as session:
+        exact_bc = session.scalar(
+            select(Product).where(
+                Product.is_active.is_(True),
+                func.lower(Product.barcode) == clean.lower(),
+            )
+        )
+        if exact_bc is not None:
+            return exact_bc
+        exact_sku = session.scalar(
+            select(Product).where(
+                Product.is_active.is_(True),
+                func.lower(Product.sku) == clean.lower(),
+            )
+        )
+        if exact_sku is not None:
+            return exact_sku
+        in_spec = session.scalar(
+            select(Product).where(
+                Product.is_active.is_(True),
+                Product.specification.ilike(f"%{clean}%"),
+            )
+        )
+        return in_spec
 
 
 def get_product_with_devices(product_id: int) -> tuple[Product | None, int, list[StockItem]]:
@@ -220,8 +255,9 @@ def save_product(
     specification: str | None = None,
     stock_quantity: int = 0,
     min_stock_quantity: int = 0,
+    barcode: str | None = None,
 ) -> Product:
-    """Создаёт или обновляет товар в каталоге с проверкой синхронизации IMEI."""
+    """Создаёт или обновляет товар в каталоге с проверкой синхронизации IMEI и штрихкода."""
     clean_name = (name or "").strip()
     if not clean_name:
         raise ValueError("Harydyň adyny giriziň.")
@@ -235,8 +271,21 @@ def save_product(
     clean_brand = (brand or "").strip() or None
     clean_model = (model or "").strip() or None
     clean_spec = (specification or "").strip() or None
+    clean_barcode = (barcode or "").strip() or None
 
     with SessionLocal() as session, session.begin():
+        if clean_barcode:
+            dup_bc = session.scalar(
+                select(Product).where(
+                    Product.is_active.is_(True),
+                    func.lower(Product.barcode) == clean_barcode.lower(),
+                )
+            )
+            if dup_bc is not None and dup_bc.id != product_id:
+                raise ValueError(
+                    f"«{clean_barcode}» ştrihkody eýýäm «{dup_bc.name}» ({dup_bc.sku}) harydyna berkidilen."
+                )
+
         if product_id is None:
             last_product = session.scalar(
                 select(Product).order_by(Product.id.desc()).limit(1)
@@ -245,6 +294,7 @@ def save_product(
             product = Product(
                 category_id=category_id,
                 sku=f"PRD_{next_number:06d}",
+                barcode=clean_barcode,
                 name=clean_name,
                 brand=clean_brand,
                 model=clean_model,
@@ -275,6 +325,7 @@ def save_product(
             )
 
         product.category_id = category_id
+        product.barcode = clean_barcode
         product.name = clean_name
         product.brand = clean_brand
         product.model = clean_model
@@ -286,25 +337,35 @@ def save_product(
         return product
 
 
-def deactivate_product(product_id: int) -> None:
-    """Деактивирует товар, если на складе нет остатков и активных IMEI."""
+def deactivate_product(product_id: int, force: bool = True) -> None:
+    """Переводит товар в архив (is_active=False). При force=True разрешено даже при наличии остатков."""
     with SessionLocal() as session, session.begin():
         product = session.get(Product, product_id)
         if product is None:
             raise ValueError("Haryt tapylmady.")
 
-        active_imei = session.scalars(
-            select(StockItem).where(
-                StockItem.product_id == product_id,
-                StockItem.status == "in_stock",
-            )
-        ).first()
-        if product.stock_quantity > 0 or active_imei is not None:
-            raise ValueError(
-                "Harydyň skladynda entek galyndy bar.\n"
-                "Ilki olary satmaly ýa-da hasapdan çykarmaly."
-            )
+        if not force:
+            active_imei = session.scalars(
+                select(StockItem).where(
+                    StockItem.product_id == product_id,
+                    StockItem.status == "in_stock",
+                )
+            ).first()
+            if product.stock_quantity > 0 or active_imei is not None:
+                raise ValueError(
+                    "Harydyň skladynda entek galyndy bar.\n"
+                    "Ilki olary satmaly ýa-da hasapdan çykarmaly."
+                )
         product.is_active = False
+
+
+def restore_product(product_id: int) -> None:
+    """Восстанавливает архивный товар обратно в активный каталог."""
+    with SessionLocal() as session, session.begin():
+        product = session.get(Product, product_id)
+        if product is None:
+            raise ValueError("Haryt tapylmady.")
+        product.is_active = True
 
 
 def find_stock_item_by_imei(imei: str) -> dict | None:
@@ -440,3 +501,159 @@ def register_stock_item(
         session.flush()
         session.refresh(stock_item)
         return stock_item
+
+
+def update_stock_item(
+    stock_item_id: int,
+    product_id: int,
+    imei1: str,
+    imei2: str | None = None,
+    serial_number: str | None = None,
+    condition: str = "new",
+    status: str = "in_stock",
+    unit_cost: Decimal | float | str | None = Decimal("0.00"),
+    cost_currency: str = "USD",
+    cost_exchange_rate: Decimal | float | str = Decimal("19.5000"),
+    acquisition_source: str | None = None,
+    notes: str | None = None,
+) -> StockItem:
+    """Полное редактирование IMEI-устройства (StockItem) с пересчётом складских остатков."""
+    clean_imei1 = (imei1 or "").strip()
+    clean_imei2 = (imei2 or "").strip() or None
+    clean_sn = (serial_number or "").strip() or None
+    clean_cond = "used" if str(condition).lower() in ("used", "b/u", "б/у") else "new"
+    clean_status = (status or "in_stock").strip().lower()
+    if clean_status not in ("in_stock", "sold", "written_off"):
+        raise ValueError("Rugsat berlen statuslar: in_stock, sold, written_off.")
+    clean_source = (acquisition_source or "").strip() or None
+    clean_notes = (notes or "").strip() or None
+
+    if not clean_imei1:
+        raise ValueError("Hökmany IMEI 1 giriziň.")
+    if clean_imei2 and clean_imei1 == clean_imei2:
+        raise ValueError("IMEI 1 we IMEI 2 birmeňzeş bolup bilmez.")
+
+    cost_dec = Decimal(str(unit_cost)) if unit_cost is not None else Decimal("0.00")
+    if cost_dec < 0:
+        raise ValueError("Öz bahasy otrisatel bolup bilmez.")
+    rate_dec = Decimal(str(cost_exchange_rate)) if cost_exchange_rate else Decimal("1.0000")
+    if rate_dec <= 0:
+        raise ValueError("Kurs noldan uly bolmaly.")
+
+    with SessionLocal() as session, session.begin():
+        stock_item = session.get(StockItem, int(stock_item_id))
+        if stock_item is None:
+            raise ValueError("Enjam (StockItem) tapylmady.")
+
+        target_product = session.get(Product, int(product_id))
+        if target_product is None:
+            raise ValueError("Saýlanan haryt tapylmady.")
+
+        existing = session.execute(
+            select(StockItem, Product.name)
+            .join(Product, StockItem.product_id == Product.id)
+            .where(
+                StockItem.id != stock_item.id,
+                (StockItem.imei1 == clean_imei1)
+                | (StockItem.imei2 == clean_imei1)
+                | (
+                    (StockItem.imei1 == clean_imei2) | (StockItem.imei2 == clean_imei2)
+                    if clean_imei2
+                    else False
+                ),
+            )
+        ).first()
+        if existing is not None:
+            ex_item, ex_prod_name = existing
+            raise ValueError(
+                f"IMEI {clean_imei1} (ýa-da IMEI 2) eýýäm başga enjamda bar: "
+                f"{ex_prod_name} (ID #{ex_item.id})."
+            )
+
+        old_product_id = stock_item.product_id
+        old_in_stock = stock_item.status == "in_stock"
+        new_in_stock = clean_status == "in_stock"
+
+        stock_item.product_id = target_product.id
+        stock_item.imei1 = clean_imei1
+        stock_item.imei2 = clean_imei2
+        stock_item.serial_number = clean_sn
+        stock_item.condition = clean_cond
+        stock_item.status = clean_status
+        stock_item.unit_cost = cost_dec
+        stock_item.cost_currency = (cost_currency or "USD").strip().upper()
+        stock_item.cost_exchange_rate = rate_dec
+        stock_item.acquisition_source = clean_source
+        stock_item.notes = clean_notes
+        session.flush()
+
+        # Синхронизируем остатки старого и нового товара
+        if old_product_id != target_product.id:
+            old_prod = session.get(Product, old_product_id)
+            if old_prod is not None and old_in_stock:
+                old_prod.stock_quantity = max(0, old_prod.stock_quantity - 1)
+            if new_in_stock:
+                in_stock_cnt = len(
+                    session.scalars(
+                        select(StockItem).where(
+                            StockItem.product_id == target_product.id,
+                            StockItem.status == "in_stock",
+                        )
+                    ).all()
+                )
+                target_product.stock_quantity = max(target_product.stock_quantity + 1, in_stock_cnt)
+        else:
+            if old_in_stock and not new_in_stock:
+                target_product.stock_quantity = max(0, target_product.stock_quantity - 1)
+            elif not old_in_stock and new_in_stock:
+                in_stock_cnt = len(
+                    session.scalars(
+                        select(StockItem).where(
+                            StockItem.product_id == target_product.id,
+                            StockItem.status == "in_stock",
+                        )
+                    ).all()
+                )
+                target_product.stock_quantity = max(target_product.stock_quantity + 1, in_stock_cnt)
+
+        session.flush()
+        session.refresh(stock_item)
+        return stock_item
+
+
+def delete_stock_item(stock_item_id: int) -> None:
+    """Удаляет StockItem, если на него нет ссылок в продажах и обменах, и обновляет остаток."""
+    from app.models.device_exchange import DeviceExchange
+    from app.models.sale_item import SaleItem
+
+    with SessionLocal() as session, session.begin():
+        stock_item = session.get(StockItem, int(stock_item_id))
+        if stock_item is None:
+            raise ValueError("Enjam tapylmady.")
+
+        used_in_sale = session.scalar(
+            select(SaleItem.id).where(SaleItem.stock_item_id == stock_item.id).limit(1)
+        )
+        if used_in_sale is not None:
+            raise ValueError(
+                "Bu enjam satyş çekinde görkezilen. Ony pozup bolmaýar — statusyny üýtgediň ýa-da çeki ýatyryň."
+            )
+        used_in_exchange = session.scalar(
+            select(DeviceExchange.id)
+            .where(
+                (DeviceExchange.old_stock_item_id == stock_item.id)
+                | (DeviceExchange.new_stock_item_id == stock_item.id)
+            )
+            .limit(1)
+        )
+        if used_in_exchange is not None:
+            raise ValueError("Bu enjam Trade-in çalyşygynda görkezilen we pozup bolmaýar.")
+
+        prod = session.get(Product, stock_item.product_id)
+        was_in_stock = stock_item.status == "in_stock"
+        session.delete(stock_item)
+        session.flush()
+
+        if prod is not None and was_in_stock:
+            prod.stock_quantity = max(0, prod.stock_quantity - 1)
+            session.flush()
