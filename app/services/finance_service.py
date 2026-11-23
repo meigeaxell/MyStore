@@ -836,3 +836,271 @@ class FinanceService:
             )
             session.flush()
         return debt
+
+    @staticmethod
+    def get_simurg_summary(
+        session: Session,
+        as_of: datetime | None = None,
+        include_paid: bool = False,
+    ) -> dict:
+        """Сводка по рассрочке Simurg (и открытым клиентским долгам) с учётом 5-дневного срока выплаты.
+
+        Возвращает:
+        - total_debt: общий непогашенный долг (USD/TMT)
+        - ready_amount: сумма, которую уже можно забрать (дата выплаты <= as_of)
+        - pending_amount: сумма в ожидании (< 5 дней)
+        - total_items_count, ready_items_count, pending_items_count: кол-во устройств/товаров
+        - open_sales_count, ready_sales_count
+        - rows: детальный список сделок
+        """
+        from datetime import date as _date
+        from datetime import timedelta
+
+        from app.models.product import Product
+        from app.models.sale_item import SaleItem
+
+        now = as_of or datetime.now()
+        today = now.date()
+
+        sales = session.scalars(
+            select(Sale)
+            .where(Sale.status != "cancelled")
+            .order_by(Sale.sale_date.asc(), Sale.id.asc())
+        ).all()
+
+        total_debt = {"USD": Decimal("0.00"), "TMT": Decimal("0.00")}
+        ready_amount = {"USD": Decimal("0.00"), "TMT": Decimal("0.00")}
+        pending_amount = {"USD": Decimal("0.00"), "TMT": Decimal("0.00")}
+        total_items_count = 0
+        ready_items_count = 0
+        pending_items_count = 0
+        open_sales_count = 0
+        ready_sales_count = 0
+        rows: list[dict] = []
+
+        for sale in sales:
+            cur = sale.currency.strip().upper()
+            if cur not in ("USD", "TMT"):
+                continue
+
+            debt = SalesService.get_customer_debt(session, sale)
+            is_simurg = bool(getattr(sale, "is_simurg", False))
+            if not is_simurg and debt <= Decimal("0.00"):
+                continue
+            if debt <= Decimal("0.00") and not include_paid:
+                continue
+
+            paid = SalesService.get_sale_paid_amount(session, sale)
+            total = _money(_decimal(sale.total_amount))
+
+            item_rows = session.execute(
+                select(SaleItem, Product.name)
+                .join(Product, SaleItem.product_id == Product.id)
+                .where(SaleItem.sale_id == sale.id)
+            ).all()
+            items_count = sum(int(si.quantity or 0) for si, _ in item_rows)
+            item_parts = []
+            for si, p_name in item_rows:
+                if si.imei:
+                    item_parts.append(f"{p_name} ({si.imei})")
+                elif si.quantity > 1:
+                    item_parts.append(f"{p_name} ×{si.quantity}")
+                else:
+                    item_parts.append(p_name)
+            items_summary = ", ".join(item_parts) or "—"
+
+            payout_dt = getattr(sale, "simurg_payout_date", None)
+            if payout_dt is None:
+                payout_dt = (
+                    (sale.sale_date + timedelta(days=5))
+                    if is_simurg and sale.sale_date
+                    else sale.sale_date
+                )
+            payout_day = payout_dt.date() if isinstance(payout_dt, datetime) else _date.today()
+            days_left = (payout_day - today).days
+            is_ready = days_left <= 0
+
+            if debt > Decimal("0.00"):
+                open_sales_count += 1
+                total_items_count += items_count
+                total_debt[cur] = _money(total_debt[cur] + debt)
+                if is_ready:
+                    ready_sales_count += 1
+                    ready_items_count += items_count
+                    ready_amount[cur] = _money(ready_amount[cur] + debt)
+                else:
+                    pending_items_count += items_count
+                    pending_amount[cur] = _money(pending_amount[cur] + debt)
+
+            if debt <= Decimal("0.00"):
+                status_label = "Tölendi"
+            elif is_ready:
+                overdue = abs(days_left)
+                status_label = (
+                    f"Taýýar (+{overdue} gün)" if overdue > 0 else "Taýýar (şu gün)"
+                )
+            else:
+                status_label = f"Garaşylýar ({days_left} gün galdy)"
+
+            rows.append({
+                "sale_id": sale.id,
+                "receipt_number": sale.receipt_number,
+                "sale_date": sale.sale_date,
+                "payout_date": payout_dt,
+                "days_left": days_left,
+                "is_ready": is_ready,
+                "is_simurg": is_simurg,
+                "items_count": items_count,
+                "items_summary": items_summary,
+                "customer_name": sale.customer_name or ("Simurg" if is_simurg else "Bölek müşderi"),
+                "customer_phone": sale.customer_phone or "",
+                "currency": cur,
+                "exchange_rate": _validate_rate(sale.exchange_rate or Decimal("1.0000")),
+                "original_amount": total,
+                "paid_amount": paid,
+                "remaining_debt": debt,
+                "status_label": status_label,
+                "comment": sale.comment or "",
+            })
+
+        # Сначала созревшие (самые старые), затем ожидающие, затем оплаченные
+        rows.sort(
+            key=lambda r: (
+                0 if r["remaining_debt"] > 0 and r["is_ready"] else (1 if r["remaining_debt"] > 0 else 2),
+                r["payout_date"] or datetime.max,
+                r["sale_id"],
+            )
+        )
+
+        return {
+            "total_debt": total_debt,
+            "ready_amount": ready_amount,
+            "pending_amount": pending_amount,
+            "total_items_count": total_items_count,
+            "ready_items_count": ready_items_count,
+            "pending_items_count": pending_items_count,
+            "open_sales_count": open_sales_count,
+            "ready_sales_count": ready_sales_count,
+            "rows": rows,
+        }
+
+    @staticmethod
+    def collect_simurg_payout(
+        session: Session,
+        currency: str,
+        amount: Decimal | float | str | None = None,
+        ready_only: bool = True,
+        exchange_rate: Decimal | float | str | None = None,
+        description: str | None = None,
+        as_of: datetime | None = None,
+    ) -> dict:
+        """Принимает выплату от Simurg в кассу и распределяет по открытым чекам FIFO (от самых старых).
+
+        Если amount=None и ready_only=True — забирает всю «созревшую» сумму (где прошло >= 5 дней).
+        Если amount задан — распределяет эту сумму по очереди (при ready_only=False может закрывать и более свежие).
+        """
+        from app.services.settings_service import SettingsService
+
+        curr = (currency or "").strip().upper()
+        if curr not in ("USD", "TMT"):
+            raise ValueError("Rugsat berlen walýutalar: USD, TMT.")
+
+        rate = _validate_rate(exchange_rate or SettingsService.get_default_exchange_rate())
+        summary = FinanceService.get_simurg_summary(session, as_of=as_of, include_paid=False)
+
+        candidates = [
+            r for r in summary["rows"]
+            if r["currency"] == curr
+            and r["remaining_debt"] > Decimal("0.00")
+            and (not ready_only or r["is_ready"])
+        ]
+        if not candidates:
+            raise ValueError(
+                f"{curr} boýunça almak üçin taýýar Simurg bergisi ýok."
+                if ready_only
+                else f"{curr} boýunça açyk Simurg bergisi ýok."
+            )
+
+        available_total = _money(sum((r["remaining_debt"] for r in candidates), Decimal("0.00")))
+        if amount is None:
+            to_collect = available_total
+        else:
+            to_collect = _money(_decimal(amount))
+            if to_collect <= Decimal("0.00"):
+                raise ValueError("Töleg mukdary noldan uly bolmaly.")
+            if to_collect > available_total:
+                raise ValueError(
+                    f"Girizilen mukdar ({to_collect} {curr}) elýeterli Simurg bergisinden ({available_total} {curr}) köp."
+                )
+
+        remaining_to_apply = to_collect
+        closed_sales: list[dict] = []
+        base_desc = (description or "").strip() or "Simurg tölegi"
+
+        for row in candidates:
+            if remaining_to_apply <= Decimal("0.00"):
+                break
+            apply_amt = min(row["remaining_debt"], remaining_to_apply)
+            apply_amt = _money(apply_amt)
+            if apply_amt <= Decimal("0.00"):
+                continue
+            SalesService.add_sale_payment(
+                session=session,
+                sale_id=row["sale_id"],
+                currency=curr,
+                amount=apply_amt,
+                exchange_rate=rate,
+                description=f"{base_desc} ({row['receipt_number']})",
+            )
+            closed_sales.append({
+                "sale_id": row["sale_id"],
+                "receipt_number": row["receipt_number"],
+                "applied_amount": apply_amt,
+            })
+            remaining_to_apply = _money(remaining_to_apply - apply_amt)
+
+        collected = _money(to_collect - remaining_to_apply)
+        return {
+            "currency": curr,
+            "collected_amount": collected,
+            "sales_count": len(closed_sales),
+            "details": closed_sales,
+        }
+
+    @staticmethod
+    def get_monthly_expenses_summary(
+        session: Session,
+        year: int | None = None,
+        month: int | None = None,
+    ) -> dict:
+        """Возвращает сумму расходов за указанный (по умолчанию текущий) месяц по USD и TMT."""
+        now = datetime.now()
+        y = year or now.year
+        m = month or now.month
+        start = datetime(y, m, 1, 0, 0, 0)
+        end = datetime(y + 1, 1, 1, 0, 0, 0) if m == 12 else datetime(y, m + 1, 1, 0, 0, 0)
+
+        expenses = session.scalars(
+            select(Expense).where(
+                Expense.expense_date >= start,
+                Expense.expense_date < end,
+            )
+        ).all()
+
+        usd = Decimal("0.00")
+        tmt = Decimal("0.00")
+        for exp in expenses:
+            cur = exp.currency.strip().upper()
+            amt = _money(_decimal(exp.amount))
+            if cur == "USD":
+                usd = _money(usd + amt)
+            elif cur == "TMT":
+                tmt = _money(tmt + amt)
+
+        return {
+            "USD": usd,
+            "TMT": tmt,
+            "count": len(expenses),
+            "year": y,
+            "month": m,
+        }

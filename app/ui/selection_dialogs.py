@@ -1,13 +1,12 @@
 """Единые визуальные диалоги выбора товаров и складских позиций (Фаза VII)."""
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -21,7 +20,13 @@ from app.models.stock_item import StockItem
 from app.repositories.product_repository import list_products_inventory
 from app.ui import theme
 from app.ui.product_dialog import ProductDialog
-from app.ui.widgets import configure_table, make_button, style_combo
+from app.ui.widgets import (
+    configure_dialog_buttons,
+    configure_table,
+    make_button,
+    show_toast,
+    style_combo,
+)
 
 
 class CatalogProductSelectorDialog(QDialog):
@@ -87,6 +92,10 @@ class CatalogProductSelectorDialog(QDialog):
         ])
         configure_table(self.table, stretch_col=1, row_height=42)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self._confirm_selection())
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._confirm_selection)
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
@@ -103,7 +112,9 @@ class CatalogProductSelectorDialog(QDialog):
         footer.addWidget(select_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, select_btn, cancel_btn)
         self._reload_data()
+        self.search_input.setFocus()
 
     def _reload_data(self) -> None:
         self.products, self.categories = list_products_inventory()
@@ -171,7 +182,7 @@ class CatalogProductSelectorDialog(QDialog):
     def _confirm_selection(self) -> None:
         row = self.table.currentRow()
         if not (0 <= row < len(self.filtered)):
-            QMessageBox.information(self, "Haryt saýlaň", "Tablisadan haryt saýlaň.")
+            show_toast(self, "Tablisadan haryt saýlaň.", kind="info")
             return
         self.selected_product = self.filtered[row]
         self.accept()
@@ -245,6 +256,10 @@ class InventorySelectorDialog(QDialog):
         ])
         configure_table(self.table, stretch_col=0, row_height=42)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self._confirm_selection())
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._confirm_selection)
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
@@ -261,7 +276,9 @@ class InventorySelectorDialog(QDialog):
         footer.addWidget(select_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, select_btn, cancel_btn)
         self._load_inventory()
+        self.search_input.setFocus()
 
     def _load_inventory(self) -> None:
         self.all_entries = []
@@ -402,7 +419,7 @@ class InventorySelectorDialog(QDialog):
     def _confirm_selection(self) -> None:
         row = self.table.currentRow()
         if not (0 <= row < len(self.filtered)):
-            QMessageBox.information(self, "Setir saýlaň", "Tablisadan haryt ýa-da enjam saýlaň.")
+            show_toast(self, "Tablisadan haryt ýa-da enjam saýlaň.", kind="info")
             return
         self.selected_item = self.filtered[row]
         self.accept()

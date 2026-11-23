@@ -1,11 +1,12 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtCore import QDate, QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDateEdit,
     QDialog,
     QDoubleSpinBox,
     QGridLayout,
@@ -40,9 +41,11 @@ from app.ui.receipt_printer import export_sale_receipt_pdf
 from app.ui.selection_dialogs import InventorySelectorDialog
 from app.ui.widgets import (
     Card,
+    configure_dialog_buttons,
     configure_table,
     make_button,
     money_str,
+    show_toast,
     style_combo,
 )
 
@@ -86,6 +89,7 @@ class HeldCartsDialog(QDialog):
         footer.addWidget(restore_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, restore_btn, close_btn)
         self._refresh_table()
 
     def _refresh_table(self) -> None:
@@ -290,6 +294,7 @@ class SaleDetailsDialog(QDialog):
         footer.addWidget(self.cancel_sale_btn)
         footer.addWidget(close_btn)
         outer.addWidget(footer_bar)
+        configure_dialog_buttons(self, add_pay_btn, close_btn)
 
     def _load_data(self) -> None:
         with SessionLocal() as session:
@@ -304,11 +309,17 @@ class SaleDetailsDialog(QDialog):
             if sale.customer_phone:
                 customer_str += f" ({sale.customer_phone})"
 
+            simurg_str = ""
+            if getattr(sale, "is_simurg", False):
+                p_dt = getattr(sale, "simurg_payout_date", None)
+                p_str = p_dt.strftime("%d.%m.%Y") if p_dt else "—"
+                simurg_str = f"   |   🏦 Simurg (aljak güni: {p_str})"
+
             self.info_label.setText(
                 f"Sene: {sale.sale_date:%d.%m.%Y %H:%M}   |   "
                 f"Müşderi: {customer_str}   |   "
                 f"Walýuta: {sale.currency} (Kurs: {sale.exchange_rate})   |   "
-                f"Çekiň jemi: {money_str(sale.total_amount)} {sale.currency}"
+                f"Çekiň jemi: {money_str(sale.total_amount)} {sale.currency}{simurg_str}"
             )
 
             self.pay_rate_spin.setValue(float(Decimal(str(sale.exchange_rate or 19.5))))
@@ -423,7 +434,7 @@ class SaleDetailsDialog(QDialog):
                 session.commit()
             self.pay_amt_spin.setValue(0)
             self._load_data()
-            QMessageBox.information(self, "Taýýar", "Töleg üstünlikli kabul edildi.")
+            show_toast(self, "Töleg üstünlikli kabul edildi.", kind="success")
         except (ValueError, TypeError, SQLAlchemyError) as e:
             QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
@@ -444,7 +455,7 @@ class SaleDetailsDialog(QDialog):
                 session.commit()
             self.settle_amt_spin.setValue(0)
             self._load_data()
-            QMessageBox.information(self, "Taýýar", "Müşderä bergi tölegi hasaba alyndy.")
+            show_toast(self, "Müşderä bergi tölegi hasaba alyndy.", kind="success")
         except (ValueError, TypeError, SQLAlchemyError) as e:
             QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
@@ -456,8 +467,7 @@ class SaleDetailsDialog(QDialog):
             self,
             "Ýatyrmagy tassyklamak",
             "Satyş çekini ýatyrmalymy?\n\n"
-            "Harytlar sklada gaýdyp geler. Müşderiniň tölenmedik bergisi nollanar, "
-            "müşderiden eýýäm alnan pul bolsa dükanyň müşderä bergisi bolar.",
+            "Harytlar sklada gaýdyp geler. Tölenmedik bergi nollanar.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -468,7 +478,7 @@ class SaleDetailsDialog(QDialog):
                 SalesService.cancel_sale(session, self.sale_id, reason)
                 session.commit()
             self._load_data()
-            QMessageBox.information(self, "Ýatyryldy", "Satyş üstünlikli ýatyryldy.")
+            show_toast(self, "Satyş üstünlikli ýatyryldy.", kind="success")
         except (ValueError, TypeError, SQLAlchemyError) as e:
             QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
@@ -501,6 +511,8 @@ class SalesPage(QWidget):
         QShortcut(QKeySequence("F2"), self, activated=lambda: self._open_inventory_selector(""))
         QShortcut(QKeySequence("F3"), self, activated=self._focus_search)
         QShortcut(QKeySequence("F4"), self, activated=self._edit_selected_price)
+        QShortcut(QKeySequence("F6"), self, activated=self._hold_current_cart)
+        QShortcut(QKeySequence("F8"), self, activated=self._open_held_carts_dialog)
         QShortcut(QKeySequence("F9"), self, activated=self._process_checkout)
         QShortcut(QKeySequence("Delete"), self, activated=self._remove_cart_item)
         QShortcut(QKeySequence("Ctrl+H"), self, activated=self._hold_current_cart)
@@ -685,27 +697,29 @@ class SalesPage(QWidget):
         mode_row.setSpacing(6)
         self.mode_group = QButtonGroup(self)
 
-        self.full_pay_mode_btn = QPushButton("✔ Doly tölendi (1 basyş)")
+        self.full_pay_mode_btn = QPushButton("✔ Nagt (doly töleg)")
         self.full_pay_mode_btn.setObjectName("chip")
         self.full_pay_mode_btn.setCheckable(True)
+        self.full_pay_mode_btn.setAutoDefault(False)
         self.full_pay_mode_btn.setChecked(True)
         self.full_pay_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.full_pay_mode_btn.clicked.connect(lambda: self._set_payment_mode(True))
 
-        self.custom_pay_mode_btn = QPushButton("⚖ Bergä / 2 walýuta / Gaýtargy")
-        self.custom_pay_mode_btn.setObjectName("chip")
-        self.custom_pay_mode_btn.setCheckable(True)
-        self.custom_pay_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.custom_pay_mode_btn.clicked.connect(lambda: self._set_payment_mode(False))
+        self.simurg_mode_btn = QPushButton("🏦 Simurg (+5 gün)")
+        self.simurg_mode_btn.setObjectName("chip")
+        self.simurg_mode_btn.setCheckable(True)
+        self.simurg_mode_btn.setAutoDefault(False)
+        self.simurg_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.simurg_mode_btn.clicked.connect(lambda: self._set_payment_mode(False))
 
         self.mode_group.addButton(self.full_pay_mode_btn)
-        self.mode_group.addButton(self.custom_pay_mode_btn)
+        self.mode_group.addButton(self.simurg_mode_btn)
         mode_row.addWidget(self.full_pay_mode_btn, 1)
-        mode_row.addWidget(self.custom_pay_mode_btn, 1)
+        mode_row.addWidget(self.simurg_mode_btn, 1)
         rl.addLayout(mode_row)
 
         self.auto_pay_banner = QLabel(
-            "✔ Töleg mukdary satyş bahasy boýunça awtomatiki goýulýar. Goşmaça zat girizmek gerek däl."
+            "✔ Nagt satyş: doly jemi şol wagtda kassa geçýär."
         )
         self.auto_pay_banner.setWordWrap(True)
         self.auto_pay_banner.setStyleSheet(
@@ -713,47 +727,37 @@ class SalesPage(QWidget):
         )
         rl.addWidget(self.auto_pay_banner)
 
-        self.manual_pay_box = QWidget()
-        mp_layout = QVBoxLayout(self.manual_pay_box)
-        mp_layout.setContentsMargins(0, 0, 0, 0)
-        mp_layout.setSpacing(6)
+        self.simurg_box = QWidget()
+        sb_layout = QVBoxLayout(self.simurg_box)
+        sb_layout.setContentsMargins(0, 0, 0, 0)
+        sb_layout.setSpacing(8)
 
-        pay_header = QHBoxLayout()
-        pay_header.addWidget(QLabel("Hakyky kabul edilen:"))
-        pay_header.addStretch()
-        zero_btn = make_button("Hemmesi bergä (0)", "link")
-        zero_btn.clicked.connect(self._fill_zero_payment)
-        exact_btn = make_button("Çek boýunça takyk", "link")
-        exact_btn.clicked.connect(self._fill_exact_payment)
-        pay_header.addWidget(zero_btn)
-        pay_header.addWidget(exact_btn)
-        mp_layout.addLayout(pay_header)
+        self.simurg_banner = QLabel(
+            "🏦 Simurg garaşaryna: kassaga 0 geçýär, doly jemi (peýda bilen) "
+            "Simurg bergisine ýazylýar we 5 günden soň almaga taýýar bolýar."
+        )
+        self.simurg_banner.setWordWrap(True)
+        self.simurg_banner.setStyleSheet(
+            "padding: 8px 10px; border-radius: 8px; background: #FFF8F1; "
+            "border: 1px solid #FDBA74; color: #9A3412; font-weight: 600; font-size: 9pt;"
+        )
+        sb_layout.addWidget(self.simurg_banner)
 
-        self.pay_usd_spin = QDoubleSpinBox()
-        self.pay_usd_spin.setRange(0, 10000000)
-        self.pay_usd_spin.setDecimals(2)
-        self.pay_usd_spin.setPrefix("USD: ")
-        self.pay_usd_spin.setMinimumHeight(36)
-        self.pay_usd_spin.valueChanged.connect(self._recalculate_totals)
-        mp_layout.addWidget(self.pay_usd_spin)
+        payout_row = QHBoxLayout()
+        payout_row.addWidget(QLabel("Aljak güni (+5 gün):"))
+        self.simurg_payout_date = QDateEdit(QDate.currentDate().addDays(5))
+        self.simurg_payout_date.setCalendarPopup(True)
+        self.simurg_payout_date.setDisplayFormat("dd.MM.yyyy")
+        self.simurg_payout_date.setMinimumHeight(36)
+        self.simurg_payout_date.dateChanged.connect(self._recalculate_totals)
+        payout_row.addWidget(self.simurg_payout_date, 1)
+        sb_layout.addLayout(payout_row)
 
-        self.pay_tmt_spin = QDoubleSpinBox()
-        self.pay_tmt_spin.setRange(0, 10000000)
-        self.pay_tmt_spin.setDecimals(2)
-        self.pay_tmt_spin.setPrefix("TMT: ")
-        self.pay_tmt_spin.setMinimumHeight(36)
-        self.pay_tmt_spin.valueChanged.connect(self._recalculate_totals)
-        mp_layout.addWidget(self.pay_tmt_spin)
-
-        self.change_label = QLabel("Gaýtargy: 0.00")
-        self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.GREEN};")
-        mp_layout.addWidget(self.change_label)
-
-        self.manual_pay_box.hide()
-        rl.addWidget(self.manual_pay_box)
+        self.simurg_box.hide()
+        rl.addWidget(self.simurg_box)
 
         self.customer_name_input = QLineEdit()
-        self.customer_name_input.setPlaceholderText("Müşderiniň ady (diňe bergä satyşda hökmany)...")
+        self.customer_name_input.setPlaceholderText("Müşderiniň ady / Simurg arza (hökmany däl)...")
         rl.addWidget(self.customer_name_input)
 
         self.customer_phone_input = QLineEdit()
@@ -761,7 +765,7 @@ class SalesPage(QWidget):
         rl.addWidget(self.customer_phone_input)
 
         self.comment_input = QLineEdit()
-        self.comment_input.setPlaceholderText("Çeke bellik (hökmany däl)...")
+        self.comment_input.setPlaceholderText("Çeke bellik / arza № (hökmany däl)...")
         rl.addWidget(self.comment_input)
 
         rl.addStretch()
@@ -816,9 +820,13 @@ class SalesPage(QWidget):
         ])
         configure_table(self.history_table, stretch_col=[1, 3], row_height=44)
         self.history_table.cellDoubleClicked.connect(self._open_sale_details)
+        for seq in ("Return", "Enter"):
+            sc = QShortcut(QKeySequence(seq), self.history_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_sale_button)
         layout.addWidget(self.history_table, 1)
 
-        hint = QLabel("Jikme-jik görmek, PDF çap etmek ýa-da goşmaça töleg almak üçin çeki iki gezek basyň.")
+        hint = QLabel("Jikme-jik görmek, PDF çap etmek ýa-da goşmaça töleg almak üçin çeki iki gezek ýa-da Enter basyň.")
         hint.setObjectName("mutedText")
         layout.addWidget(hint)
         return widget
@@ -826,9 +834,14 @@ class SalesPage(QWidget):
     def _set_payment_mode(self, auto_full: bool) -> None:
         self.auto_full_payment = auto_full
         self.full_pay_mode_btn.setChecked(auto_full)
-        self.custom_pay_mode_btn.setChecked(not auto_full)
+        self.simurg_mode_btn.setChecked(not auto_full)
         self.auto_pay_banner.setVisible(auto_full)
-        self.manual_pay_box.setVisible(not auto_full)
+        self.simurg_box.setVisible(not auto_full)
+        if not auto_full:
+            self.simurg_payout_date.setDate(QDate.currentDate().addDays(5))
+            self.checkout_btn.setText("🏦 SIMURG SATYŞY GEÇIR (F9)")
+        else:
+            self.checkout_btn.setText("SATYŞY GEÇIR (F9)")
         self._recalculate_totals()
 
     def _update_held_button_count(self) -> None:
@@ -837,7 +850,7 @@ class SalesPage(QWidget):
 
     def _hold_current_cart(self) -> None:
         if not self.cart_items:
-            QMessageBox.information(self, "Çek boş", "Çeki goýmazdan öň oňa haryt goşuň.")
+            show_toast(self, "Çeki goýmazdan öň oňa haryt goşuň.", kind="info")
             return
         carts = SettingsService.get_held_carts()
         serializable_items = [
@@ -923,6 +936,7 @@ class SalesPage(QWidget):
         for prod, _cnt in top_rows:
             btn = QPushButton(f"+ {prod.name} ({prod.stock_quantity})")
             btn.setObjectName("chip")
+            btn.setAutoDefault(False)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, pid=prod.id: self._quick_add_product_id(pid))
             self.quick_products_bar.addWidget(btn)
@@ -972,10 +986,11 @@ class SalesPage(QWidget):
                 else:
                     cust_debt = SalesService.get_customer_debt(session, s)
                     if cust_debt > 0:
-                        status_text = f"Müşderiniň bergisi: {money_str(cust_debt)}"
+                        prefix = "🏦 Simurg" if getattr(s, "is_simurg", False) else "Bergi"
+                        status_text = f"{prefix}: {money_str(cust_debt)}"
                         status_color = theme.ACCENT
                     else:
-                        status_text = "Tölendi"
+                        status_text = "🏦 Simurg (tölendi)" if getattr(s, "is_simurg", False) else "Tölendi"
                         status_color = theme.GREEN
 
                 self._all_sales_rows.append({
@@ -1552,17 +1567,16 @@ class SalesPage(QWidget):
             if self.cart_items:
                 row = len(self.cart_items) - 1
             else:
-                QMessageBox.information(self, "Setir saýlaň", "Ilki çeke haryt goşuň.")
+                show_toast(self, "Ilki çeke haryt goşuň.", kind="info")
                 return
         self._focus_price_cell(row)
 
     def _clear_cart(self) -> None:
         self.cart_items = []
-        self.pay_usd_spin.setValue(0)
-        self.pay_tmt_spin.setValue(0)
         self.customer_name_input.clear()
         self.customer_phone_input.clear()
         self.comment_input.clear()
+        self.simurg_payout_date.setDate(QDate.currentDate().addDays(5))
         self._update_cart_table()
 
     def _remove_cart_item(self) -> None:
@@ -1571,31 +1585,8 @@ class SalesPage(QWidget):
             self.cart_items.pop(row)
             self._update_cart_table()
 
-    def _fill_zero_payment(self) -> None:
-        self.pay_usd_spin.setValue(0)
-        self.pay_tmt_spin.setValue(0)
-
-    def _fill_exact_payment(self) -> None:
-        cur = self.currency_combo.currentText()
-        total = sum(
-            (it["quantity"] * it["unit_price"] for it in self.cart_items),
-            Decimal("0.00"),
-        )
-        self.pay_usd_spin.blockSignals(True)
-        self.pay_tmt_spin.blockSignals(True)
-        if cur == "USD":
-            self.pay_usd_spin.setValue(float(total))
-            self.pay_tmt_spin.setValue(0)
-        else:
-            self.pay_tmt_spin.setValue(float(total))
-            self.pay_usd_spin.setValue(0)
-        self.pay_usd_spin.blockSignals(False)
-        self.pay_tmt_spin.blockSignals(False)
-        self._recalculate_totals()
-
     def _recalculate_totals(self) -> None:
         cur = self.currency_combo.currentText()
-        rate = Decimal(str(self.rate_spin.value()))
 
         total = Decimal("0.00")
         total_cost = Decimal("0.00")
@@ -1614,35 +1605,16 @@ class SalesPage(QWidget):
             f"font-size: 12.5pt; font-weight: 700; color: {theme.GREEN if profit >= 0 else theme.RED};"
         )
 
-        # В режиме "Оплачено полностью (1 клик)" автоматически синхронизируем сумму оплаты с итогом
         if self.auto_full_payment:
-            self.pay_usd_spin.blockSignals(True)
-            self.pay_tmt_spin.blockSignals(True)
-            if cur == "USD":
-                self.pay_usd_spin.setValue(float(total))
-                self.pay_tmt_spin.setValue(0)
-            else:
-                self.pay_tmt_spin.setValue(float(total))
-                self.pay_usd_spin.setValue(0)
-            self.pay_usd_spin.blockSignals(False)
-            self.pay_tmt_spin.blockSignals(False)
             self.auto_pay_banner.setText(
-                f"✔ Satyş bahasy boýunça doly tölendi: {total:,.2f} {cur} (gaýtargysyz we bergisiz)"
+                f"✔ Nagt satyş: {total:,.2f} {cur} şol wagtda kassa geçýär."
             )
-
-        p_usd = Decimal(str(self.pay_usd_spin.value()))
-        p_tmt = Decimal(str(self.pay_tmt_spin.value()))
-
-        paid = p_usd if cur == "USD" else p_usd * rate
-        paid += p_tmt if cur == "TMT" else (p_tmt / rate if rate > 0 else Decimal("0.00"))
-
-        diff = paid - total
-        if diff >= Decimal("0.00"):
-            self.change_label.setText(f"Gaýtargy: {diff:,.2f} {cur}")
-            self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.GREEN};")
         else:
-            self.change_label.setText(f"Bergä (galyndy): {abs(diff):,.2f} {cur}")
-            self.change_label.setStyleSheet(f"font-weight: 700; color: {theme.ACCENT};")
+            p_date = self.simurg_payout_date.date().toString("dd.MM.yyyy")
+            self.simurg_banner.setText(
+                f"🏦 Simurg garaşaryna: {total:,.2f} {cur} Simurg bergisine ýazylýar "
+                f"(aljak güni: {p_date}, kassa: 0.00)."
+            )
 
     def _process_checkout(self) -> None:
         if not self.cart_items:
@@ -1651,7 +1623,7 @@ class SalesPage(QWidget):
 
         cur = self.currency_combo.currentText()
 
-        # Проверка нулевой цены или цены ниже себестоимости (Раздел 3.Г)
+        # Проверка нулевой цены или цены ниже себестоимости
         for idx, it in enumerate(self.cart_items):
             u_price = Decimal(str(it["unit_price"]))
             u_cost = self._item_cost_in_receipt_currency(it)
@@ -1695,54 +1667,28 @@ class SalesPage(QWidget):
                     it["currency"] = cur
                     total += int(it["quantity"]) * Decimal(str(it["unit_price"]))
 
-                if self.auto_full_payment:
-                    self._recalculate_totals()
-
-                pays = []
-                if self.pay_usd_spin.value() > 0:
-                    pays.append({
-                        "cash_register_id": self.register_map["USD"],
-                        "amount": Decimal(str(self.pay_usd_spin.value())),
-                        "currency": "USD",
-                        "exchange_rate": rate,
-                    })
-                if self.pay_tmt_spin.value() > 0:
-                    pays.append({
-                        "cash_register_id": self.register_map["TMT"],
-                        "amount": Decimal(str(self.pay_tmt_spin.value())),
-                        "currency": "TMT",
-                        "exchange_rate": rate,
-                    })
-
-                p_usd = Decimal(str(self.pay_usd_spin.value()))
-                p_tmt = Decimal(str(self.pay_tmt_spin.value()))
-                paid = p_usd if cur == "USD" else p_usd * rate
-                paid += p_tmt if cur == "TMT" else (p_tmt / rate if rate > 0 else Decimal("0.00"))
-
-                customer_name = self.customer_name_input.text().strip() or None
+                raw_customer = self.customer_name_input.text().strip()
                 customer_phone = self.customer_phone_input.text().strip() or None
-                is_credit = paid < total
+                is_simurg = not self.auto_full_payment
 
-                if is_credit:
-                    if not customer_name:
-                        QMessageBox.warning(
-                            self,
-                            "Bergä satyş",
-                            "Girizilen töleg çekiň jeminden az.\n"
-                            "Bergä satyş etmek üçin müşderiniň adyny görkeziň.",
-                        )
-                        self.customer_name_input.setFocus()
-                        return
-                    debt_amt = total - paid
-                    ans = QMessageBox.question(
-                        self,
-                        "Bergä satyşy tassyklamak",
-                        f"«{customer_name}» adyna {debt_amt:,.2f} {cur} bergi galyndysy bilen satyşy geçirmelimi?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                        QMessageBox.StandardButton.No,
+                if is_simurg:
+                    pays = []
+                    customer_name = f"Simurg — {raw_customer}" if raw_customer else "Simurg"
+                    payout_dt = datetime.combine(
+                        self.simurg_payout_date.date().toPython(),
+                        datetime.min.time(),
                     )
-                    if ans != QMessageBox.StandardButton.Yes:
-                        return
+                else:
+                    pays = []
+                    if total > Decimal("0.00"):
+                        pays.append({
+                            "cash_register_id": self.register_map[cur],
+                            "amount": total,
+                            "currency": cur,
+                            "exchange_rate": rate,
+                        })
+                    customer_name = raw_customer or None
+                    payout_dt = None
 
                 sale = SalesService.create_sale(
                     session=session,
@@ -1753,7 +1699,9 @@ class SalesPage(QWidget):
                     comment=self.comment_input.text(),
                     customer_name=customer_name,
                     customer_phone=customer_phone,
-                    allow_credit=is_credit,
+                    allow_credit=is_simurg or total == Decimal("0.00"),
+                    is_simurg=is_simurg,
+                    simurg_payout_date=payout_dt,
                 )
                 self.last_created_sale_id = sale.id
                 rec_num = sale.receipt_number
@@ -1765,6 +1713,20 @@ class SalesPage(QWidget):
                 self._set_payment_mode(True)
                 self.refresh_data()
                 self._focus_search()
+                if is_simurg:
+                    show_toast(
+                        self,
+                        f"🏦 Simurg satyşy geçirildi ({rec_num}): {total:,.2f} {cur}",
+                        kind="success",
+                        duration_ms=3200,
+                    )
+                else:
+                    show_toast(
+                        self,
+                        f"✔ Satyş geçirildi ({rec_num}): {total:,.2f} {cur}",
+                        kind="success",
+                        duration_ms=2600,
+                    )
             except (ValueError, TypeError, KeyError, SQLAlchemyError) as e:
                 session.rollback()
                 QMessageBox.critical(self, "Ýalňyşlyk", str(e))
@@ -1776,7 +1738,7 @@ class SalesPage(QWidget):
     def _print_selected_history_sale(self) -> None:
         row = self.history_table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Çek saýlaň", "Satyş taryhy tablisasyndan çek saýlaň.")
+            show_toast(self, "Satyş taryhy tablisasyndan çek saýlaň.", kind="info")
             return
         item = self.history_table.item(row, 0)
         if item is not None:
@@ -1785,7 +1747,7 @@ class SalesPage(QWidget):
     def _open_selected_sale_button(self) -> None:
         row = self.history_table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Çek saýlaň", "Satyş taryhy tablisasyndan çek saýlaň.")
+            show_toast(self, "Satyş taryhy tablisasyndan çek saýlaň.", kind="info")
             return
         self._open_sale_details(row, 0)
 
@@ -1801,7 +1763,7 @@ class SalesPage(QWidget):
     def _cancel_selected_sale(self) -> None:
         row = self.history_table.currentRow()
         if row < 0:
-            QMessageBox.warning(self, "Çek saýlaň", "Ýatyrmak üçin çek saýlaň.")
+            show_toast(self, "Ýatyrmak üçin çek saýlaň.", kind="info")
             return
         item = self.history_table.item(row, 0)
         if item is None:
@@ -1816,7 +1778,7 @@ class SalesPage(QWidget):
                 SalesService.cancel_sale(session, sid, reason)
                 session.commit()
                 self.refresh_data()
-                QMessageBox.information(self, "Ýatyryldy", "Satyş üstünlikli ýatyryldy.")
+                show_toast(self, "Satyş üstünlikli ýatyryldy.", kind="success")
             except (ValueError, TypeError, KeyError, SQLAlchemyError) as e:
                 session.rollback()
                 QMessageBox.critical(self, "Ýalňyşlyk", str(e))

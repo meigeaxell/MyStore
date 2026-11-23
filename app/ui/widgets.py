@@ -1,12 +1,15 @@
 """Переиспользуемые виджеты: карточки, таблицы, кнопки, списки и график."""
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPalette, QPen, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -31,20 +34,159 @@ def money_str(value) -> str:
 def make_button(text: str, variant: str = "secondary") -> QPushButton:
     """Создаёт кнопку в едином стиле дизайн-системы MobileStore.
 
-    variant: 'primary' | 'secondary' | 'danger' | 'dark' | 'link'
+    variant: 'primary' | 'secondary' | 'danger' | 'dark' | 'success' | 'link'
+    По умолчанию autoDefault=False, чтобы Enter в диалогах срабатывал строго на главной кнопке.
     """
     btn = QPushButton(text)
     btn.setCursor(Qt.CursorShape.PointingHandCursor)
+    btn.setAutoDefault(False)
+    btn.setDefault(False)
     obj_map = {
         "primary": "primaryBtn",
         "secondary": "secondaryBtn",
         "danger": "dangerBtn",
         "dark": "darkBtn",
+        "success": "successBtn",
         "link": "linkBtn",
     }
     if variant in obj_map:
         btn.setObjectName(obj_map[variant])
     return btn
+
+
+def configure_dialog_buttons(
+    dialog: QDialog,
+    primary_btn: QPushButton | None = None,
+    cancel_btn: QPushButton | None = None,
+) -> None:
+    """Настраивает клавиатурное поведение диалога:
+
+    - Снимает autoDefault/default со всех второстепенных кнопок.
+    - Назначает единственной default-кнопкой главную цветную кнопку (primary_btn).
+    - Привязывает Ctrl+Enter / Ctrl+Return к primary_btn (работает даже из QTextEdit и полей поиска).
+    - Привязывает Esc к отмене (cancel_btn или dialog.reject).
+    """
+    for btn in dialog.findChildren(QPushButton):
+        btn.setAutoDefault(False)
+        btn.setDefault(False)
+
+    if primary_btn is not None:
+        primary_btn.setAutoDefault(True)
+        primary_btn.setDefault(True)
+        for seq in ("Ctrl+Return", "Ctrl+Enter"):
+            sc = QShortcut(QKeySequence(seq), dialog)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(
+                lambda b=primary_btn: b.click() if b.isEnabled() and b.isVisible() else None
+            )
+
+    if cancel_btn is not None:
+        cancel_btn.setAutoDefault(False)
+        cancel_btn.setDefault(False)
+
+
+class ToastNotification(QFrame):
+    """Неблокирующее всплывающее уведомление с автоисчезновением."""
+
+    _active_toast: "ToastNotification | None" = None
+
+    def __init__(
+        self,
+        parent: QWidget,
+        message: str,
+        kind: str = "success",
+        duration_ms: int = 2800,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("toastNotification")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        palettes = {
+            "success": ("#15803D", "#ECFDF3", "#BBF7D0", "✔"),
+            "info": (theme.NAVY, "#EFF6FF", "#BFDBFE", "ℹ"),
+            "warning": ("#B45309", "#FFFBEB", "#FDE68A", "⚠"),
+            "error": (theme.RED, "#FEF2F2", "#FECACA", "✕"),
+        }
+        fg, bg, border, icon = palettes.get(kind, palettes["info"])
+
+        self.setStyleSheet(
+            f"QFrame#toastNotification {{ background: {bg}; border: 1.5px solid {border}; "
+            f"border-radius: 10px; }}"
+        )
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 10, 14, 10)
+        row.setSpacing(10)
+
+        icon_lbl = QLabel(icon)
+        icon_lbl.setStyleSheet(f"color: {fg}; font-size: 12pt; font-weight: 800; background: transparent;")
+        row.addWidget(icon_lbl)
+
+        text_lbl = QLabel(message)
+        text_lbl.setWordWrap(True)
+        text_lbl.setMaximumWidth(380)
+        text_lbl.setStyleSheet(f"color: {fg}; font-size: 9.8pt; font-weight: 600; background: transparent;")
+        row.addWidget(text_lbl, 1)
+
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(1.0)
+        self.setGraphicsEffect(self._opacity)
+
+        self._fade_anim: QPropertyAnimation | None = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._fade_out)
+        self._duration_ms = max(1200, int(duration_ms))
+
+    def mousePressEvent(self, event) -> None:
+        self._timer.stop()
+        self.close()
+        super().mousePressEvent(event)
+
+    def show_animated(self) -> None:
+        self.adjustSize()
+        parent = self.parentWidget()
+        if parent is not None:
+            pw = parent.width()
+            x = max(16, pw - self.width() - 24)
+            y = 18
+            self.move(x, y)
+        self.show()
+        self.raise_()
+        self._timer.start(self._duration_ms)
+
+    def _fade_out(self) -> None:
+        anim = QPropertyAnimation(self._opacity, b"opacity", self)
+        anim.setDuration(260)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.finished.connect(self.close)
+        self._fade_anim = anim
+        anim.start()
+
+
+def show_toast(
+    parent: QWidget | None,
+    message: str,
+    kind: str = "success",
+    duration_ms: int = 2800,
+) -> ToastNotification | None:
+    """Показывает аккуратное всплывающее уведомление без блокировки экрана."""
+    host = parent.window() if parent is not None else QApplication.activeWindow()
+    if host is None:
+        return None
+    prev = ToastNotification._active_toast
+    if prev is not None:
+        try:
+            prev.close()
+        except RuntimeError:
+            pass
+    toast = ToastNotification(host, message, kind=kind, duration_ms=duration_ms)
+    ToastNotification._active_toast = toast
+    toast.show_animated()
+    return toast
 
 
 def style_combo(combo: QComboBox) -> QComboBox:
@@ -150,6 +292,30 @@ class Card(QFrame):
         self.body.setContentsMargins(*margins)
         self.body.setSpacing(spacing)
         shadow(self)
+
+
+class ClickableCard(Card):
+    """Интерактивная карточка, реагирующая на клик и наведение (например, «Çykdajylar» или «Simurg»)."""
+
+    clicked = Signal()
+
+    def __init__(self, margins=(16, 12, 16, 12), spacing=4) -> None:
+        super().__init__(margins=margins, spacing=spacing)
+        self.setObjectName("clickableCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 def delta_badge(text: str, positive: bool) -> QLabel:

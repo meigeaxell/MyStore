@@ -16,7 +16,7 @@ from app.models.sale_item import SaleItem
 from app.models.sale_payment import SalePayment
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
-from app.ui.widgets import money_str
+from app.ui.widgets import money_str, show_toast
 
 
 def export_sale_receipt_pdf(sale_id: int, parent: QWidget | None = None) -> bool:
@@ -146,11 +146,7 @@ def export_sale_receipt_pdf(sale_id: int, parent: QWidget | None = None) -> bool
         doc.print_(printer)
 
         if parent:
-            QMessageBox.information(
-                parent,
-                "Çek ýatda saklandy",
-                f"Çekiň çap görnüşi PDF-de ýatda saklandy:\n{file_path}",
-            )
+            show_toast(parent, f"PDF ýatda saklandy: {file_path}", kind="success", duration_ms=4000)
         return True
     except Exception as err:  # noqa: BLE001
         if parent:
@@ -232,7 +228,7 @@ def export_shift_report_pdf(report_data: dict, parent: QWidget | None = None) ->
         doc.print_(printer)
 
         if parent:
-            QMessageBox.information(parent, "Z-Hasabat ýatda saklandy", f"Smena Z-hasabaty PDF-de ýatda saklandy:\n{file_path}")
+            show_toast(parent, f"PDF ýatda saklandy: {file_path}", kind="success", duration_ms=4000)
         return True
     except Exception as err:  # noqa: BLE001
         if parent:

@@ -1,6 +1,6 @@
 """Единое окно глобального умного поиска (Ctrl+K) по товарам, IMEI, чекам, клиентам и поставщикам."""
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -21,7 +21,7 @@ from app.ui import theme
 from app.ui.purchase_page import PurchaseDetailsDialog
 from app.ui.sales_page import SaleDetailsDialog
 from app.ui.stock_page import StockItemDialog
-from app.ui.widgets import configure_table, make_button, money_str
+from app.ui.widgets import configure_dialog_buttons, configure_table, make_button, money_str
 
 
 class QuickSearchDialog(QDialog):
@@ -62,6 +62,10 @@ class QuickSearchDialog(QDialog):
         ])
         configure_table(self.table, stretch_col=[1, 2], row_height=42)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected())
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected)
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
@@ -83,6 +87,7 @@ class QuickSearchDialog(QDialog):
         footer.addWidget(close_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, open_btn, close_btn)
         self._run_search()
         self.search_input.setFocus()
 

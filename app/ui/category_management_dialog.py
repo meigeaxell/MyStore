@@ -18,7 +18,7 @@ from app.repositories.product_repository import (
 )
 from app.ui import theme
 from app.ui.category_dialog import CategoryDialog
-from app.ui.widgets import make_button
+from app.ui.widgets import configure_dialog_buttons, make_button, show_toast
 
 
 class CategoryManagementDialog(QDialog):
@@ -63,6 +63,7 @@ class CategoryManagementDialog(QDialog):
         actions.addWidget(close_button)
         root.addLayout(actions)
 
+        configure_dialog_buttons(self, close_button)
         self._load_categories()
 
     def _load_categories(self) -> None:
@@ -86,7 +87,7 @@ class CategoryManagementDialog(QDialog):
     def _selected_category(self) -> tuple[int, bool, str] | None:
         item = self.category_list.currentItem()
         if item is None:
-            QMessageBox.information(self, "Kategoriýa saýlaň", "Ilki sanawdan kategoriýa saýlaň.")
+            show_toast(self, "Ilki sanawdan kategoriýa saýlaň.", kind="info")
             return None
         return (
             item.data(Qt.ItemDataRole.UserRole),
@@ -110,6 +111,7 @@ class CategoryManagementDialog(QDialog):
         try:
             rename_category(cat_id, new_name)
             self._load_categories()
+            show_toast(self, "Kategoriýanyň ady täzelendi.", kind="success")
         except ValueError as err:
             QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
         except SQLAlchemyError as err:
@@ -121,7 +123,7 @@ class CategoryManagementDialog(QDialog):
             return
         cat_id, is_active, name = selected
         if not is_active:
-            QMessageBox.information(self, "Kategoriýa öçürilen", "Bu kategoriýa eýýäm öçürilen.")
+            show_toast(self, "Bu kategoriýa eýýäm öçürilen.", kind="info")
             return
 
         answer = QMessageBox.question(
@@ -138,5 +140,6 @@ class CategoryManagementDialog(QDialog):
         try:
             deactivate_category(cat_id)
             self._load_categories()
+            show_toast(self, f"«{name}» kategoriýasy öçürildi.", kind="success")
         except (ValueError, SQLAlchemyError) as err:
             QMessageBox.critical(self, "Ýalňyşlyk", f"Kategoriýany öçürip bolmady:\n{err}")

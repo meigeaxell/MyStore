@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
-    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +29,7 @@ from app.services.mobile_ws_server import MobileWebSocketServer
 from app.services.settings_service import SettingsService
 from app.services.update_service import UpdateService
 from app.ui import theme
-from app.ui.widgets import Card, configure_table, style_combo
+from app.ui.widgets import Card, configure_table, make_button, show_toast, style_combo
 
 
 class SettingsPage(QWidget):
@@ -67,8 +66,7 @@ class SettingsPage(QWidget):
         col.addWidget(sub)
         header.addLayout(col, 1)
 
-        refresh_btn = QPushButton("↻  Täzele")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn = make_button("↻  Täzele")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -96,9 +94,13 @@ class SettingsPage(QWidget):
         s_form.setSpacing(12)
 
         self.store_name_input = QLineEdit()
+        self.store_name_input.setMinimumHeight(36)
         self.store_phone_input = QLineEdit()
+        self.store_phone_input.setMinimumHeight(36)
         self.store_address_input = QLineEdit()
+        self.store_address_input.setMinimumHeight(36)
         self.receipt_footer_input = QLineEdit()
+        self.receipt_footer_input.setMinimumHeight(36)
 
         s_form.addRow("Dükanyň ady:", self.store_name_input)
         s_form.addRow("Habarlaşmak telefony:", self.store_phone_input)
@@ -117,18 +119,22 @@ class SettingsPage(QWidget):
         a_form.setSpacing(12)
 
         self.default_curr_combo = style_combo(QComboBox())
+        self.default_curr_combo.setMinimumHeight(36)
         self.default_curr_combo.addItems(["TMT", "USD"])
 
         self.default_rate_spin = QDoubleSpinBox()
+        self.default_rate_spin.setMinimumHeight(36)
         self.default_rate_spin.setRange(0.0001, 100000)
         self.default_rate_spin.setDecimals(4)
         self.default_rate_spin.setValue(19.5)
 
         self.min_stock_spin = QSpinBox()
+        self.min_stock_spin.setMinimumHeight(36)
         self.min_stock_spin.setRange(0, 10000)
         self.min_stock_spin.setValue(2)
 
         self.date_format_combo = style_combo(QComboBox())
+        self.date_format_combo.setMinimumHeight(36)
         self.date_format_combo.addItem("GG.AA.ÝÝÝÝ SS:MM (19.11.2026 14:30)", "%d.%m.%Y %H:%M")
         self.date_format_combo.addItem("ÝÝÝÝ-AA-GG SS:MM (2026-11-19 14:30)", "%Y-%m-%d %H:%M")
 
@@ -139,9 +145,8 @@ class SettingsPage(QWidget):
         al.addLayout(a_form)
 
         al.addStretch()
-        save_btn = QPushButton("💾  Sazlamalary ýatda sakla")
-        save_btn.setObjectName("primaryBtn")
-        save_btn.setMinimumHeight(44)
+        save_btn = make_button("💾  Sazlamalary ýatda sakla", "primary")
+        save_btn.setMinimumHeight(42)
         save_btn.clicked.connect(self._save_general_settings)
         al.addWidget(save_btn)
 
@@ -171,8 +176,10 @@ class SettingsPage(QWidget):
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("Nusga saklanýan bukja:"))
         self.backup_dir_input = QLineEdit()
+        self.backup_dir_input.setMinimumHeight(36)
         dir_row.addWidget(self.backup_dir_input, 1)
-        browse_dir_btn = QPushButton("Bukja saýla…")
+        browse_dir_btn = make_button("Bukja saýla…")
+        browse_dir_btn.setMinimumHeight(36)
         browse_dir_btn.clicked.connect(self._choose_backup_dir)
         dir_row.addWidget(browse_dir_btn)
         cl.addLayout(dir_row)
@@ -183,6 +190,7 @@ class SettingsPage(QWidget):
 
         policy_row.addWidget(QLabel("Ýygylyk:"))
         self.freq_combo = style_combo(QComboBox())
+        self.freq_combo.setMinimumHeight(36)
         self.freq_combo.addItem("Her gün (günüň ilkinji açylyşynda)", "daily")
         self.freq_combo.addItem("Programma her açylanda", "on_startup")
         self.freq_combo.addItem("Diňe el bilen", "manual")
@@ -190,42 +198,39 @@ class SettingsPage(QWidget):
 
         policy_row.addWidget(QLabel("Soňky nusgalary sakla:"))
         self.retention_spin = QSpinBox()
+        self.retention_spin.setMinimumHeight(36)
         self.retention_spin.setRange(1, 200)
         self.retention_spin.setValue(15)
         policy_row.addWidget(self.retention_spin)
 
-        save_policy_btn = QPushButton("Düzgüni ýatda sakla")
+        save_policy_btn = make_button("Düzgüni ýatda sakla")
+        save_policy_btn.setMinimumHeight(36)
         save_policy_btn.clicked.connect(self._save_backup_policy)
         policy_row.addWidget(save_policy_btn)
         cl.addLayout(policy_row)
 
         actions_row = QHBoxLayout()
-        create_now_btn = QPushButton("➕ Häzir ätiýaçlyk nusga döret")
-        create_now_btn.setObjectName("primaryBtn")
+        create_now_btn = make_button("➕ Häzir ätiýaçlyk nusga döret", "primary")
         create_now_btn.setMinimumHeight(40)
         create_now_btn.clicked.connect(self._create_manual_backup)
         actions_row.addWidget(create_now_btn)
 
-        verify_btn = QPushButton("✔ Saýlanan nusgany barla")
+        verify_btn = make_button("✔ Saýlanan nusgany barla")
         verify_btn.setMinimumHeight(40)
         verify_btn.clicked.connect(self._verify_selected_backup)
         actions_row.addWidget(verify_btn)
 
-        restore_file_btn = QPushButton("📂 Daşarky faýldan dikelt…")
+        restore_file_btn = make_button("📂 Daşarky faýldan dikelt…")
         restore_file_btn.setMinimumHeight(40)
         restore_file_btn.clicked.connect(self._restore_from_external_file)
         actions_row.addWidget(restore_file_btn)
 
-        restore_selected_btn = QPushButton("⚠ Saýlanan nusgany dikelt")
+        restore_selected_btn = make_button("⚠ Saýlanan nusgany dikelt", "danger")
         restore_selected_btn.setMinimumHeight(40)
-        restore_selected_btn.setStyleSheet(
-            f"background: white; color: {theme.RED}; border: 1px solid {theme.RED}; "
-            "border-radius: 8px; padding: 8px 14px; font-weight: 700;"
-        )
         restore_selected_btn.clicked.connect(self._restore_selected_backup)
         actions_row.addWidget(restore_selected_btn)
 
-        update_zip_btn = QPushButton("⬆ Programmany täzele (ZIP)")
+        update_zip_btn = make_button("⬆ Programmany täzele (ZIP)")
         update_zip_btn.setMinimumHeight(40)
         update_zip_btn.setToolTip(
             "Täze Windows ZIP wersiýasyndan maglumat bazasyny we ätiýaçlyk nusgalary saklap täzelemek"
@@ -292,17 +297,20 @@ class SettingsPage(QWidget):
         form.addRow("", self.ws_enabled_chk)
 
         self.ws_port_spin = QSpinBox()
+        self.ws_port_spin.setMinimumHeight(36)
         self.ws_port_spin.setRange(1024, 65535)
         self.ws_port_spin.setValue(8765)
         form.addRow("WebSocket porty (TCP):", self.ws_port_spin)
 
         token_row = QHBoxLayout()
         self.ws_token_input = QLineEdit()
+        self.ws_token_input.setMinimumHeight(36)
         self.ws_token_input.setPlaceholderText("6 sanly PIN / giriş kody")
         self.ws_token_input.setStyleSheet("font-family: monospace; font-weight: 700; font-size: 11pt;")
         token_row.addWidget(self.ws_token_input, 1)
 
-        regen_btn = QPushButton("🔄 Täze PIN")
+        regen_btn = make_button("🔄 Täze PIN")
+        regen_btn.setMinimumHeight(36)
         regen_btn.clicked.connect(self._regenerate_mobile_token)
         token_row.addWidget(regen_btn)
         form.addRow("Giriş PIN kody:", token_row)
@@ -317,23 +325,22 @@ class SettingsPage(QWidget):
         cl.addWidget(fw_hint)
 
         btn_row = QHBoxLayout()
-        save_ws_btn = QPushButton("💾 Ýatda sakla we täzeden başlat")
-        save_ws_btn.setObjectName("primaryBtn")
+        save_ws_btn = make_button("💾 Ýatda sakla we täzeden başlat", "primary")
         save_ws_btn.setMinimumHeight(38)
         save_ws_btn.clicked.connect(self._save_and_restart_mobile_server)
         btn_row.addWidget(save_ws_btn)
 
-        copy_url_btn = QPushButton("📋 Salgyny göçür")
+        copy_url_btn = make_button("📋 Salgyny göçür")
         copy_url_btn.setMinimumHeight(38)
         copy_url_btn.clicked.connect(self._copy_mobile_url)
         btn_row.addWidget(copy_url_btn)
 
-        stop_ws_btn = QPushButton("⏹ Duruz")
+        stop_ws_btn = make_button("⏹ Duruz")
         stop_ws_btn.setMinimumHeight(38)
         stop_ws_btn.clicked.connect(self._stop_mobile_server)
         btn_row.addWidget(stop_ws_btn)
 
-        disconnect_all_btn = QPushButton("✕ Ählisini aýyr")
+        disconnect_all_btn = make_button("✕ Ählisini aýyr", "danger")
         disconnect_all_btn.setMinimumHeight(38)
         disconnect_all_btn.clicked.connect(self._disconnect_all_mobile_devices)
         btn_row.addWidget(disconnect_all_btn)
@@ -347,7 +354,7 @@ class SettingsPage(QWidget):
         lt = QLabel("Birikmeler we skanirlemeler žurnaly")
         lt.setObjectName("cardTitle")
         log_hdr.addWidget(lt, 1)
-        clear_log_btn = QPushButton("Arassala")
+        clear_log_btn = make_button("Arassala")
         clear_log_btn.clicked.connect(lambda: self.ws_log_view.clear())
         log_hdr.addWidget(clear_log_btn)
         ll.addLayout(log_hdr)
@@ -485,11 +492,11 @@ class SettingsPage(QWidget):
         self.ws_token_input.setText(new_pin)
         if self.mobile_server is not None:
             self.mobile_server.disconnect_all()
-        QMessageBox.information(
+        show_toast(
             self,
-            "Täze PIN kod döredildi",
-            f"Android skanerler üçin täze PIN kod: {new_pin}\n"
-            "Öň birikdirilen enjamlar aýryldy — telefonlarda täze PIN giriziň.",
+            f"Täze PIN kod döredildi: {new_pin}. Telefonlarda täze PIN giriziň.",
+            kind="success",
+            duration_ms=4500,
         )
 
     def _save_and_restart_mobile_server(self) -> None:
@@ -514,26 +521,29 @@ class SettingsPage(QWidget):
             return
 
         if self.mobile_server is None:
+            show_toast(self, "Serwer sazlamalary ýatda saklandy.", kind="success")
             return
         if enabled:
             ok, msg = self.mobile_server.restart(port=port)
             if ok:
-                QMessageBox.information(self, "Serwer başlady", msg)
+                show_toast(self, f"Serwer başlady: {msg}", kind="success")
             else:
                 QMessageBox.warning(self, "Serwer başlatma ýalňyşlygy", msg)
         else:
             self.mobile_server.stop()
-            QMessageBox.information(self, "Serwer duruzyldy", "Mobil skaneriň ýerli serweri öçürildi.")
+            show_toast(self, "Mobil skaneriň ýerli serweri öçürildi.", kind="info")
         self._refresh_mobile_scanner_tab()
 
     def _stop_mobile_server(self) -> None:
         if self.mobile_server is not None:
             self.mobile_server.stop()
             self._refresh_mobile_scanner_tab()
+            show_toast(self, "Mobil skaner serweri duruzyldy.", kind="info")
 
     def _disconnect_all_mobile_devices(self) -> None:
         if self.mobile_server is not None:
             self.mobile_server.disconnect_all()
+            show_toast(self, "Ähli birikdirilen enjamlar aýryldy.", kind="info")
 
     def _copy_mobile_url(self) -> None:
         port = self.mobile_server.port if self.mobile_server is not None else self.ws_port_spin.value()
@@ -542,7 +552,7 @@ class SettingsPage(QWidget):
         cb = QApplication.clipboard()
         if cb is not None:
             cb.setText(url)
-        QMessageBox.information(self, "Göçürildi", f"Salgy göçürildi:\n{url}")
+        show_toast(self, f"Salgy göçürildi: {url}", kind="success")
 
     def _reload_backups_table(self) -> None:
         b_dir = self.backup_dir_input.text().strip() or None
@@ -576,12 +586,8 @@ class SettingsPage(QWidget):
         }
         try:
             SettingsService.set_many(values)
-            QMessageBox.information(
-                self,
-                "Sazlamalar ýatda saklandy",
-                "Dükan we hasap sazlamalary üstünlikli ýatda saklandy.",
-            )
             self.refresh_data()
+            show_toast(self, "Dükan we hasap sazlamalary üstünlikli ýatda saklandy.", kind="success")
         except SQLAlchemyError as e:
             QMessageBox.critical(self, "Ýalňyşlyk", f"Sazlamalary ýatda saklap bolmady:\n{e}")
 
@@ -610,11 +616,7 @@ class SettingsPage(QWidget):
             BackupService.enforce_retention_policy(b_dir)
             self.refresh_data()
             if not silent:
-                QMessageBox.information(
-                    self,
-                    "Düzgün ýatda saklandy",
-                    "Ätiýaçlyk nusga sazlamalary ýatda saklandy.",
-                )
+                show_toast(self, "Ätiýaçlyk nusga düzgüni ýatda saklandy.", kind="success")
         except (OSError, SQLAlchemyError) as e:
             QMessageBox.critical(self, "Ýalňyşlyk", f"Düzgüni ýatda saklap bolmady:\n{e}")
 
@@ -624,10 +626,11 @@ class SettingsPage(QWidget):
         try:
             created = BackupService.create_backup(target_dir=b_dir, apply_retention=True)
             self.refresh_data()
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Ätiýaçlyk nusga döredildi",
-                f"Ätiýaçlyk nusga üstünlikli döredildi we barlandy:\n{created}",
+                f"Ätiýaçlyk nusga döredildi: {Path(created).name}",
+                kind="success",
+                duration_ms=4000,
             )
         except (OSError, ValueError, sqlite3.Error) as e:
             QMessageBox.critical(self, "Nusga döretme ýalňyşlygy", str(e))
@@ -635,19 +638,16 @@ class SettingsPage(QWidget):
     def _verify_selected_backup(self) -> None:
         row = self.backups_table.currentRow()
         if not (0 <= row < len(self.backups_list)):
-            QMessageBox.information(
-                self,
-                "Nusga saýlaň",
-                "Barlamak üçin tablisadan ätiýaçlyk nusgany saýlaň.",
-            )
+            show_toast(self, "Barlamak üçin tablisadan ätiýaçlyk nusgany saýlaň.", kind="info")
             return
         path = self.backups_list[row]["path"]
         ok, msg = BackupService.verify_backup(path)
         if ok:
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Barlag üstünlikli",
-                f"Faýl: {path.name}\n{msg}",
+                f"Barlag üstünlikli ({path.name}): {msg}",
+                kind="success",
+                duration_ms=4000,
             )
         else:
             QMessageBox.warning(
@@ -659,11 +659,7 @@ class SettingsPage(QWidget):
     def _restore_selected_backup(self) -> None:
         row = self.backups_table.currentRow()
         if not (0 <= row < len(self.backups_list)):
-            QMessageBox.information(
-                self,
-                "Nusga saýlaň",
-                "Dikeltmek üçin tablisadan ätiýaçlyk nusgany saýlaň.",
-            )
+            show_toast(self, "Dikeltmek üçin tablisadan ätiýaçlyk nusgany saýlaň.", kind="info")
             return
         path = self.backups_list[row]["path"]
         self._confirm_and_restore(path)
@@ -707,11 +703,12 @@ class SettingsPage(QWidget):
         try:
             safety = BackupService.restore_backup(backup_path, create_safety_backup=True)
             self.refresh_data()
-            safety_note = f"\nGorag nusgasy ýatda saklandy:\n{safety}" if safety else ""
-            QMessageBox.information(
+            safety_note = f" (gorag nusgasy: {Path(safety).name})" if safety else ""
+            show_toast(
                 self,
-                "Maglumat bazasy dikeldildi",
-                f"Maglumat bazasy şu faýldan üstünlikli dikeldildi:\n{backup_path}{safety_note}",
+                f"Maglumat bazasy «{backup_path.name}» faýlyndan dikeldildi{safety_note}.",
+                kind="success",
+                duration_ms=4500,
             )
         except (OSError, ValueError, sqlite3.Error) as e:
             QMessageBox.critical(

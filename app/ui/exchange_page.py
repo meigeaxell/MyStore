@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -34,6 +34,7 @@ from app.ui.widgets import (
     configure_table,
     make_button,
     money_str,
+    show_toast,
     style_combo,
 )
 
@@ -173,6 +174,10 @@ class ExchangePage(QWidget):
         ])
         configure_table(self.rep_table, stretch_col=0, row_height=42)
         self.rep_table.itemSelectionChanged.connect(self._on_replacement_selected)
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.rep_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._focus_new_price_after_select)
         left.addWidget(self.rep_table, 1)
 
         layout.addLayout(left, 3)
@@ -321,6 +326,10 @@ class ExchangePage(QWidget):
         self.history_table.cellDoubleClicked.connect(
             lambda _r, _c: self._open_history_original_sale()
         )
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.history_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_history_original_sale)
         layout.addWidget(self.history_table, 1)
         return widget
 
@@ -373,7 +382,7 @@ class ExchangePage(QWidget):
         imei = self.old_imei_input.text().strip()
         if not imei:
             if not silent:
-                QMessageBox.information(self, "IMEI giriziň", "Müşderiniň köne enjamynyň IMEI-sini görkeziň.")
+                show_toast(self, "Müşderiniň köne enjamynyň IMEI-sini görkeziň.", kind="info")
             return
 
         with SessionLocal() as session:
@@ -477,6 +486,12 @@ class ExchangePage(QWidget):
         if 0 <= row < len(self.available_replacements):
             self.selected_replacement = self.available_replacements[row]
         self._recalculate_exchange()
+
+    def _focus_new_price_after_select(self) -> None:
+        self._on_replacement_selected()
+        if self.selected_replacement is not None:
+            self.new_price_spin.setFocus()
+            self.new_price_spin.selectAll()
 
     def _recalculate_exchange(self, *_args) -> None:
         cur = self.currency_combo.currentText()
@@ -654,11 +669,11 @@ class ExchangePage(QWidget):
                 ex_num = ex_doc.exchange_number
                 session.commit()
 
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Trade-In ýerine ýetirildi",
-                f"{ex_num} çalyşyk resminamasy üstünlikli geçirildi.\n"
-                "Köne enjam sklada B/U hökmünde goşuldy, täzesi hasapdan çykaryldy.",
+                f"{ex_num} Trade-In çalyşyk resminamasy üstünlikli geçirildi.",
+                kind="success",
+                duration_ms=4000,
             )
             self.old_imei_input.clear()
             self.old_imei2_input.clear()
@@ -714,18 +729,14 @@ class ExchangePage(QWidget):
     def _open_history_original_sale(self) -> None:
         row = self.history_table.currentRow()
         if not (0 <= row < len(self.history_rows)):
-            QMessageBox.information(
-                self,
-                "Çalyşyk saýlaň",
-                "Çalyşyk taryhy tablisasyndan ýazgy saýlaň.",
-            )
+            show_toast(self, "Çalyşyk taryhy tablisasyndan ýazgy saýlaň.", kind="info")
             return
         sale_id = self.history_rows[row]["original_sale_id"]
         if not sale_id:
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Çeksiz çalyşyk",
                 "Bu çalyşyk göni enjam kabul ediş boýunça geçirildi (çeksiz Trade-In).",
+                kind="info",
             )
             return
         dlg = SaleDetailsDialog(sale_id, self)

@@ -27,13 +27,15 @@ from app.models.stock_item import StockItem
 from app.repositories.product_repository import get_low_stock_products
 from app.services.finance_service import FinanceService
 from app.services.report_service import ReportService
+from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.widgets import (
     BarChart,
     Card,
+    ClickableCard,
     ColorStatCard,
-    KpiCard,
     configure_table,
+    make_button,
     money_str,
 )
 
@@ -234,8 +236,12 @@ class DashboardPage(QScrollArea):
         range_start, range_end, chart_labels, buckets, matcher = self._build_buckets_for_range(today)
 
         with SessionLocal() as session:
+            rate = SettingsService.get_default_exchange_rate()
             balances = FinanceService.get_register_balances(session)
+            combined_cash = FinanceService.get_combined_cash_totals(session, rate)
             debts = FinanceService.get_all_outstanding_balances(session)
+            simurg = FinanceService.get_simurg_summary(session, include_paid=False)
+            stock_val = ReportService.get_stock_valuation(session, rate)
             sales_today = ReportService.get_sales_report(session, today_start, today_end)
             sales_period = ReportService.get_sales_report(session, range_start, range_end)
             profit_period = ReportService.get_profit_report(session, range_start, range_end)
@@ -342,7 +348,10 @@ class DashboardPage(QScrollArea):
             "range_start": range_start,
             "range_end": range_end,
             "balances": balances,
+            "combined_cash": combined_cash,
             "debts": debts,
+            "simurg": simurg,
+            "stock_val": stock_val,
             "profit_period": profit_period["by_currency"],
             "sales_today": sales_today,
             "sales_period": sales_period,
@@ -388,8 +397,7 @@ class DashboardPage(QScrollArea):
         pill.setObjectName("datePill")
         row.addWidget(pill, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        refresh_btn = QPushButton("↻  Täzele")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn = make_button("↻  Täzele")
         refresh_btn.clicked.connect(self.refresh_data)
         row.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -416,14 +424,11 @@ class DashboardPage(QScrollArea):
         text.setObjectName("alertText")
         row.addWidget(text, 1)
 
-        action = QPushButton("Alyş et")
-        action.setObjectName("linkBtn")
-        action.setCursor(Qt.CursorShape.PointingHandCursor)
+        action = make_button("Alyş et", "link")
         action.clicked.connect(lambda: self.navigateRequested.emit("Alyşlar"))
 
-        close = QPushButton("✕")
+        close = make_button("✕")
         close.setObjectName("alertClose")
-        close.setCursor(Qt.CursorShape.PointingHandCursor)
         close.clicked.connect(box.hide)
 
         row.addWidget(action)
@@ -448,14 +453,15 @@ class DashboardPage(QScrollArea):
         pm_t = stats["pur_period_tmt"]
         pur_val = f"${pm_u:,.2f} / {pm_t:,.0f} m."
 
-        rec_cnt = str(stats["sales_period"]["active_receipts_count"])
-        units_sold = stats["sales_period"]["units_sold"]
+        sv = stats["stock_val"]
+        stock_val_text = f"${sv['total_in_usd']:,.2f} / {sv['total_in_tmt']:,.0f} m."
+        stock_units_badge = f"{sv['total_units']} sany"
 
         data = [
             (f"Satyşlar ({period_label})", sales_val, self.current_range, True, theme.ACCENT, "🧾"),
             (f"Çalyşyk / Ýatyrma ({period_label})", f"{ex_cnt} çal. / {canc_cnt} ýat.", self.current_range, True, theme.NAVY, "↩"),
             (f"Alyşlar ({period_label})", pur_val, self.current_range, True, theme.TEAL, "📦"),
-            (f"Çekleriň sany ({period_label})", rec_cnt, f"{units_sold} sany", True, theme.BLUE, "🧮"),
+            ("Sklad jemi baha (USD / TMT)", stock_val_text, stock_units_badge, True, theme.BLUE, "🏪"),
         ]
 
         for i, d in enumerate(data):
@@ -464,6 +470,41 @@ class DashboardPage(QScrollArea):
 
         return grid
 
+    def _build_combined_kpi(
+        self,
+        title: str,
+        primary_line: str,
+        secondary_line: str,
+        tint: str,
+        glyph: str,
+        value_color: str,
+    ) -> Card:
+        card = Card(margins=(20, 16, 20, 14), spacing=6)
+        top = QHBoxLayout()
+        col = QVBoxLayout()
+        col.setSpacing(3)
+
+        t = QLabel(title)
+        t.setObjectName("mutedText")
+        v = QLabel(primary_line)
+        v.setStyleSheet(f"font-size: 16pt; font-weight: 800; color: {value_color};")
+        col.addWidget(t)
+        col.addWidget(v)
+        top.addLayout(col, 1)
+
+        icon = QLabel(glyph)
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon.setFixedSize(42, 42)
+        icon.setStyleSheet(f"background:{tint}; border-radius:10px; font-size:15pt;")
+        top.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
+        card.body.addLayout(top)
+
+        sub = QLabel(secondary_line)
+        sub.setObjectName("mutedText")
+        sub.setStyleSheet(f"font-size: 9pt; color: {theme.MUTED};")
+        card.body.addWidget(sub)
+        return card
+
     def _kpi_row(self, stats: dict) -> QGridLayout:
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
@@ -471,79 +512,122 @@ class DashboardPage(QScrollArea):
         period_label, _chart_title = RANGE_CONFIG[self.current_range]
         prof_u = stats["profit_period"]["USD"]["gross_profit"]
         prof_t = stats["profit_period"]["TMT"]["gross_profit"]
+        rate = stats["combined_cash"]["exchange_rate"]
+        prof_total_tmt = (prof_t + prof_u * rate).quantize(Decimal("0.01"))
+        prof_total_usd = (prof_u + (prof_t / rate)).quantize(Decimal("0.01"))
+
         cash_u = stats["balances"]["usd_balance"]
         cash_t = stats["balances"]["tmt_balance"]
+        cash_total_tmt = stats["combined_cash"]["total_in_tmt"]
+        cash_total_usd = stats["combined_cash"]["total_in_usd"]
 
-        data = [
-            (f"Jemi peýda USD ({period_label})", f"{prof_u:,.2f} USD", "COGS", prof_u >= 0, "#E8F1FF", "📈"),
-            (f"Jemi peýda TMT ({period_label})", f"{prof_t:,.2f} TMT", "COGS", prof_t >= 0, "#E3F6F1", "📈"),
-            ("Kassa balansy USD", f"{cash_u:,.2f} USD", "Kassada", True, "#FDEBE7", "💵"),
-            ("Kassa balansy TMT", f"{cash_t:,.2f} TMT", "Kassada", True, "#F0EAFE", "💵"),
-        ]
+        profit_card = self._build_combined_kpi(
+            title=f"Jemi peýda ({period_label}) — USD / TMT",
+            primary_line=f"${prof_u:,.2f} USD   |   {prof_t:,.2f} TMT",
+            secondary_line=f"Umumy ekwiwalent (kurs {rate:.2f}):  <b>${prof_total_usd:,.2f} USD</b>  •  <b>{prof_total_tmt:,.2f} TMT</b>",
+            tint="#E3F6F1",
+            glyph="📈",
+            value_color=theme.GREEN if prof_total_tmt >= 0 else theme.RED,
+        )
 
-        for i, d in enumerate(data):
-            grid.addWidget(KpiCard(*d), 0, i)
-            grid.setColumnStretch(i, 1)
+        cash_card = self._build_combined_kpi(
+            title="Kassa balansy — USD / TMT",
+            primary_line=f"${cash_u:,.2f} USD   |   {cash_t:,.2f} TMT",
+            secondary_line=f"Jemi kassa (kurs {rate:.2f}):  <b>${cash_total_usd:,.2f} USD</b>  •  <b>{cash_total_tmt:,.2f} TMT</b>",
+            tint="#E8F1FF",
+            glyph="💵",
+            value_color=theme.NAVY,
+        )
 
+        grid.addWidget(profit_card, 0, 0)
+        grid.addWidget(cash_card, 0, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
         return grid
 
     def _debts_card(self, stats: dict) -> Card:
-        card = Card(margins=(18, 14, 18, 14), spacing=8)
+        card = Card(margins=(18, 14, 18, 14), spacing=10)
         head = QHBoxLayout()
-        t = QLabel("Bergiler we borçlar (USD / TMT)")
+        t = QLabel("Simurg, Sklad we Üpjün edijiler")
         t.setObjectName("cardTitle")
         head.addWidget(t, 1)
-        fin_btn = QPushButton("Maliýe bölümini aç →")
-        fin_btn.setObjectName("linkBtn")
-        fin_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        fin_btn = make_button("Maliýe bölümini aç →", "link")
         fin_btn.clicked.connect(lambda: self.navigateRequested.emit("Maliýe"))
         head.addWidget(fin_btn)
         card.body.addLayout(head)
 
         d = stats["debts"]
+        sim = stats["simurg"]
+        sv = stats["stock_val"]
+
         row = QHBoxLayout()
         row.setSpacing(12)
 
-        items = [
-            (
-                "Müşderileriň dükana bergisi",
-                f"${d['customer_debts']['USD']:,.2f}  |  {d['customer_debts']['TMT']:,.2f} m.",
-                "#FFF3E6",
-                theme.ACCENT,
-            ),
-            (
-                "Dükanyň üpjün edijilere bergisi",
-                f"${d['supplier_payables']['USD']:,.2f}  |  {d['supplier_payables']['TMT']:,.2f} m.",
-                "#FDECEA",
-                theme.RED,
-            ),
-            (
-                "Dükanyň müşderilere bergisi (ýatyrma)",
-                f"${d['store_debts_to_customers']['USD']:,.2f}  |  {d['store_debts_to_customers']['TMT']:,.2f} m.",
-                "#F0EAFE",
-                "#7C3AED",
-            ),
-            (
-                "Üpjün edijileriň dükana bergisi (ýatyrma)",
-                f"${d['supplier_debts_to_store']['USD']:,.2f}  |  {d['supplier_debts_to_store']['TMT']:,.2f} m.",
-                "#E8F1FF",
-                theme.BLUE,
-            ),
-        ]
+        # 1. Кликабельный блок Simurg bergisi
+        sim_box = ClickableCard(margins=(14, 10, 14, 10), spacing=3)
+        sim_box.setStyleSheet(
+            f"QFrame#clickableCard {{ background: #FFF8F1; border: 1.5px solid #FDBA74; border-radius: 10px; }}"
+            f"QFrame#clickableCard:hover {{ background: {theme.ACCENT_BG}; border: 1.5px solid {theme.ACCENT}; }}"
+        )
+        sim_box.clicked.connect(lambda: self.navigateRequested.emit("Simurg"))
+        sim_title = QLabel(
+            f"🏦 Simurg bergisi  ({sim['total_items_count']} enjam • "
+            f"{sim['ready_items_count']} taýýar / {sim['pending_items_count']} garaşylýar)"
+        )
+        sim_title.setStyleSheet(f"color: {theme.MUTED}; font-size: 9pt; font-weight: 600;")
+        sim_val = QLabel(
+            f"Jemi: ${sim['total_debt']['USD']:,.2f}  |  {sim['total_debt']['TMT']:,.2f} TMT"
+        )
+        sim_val.setStyleSheet(f"font-size: 11.5pt; font-weight: 800; color: {theme.ACCENT};")
+        sim_ready = QLabel(
+            f"✔ Almak üçin taýýar (≥5 gün):  <b>${sim['ready_amount']['USD']:,.2f}</b>  |  "
+            f"<b>{sim['ready_amount']['TMT']:,.2f} TMT</b>   →"
+        )
+        sim_ready.setStyleSheet(f"font-size: 9pt; color: {theme.GREEN};")
+        sim_box.body.addWidget(sim_title)
+        sim_box.body.addWidget(sim_val)
+        sim_box.body.addWidget(sim_ready)
+        row.addWidget(sim_box, 2)
 
-        for label, val, bg, color in items:
-            box = QFrame()
-            box.setStyleSheet(f"background:{bg}; border-radius:10px;")
-            v = QVBoxLayout(box)
-            v.setContentsMargins(12, 8, 12, 8)
-            v.setSpacing(2)
-            lbl = QLabel(label)
-            lbl.setObjectName("mutedText")
-            val_lbl = QLabel(val)
-            val_lbl.setStyleSheet(f"font-size:11pt; font-weight:700; color:{color};")
-            v.addWidget(lbl)
-            v.addWidget(val_lbl)
-            row.addWidget(box, 1)
+        # 2. Üpjün edijilere bergi
+        sup_box = QFrame()
+        sup_box.setStyleSheet("background: #FDECEA; border-radius: 10px;")
+        sv_l = QVBoxLayout(sup_box)
+        sv_l.setContentsMargins(14, 10, 14, 10)
+        sv_l.setSpacing(3)
+        sup_t = QLabel("Dükanyň üpjün edijilere bergisi")
+        sup_t.setObjectName("mutedText")
+        sup_v = QLabel(
+            f"${d['supplier_payables']['USD']:,.2f}  |  {d['supplier_payables']['TMT']:,.2f} m."
+        )
+        sup_v.setStyleSheet(f"font-size: 11.5pt; font-weight: 700; color: {theme.RED};")
+        sup_s = QLabel("Alyşlar boýunça tölenmedik galyndy")
+        sup_s.setStyleSheet(f"font-size: 8.5pt; color: {theme.MUTED};")
+        sv_l.addWidget(sup_t)
+        sv_l.addWidget(sup_v)
+        sv_l.addWidget(sup_s)
+        row.addWidget(sup_box, 1)
+
+        # 3. Sklad jemi baha
+        stk_box = QFrame()
+        stk_box.setStyleSheet("background: #EFF6FF; border-radius: 10px;")
+        st_l = QVBoxLayout(stk_box)
+        st_l.setContentsMargins(14, 10, 14, 10)
+        st_l.setSpacing(3)
+        stk_t = QLabel("Sklad jemi baha (USD / TMT)")
+        stk_t.setObjectName("mutedText")
+        stk_v = QLabel(
+            f"${sv['total_in_usd']:,.2f} USD  |  {sv['total_in_tmt']:,.2f} TMT"
+        )
+        stk_v.setStyleSheet(f"font-size: 11.5pt; font-weight: 700; color: {theme.BLUE};")
+        stk_s = QLabel(
+            f"{sv['devices_count']} enjam • {sv['accessories_count']} aksessuar (jemi {sv['total_units']} sany)"
+        )
+        stk_s.setStyleSheet(f"font-size: 8.5pt; color: {theme.MUTED};")
+        st_l.addWidget(stk_t)
+        st_l.addWidget(stk_v)
+        st_l.addWidget(stk_s)
+        row.addWidget(stk_box, 1)
 
         card.body.addLayout(row)
         return card
@@ -561,6 +645,7 @@ class DashboardPage(QScrollArea):
             b = QPushButton(name)
             b.setObjectName("chip")
             b.setCheckable(True)
+            b.setAutoDefault(False)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setChecked(name == self.current_range)
             b.clicked.connect(lambda _=False, key=name: self._set_time_range(key))
@@ -634,9 +719,7 @@ class DashboardPage(QScrollArea):
         h = QLabel("Skladda az galanlar")
         h.setStyleSheet("font-weight:700;")
         head.addWidget(h, 1)
-        all_btn = QPushButton("Ählisi")
-        all_btn.setObjectName("linkBtn")
-        all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        all_btn = make_button("Ählisi", "link")
         all_btn.clicked.connect(lambda: self.navigateRequested.emit("Harytlar we sklad"))
         head.addWidget(all_btn)
         card.body.addLayout(head)
@@ -669,9 +752,7 @@ class DashboardPage(QScrollArea):
         t = QLabel("Dükanyň soňky amallary")
         t.setObjectName("cardTitle")
         head.addWidget(t, 1)
-        rep_btn = QPushButton("Ähli hasabatlar →")
-        rep_btn.setObjectName("linkBtn")
-        rep_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        rep_btn = make_button("Ähli hasabatlar →", "link")
         rep_btn.clicked.connect(lambda: self.navigateRequested.emit("Hasabatlar"))
         head.addWidget(rep_btn)
         card.body.addLayout(head)

@@ -264,6 +264,28 @@ QLabel#navSection {{
     padding: 14px 12px 4px;
 }}
 
+QPushButton#brandNavButton {{
+    background: transparent;
+    border: 1.5px solid transparent;
+    border-radius: 10px;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 14pt;
+    font-weight: 800;
+    color: {NAVY};
+}}
+
+QPushButton#brandNavButton:hover {{
+    background: #F2F4F7;
+    border-color: {BORDER};
+}}
+
+QPushButton#brandNavButton:checked {{
+    background: {ACCENT_BG};
+    border-color: {ACCENT};
+    color: {ACCENT};
+}}
+
 QPushButton#navButton {{
     color: #475467;
     background: transparent;
@@ -322,6 +344,27 @@ QPushButton#primaryBtn {{
 
 QPushButton#primaryBtn:hover {{
     background: #E57C20;
+}}
+
+QPushButton#primaryBtn:focus {{
+    border: 2px solid {NAVY};
+}}
+
+QPushButton#successBtn {{
+    background: {GREEN};
+    color: white;
+    border: 0;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-weight: 600;
+}}
+
+QPushButton#successBtn:hover {{
+    background: #15803D;
+}}
+
+QPushButton#successBtn:focus {{
+    border: 2px solid {NAVY};
 }}
 
 QPushButton#darkBtn {{
@@ -397,6 +440,18 @@ QFrame#card {{
     background: white;
     border: 1px solid {BORDER};
     border-radius: 12px;
+}}
+
+QFrame#clickableCard {{
+    background: white;
+    border: 1.5px solid {BORDER};
+    border-radius: 12px;
+}}
+
+QFrame#clickableCard:hover,
+QFrame#clickableCard:focus {{
+    background: {ACCENT_BG};
+    border: 1.5px solid {ACCENT};
 }}
 
 QLabel#pageTitle {{

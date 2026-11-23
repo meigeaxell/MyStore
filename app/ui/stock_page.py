@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -37,10 +37,12 @@ from app.ui.category_management_dialog import CategoryManagementDialog
 from app.ui.product_dialog import ProductDialog
 from app.ui.widgets import (
     Card,
+    configure_dialog_buttons,
     configure_table,
     make_button,
     make_stat_card,
     money_str,
+    show_toast,
     style_combo,
 )
 
@@ -72,6 +74,7 @@ class EditStockItemDialog(QDialog):
 
         self._build_ui()
         self._load_data()
+        self.imei1_input.setFocus()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -148,6 +151,8 @@ class EditStockItemDialog(QDialog):
         footer.addWidget(save_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, save_btn, cancel_btn)
+
     def _load_data(self) -> None:
         from app.models.stock_item import StockItem
 
@@ -207,7 +212,11 @@ class EditStockItemDialog(QDialog):
                 acquisition_source=self.source_combo.currentData() or None,
                 notes=self.notes_input.text(),
             )
-            QMessageBox.information(self, "Taýýar", "Enjamyň maglumatlary üstünlikli täzelendi.")
+            show_toast(
+                self.parentWidget() or self,
+                "Enjamyň maglumatlary üstünlikli täzelendi.",
+                kind="success",
+            )
             self.accept()
         except ValueError as err:
             QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
@@ -242,6 +251,7 @@ class StockItemDialog(QDialog):
         self._build_ui()
         self._reload_products_combo()
         self._load_items()
+        self.imei1_input.setFocus()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -286,6 +296,8 @@ class StockItemDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         footer.addWidget(close_btn)
         root.addLayout(footer)
+
+        configure_dialog_buttons(self, self.add_device_btn, close_btn)
 
     def _build_devices_tab(self) -> QWidget:
         tab = QWidget()
@@ -361,10 +373,10 @@ class StockItemDialog(QDialog):
         self.notes_input.setPlaceholderText(
             "Bellik: korpusyň ýagdaýy, batareýa %, komplekt (hökmany däl)..."
         )
-        add_btn = make_button("+ Enjamy sklada goş", "primary")
-        add_btn.clicked.connect(self._add_stock_item)
+        self.add_device_btn = make_button("+ Enjamy sklada goş", "primary")
+        self.add_device_btn.clicked.connect(self._add_stock_item)
         row3.addWidget(self.notes_input, 1)
-        row3.addWidget(add_btn)
+        row3.addWidget(self.add_device_btn)
         form.addRow("Bellik:", row3)
 
         add_card.body.addLayout(form)
@@ -383,6 +395,10 @@ class StockItemDialog(QDialog):
         ])
         configure_table(self.table, stretch_col=[1, 7], row_height=42)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self._edit_selected_stock_item())
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._edit_selected_stock_item)
         layout.addWidget(self.table, 1)
         return tab
 
@@ -550,7 +566,8 @@ class StockItemDialog(QDialog):
             self.sn_input.clear()
             self.notes_input.clear()
             self._load_items()
-            QMessageBox.information(self, "Enjam goşuldy", "Enjam sklada üstünlikli hasaba alyndy.")
+            self.imei1_input.setFocus()
+            show_toast(self, "Enjam sklada üstünlikli hasaba alyndy.", kind="success")
         except ValueError as err:
             QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
         except (IntegrityError, SQLAlchemyError) as err:
@@ -559,11 +576,7 @@ class StockItemDialog(QDialog):
     def _edit_selected_stock_item(self) -> None:
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(
-                self,
-                "Enjam saýlaň",
-                "Üýtgetmek üçin tablisadan enjam setirini saýlaň.",
-            )
+            show_toast(self, "Üýtgetmek üçin tablisadan enjam setirini saýlaň.", kind="info")
             return
         id_cell = self.table.item(row, 0)
         if not id_cell:
@@ -575,11 +588,7 @@ class StockItemDialog(QDialog):
     def _delete_selected_stock_item(self) -> None:
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(
-                self,
-                "Enjam saýlaň",
-                "Pozmak üçin tablisadan enjam setirini saýlaň.",
-            )
+            show_toast(self, "Pozmak üçin tablisadan enjam setirini saýlaň.", kind="info")
             return
         id_cell = self.table.item(row, 0)
         imei_cell = self.table.item(row, 1)
@@ -597,7 +606,7 @@ class StockItemDialog(QDialog):
         try:
             delete_stock_item(int(id_cell.text()))
             self._load_items()
-            QMessageBox.information(self, "Pozuldy", "Enjam üstünlikli pozuldy.")
+            show_toast(self, "Enjam üstünlikli pozuldy.", kind="success")
         except (ValueError, SQLAlchemyError) as err:
             QMessageBox.warning(self, "Pozup bolmady", str(err))
 
@@ -606,11 +615,7 @@ class StockItemDialog(QDialog):
 
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(
-                self,
-                "Enjam saýlaň",
-                "Doly taryhyny görmek üçin tablisadan enjam setirini saýlaň.",
-            )
+            show_toast(self, "Doly taryhyny görmek üçin tablisadan enjam setirini saýlaň.", kind="info")
             return
         id_cell = self.table.item(row, 0)
         imei_cell = self.table.item(row, 1)
@@ -760,6 +765,10 @@ class StockPage(QWidget):
         ])
         configure_table(self.table, stretch_col=1, row_height=48)
         self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_imei_dialog)
         layout.addWidget(self.table, 1)
 
         # Tablisanyň aşagyndaky amallar paneli
@@ -783,7 +792,7 @@ class StockPage(QWidget):
         actions_bar.addWidget(history_btn)
 
         actions_bar.addStretch()
-        hint = QLabel("Enjamlaryny (IMEI) we taryhyny açmak üçin harydy iki gezek basyň.")
+        hint = QLabel("Enjamlaryny (IMEI) we taryhyny açmak üçin harydy iki gezek ýa-da Enter basyň.")
         hint.setObjectName("mutedText")
         actions_bar.addWidget(hint)
         layout.addLayout(actions_bar)
@@ -922,11 +931,7 @@ class StockPage(QWidget):
     def _selected_product(self) -> tuple[int, str] | None:
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(
-                self,
-                "Haryt saýlaň",
-                "Bu amaly ýerine ýetirmek üçin tablisadan haryt saýlaň.",
-            )
+            show_toast(self, "Bu amaly ýerine ýetirmek üçin tablisadan haryt saýlaň.", kind="info")
             return None
         id_item = self.table.item(row, 0)
         name_item = self.table.item(row, 1)
@@ -964,10 +969,10 @@ class StockPage(QWidget):
             try:
                 restore_product(product_id)
                 self._load_data()
-                QMessageBox.information(
+                show_toast(
                     self,
-                    "Dikeldildi",
                     f"«{prod_name}» harydy arhiwden işjeň kataloga gaýtaryldy.",
+                    kind="success",
                 )
             except (ValueError, SQLAlchemyError) as err:
                 QMessageBox.warning(self, "Ýalňyşlyk", str(err))
@@ -986,7 +991,7 @@ class StockPage(QWidget):
         try:
             deactivate_product(product_id, force=True)
             self._load_data()
-            QMessageBox.information(self, "Arhiwe geçirildi", f"«{prod_name}» arhiwe geçirildi.")
+            show_toast(self, f"«{prod_name}» arhiwe geçirildi.", kind="success")
         except (ValueError, SQLAlchemyError) as err:
             QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 

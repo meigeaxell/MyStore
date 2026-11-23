@@ -11,7 +11,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.repositories.product_repository import create_category
 from app.ui import theme
-from app.ui.widgets import make_button
+from app.ui.widgets import configure_dialog_buttons, make_button, show_toast
 
 
 class CategoryDialog(QDialog):
@@ -49,14 +49,17 @@ class CategoryDialog(QDialog):
         buttons.addWidget(save_btn)
         root.addLayout(buttons)
 
+        configure_dialog_buttons(self, save_btn, cancel_btn)
+        self.name_input.setFocus()
+
     def _save_category(self) -> None:
         try:
             category = create_category(self.name_input.text())
             self.created_category_id = category.id
-            QMessageBox.information(
-                self,
-                "Taýýar",
+            show_toast(
+                self.parentWidget() or self,
                 f"«{category.name}» kategoriýasy üstünlikli döredildi.",
+                kind="success",
             )
             self.accept()
         except ValueError as err:

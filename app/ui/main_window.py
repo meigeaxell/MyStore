@@ -1,6 +1,6 @@
 
-from PySide6.QtCore import QPoint, QSettings, Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 from sqlalchemy import select
 
+from app.config import APP_VERSION, BUNDLE_ROOT
 from app.database.engine import SessionLocal
 from app.models.product import Product
 from app.models.sale import Sale
@@ -34,11 +35,9 @@ from app.ui.reports_page import ReportsPage
 from app.ui.sales_page import SalesPage
 from app.ui.settings_page import SettingsPage
 from app.ui.stock_page import StockPage
+from app.ui.widgets import make_button, show_toast
 
 NAV = [
-    ("Esasy", [
-        ("Esasy panel", "⌂"),
-    ]),
     ("Harytlar", [
         ("Harytlar we sklad", "▦"),
         ("Alyşlar", "⇩"),
@@ -159,7 +158,7 @@ class MainWindow(QMainWindow):
         for index, button in enumerate(self.nav_buttons):
             name = button.property("title")
 
-            if name == "Esasy panel":
+            if name in ("MobileStore", "Esasy panel"):
                 page = DashboardPage()
                 page.navigateRequested.connect(self.navigate_to_title)
             elif name == "Harytlar we sklad":
@@ -251,6 +250,17 @@ class MainWindow(QMainWindow):
             widget._load_data()
 
     def navigate_to_title(self, title: str) -> None:
+        if title in ("Esasy panel", "MobileStore", "Главная"):
+            self._switch_page(0)
+            return
+        if title == "Simurg":
+            for index, button in enumerate(self.nav_buttons):
+                if button.property("title") == "Maliýe":
+                    self._switch_page(index)
+                    widget = self.pages.widget(index)
+                    if hasattr(widget, "open_simurg_tab"):
+                        widget.open_simurg_tab()
+                    return
         target = "Harytlar we sklad" if title in ("Sklad", "Haryt katalogi", "Склад", "Каталог товаров") else title
         for index, button in enumerate(self.nav_buttons):
             if button.property("title") == target:
@@ -263,6 +273,7 @@ class MainWindow(QMainWindow):
             widget.refresh_data()
         elif hasattr(widget, "_load_data"):
             widget._load_data()
+        show_toast(self, "Maglumatlar täzelendi (F5)", kind="info", duration_ms=1600)
         self.statusBar().showMessage("Täzelendi (F5)", 2500)
 
     def _open_quick_search(self, initial_text: str = "") -> None:
@@ -426,24 +437,20 @@ class MainWindow(QMainWindow):
         self.top_search_popup.itemClicked.connect(self._on_top_live_item_clicked)
         self.top_search_popup.hide()
 
-        search_btn = QPushButton("🔍 Gözleg (Ctrl+K)")
-        search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        search_btn = make_button("🔍 Gözleg (Ctrl+K)")
         search_btn.clicked.connect(lambda: self._open_quick_search())
         row.addWidget(search_btn)
 
         row.addStretch()
 
-        sale = QPushButton("+  Täze satyş")
-        sale.setObjectName("primaryBtn")
+        sale = make_button("+  Täze satyş", "primary")
         sale.clicked.connect(lambda: self.navigate_to_title("Satyş we kassa"))
 
-        cash = QPushButton("Kassa we Maliýe")
-        cash.setObjectName("darkBtn")
+        cash = make_button("Kassa we Maliýe", "dark")
         cash.clicked.connect(lambda: self.navigate_to_title("Maliýe"))
 
-        for button in (sale, cash):
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            row.addWidget(button)
+        row.addWidget(sale)
+        row.addWidget(cash)
 
         return bar
 
@@ -453,28 +460,39 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(240)
 
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 18, 14, 14)
+        layout.setContentsMargins(14, 16, 14, 14)
         layout.setSpacing(2)
-
-        brand_row = QHBoxLayout()
-        brand_row.setContentsMargins(6, 0, 0, 10)
-
-        mark = QLabel("M")
-        mark.setObjectName("brandMark")
-
-        brand = QLabel("MobileStore")
-        brand.setObjectName("brand")
-
-        brand_row.addWidget(mark)
-        brand_row.addSpacing(8)
-        brand_row.addWidget(brand, 1)
-
-        layout.addLayout(brand_row)
 
         group = QButtonGroup(self)
         group.setExclusive(True)
 
         self.nav_buttons: list[QPushButton] = []
+
+        # Активная верхняя кнопка с логотипом MobileStore -> открывает Главную панель (без дубля "Esasy panel")
+        brand_btn = QPushButton("  MobileStore")
+        brand_btn.setObjectName("brandNavButton")
+        brand_btn.setProperty("title", "MobileStore")
+        brand_btn.setCheckable(True)
+        brand_btn.setAutoDefault(False)
+        brand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        brand_btn.setToolTip("Esasy panel (Ctrl+1)")
+        logo_path = BUNDLE_ROOT / "resources" / "mobilestore.png"
+        if logo_path.exists():
+            pix = QPixmap(str(logo_path)).scaled(
+                32,
+                32,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            brand_btn.setIcon(QIcon(pix))
+            brand_btn.setIconSize(QSize(32, 32))
+        else:
+            brand_btn.setText("⌂  MobileStore")
+
+        group.addButton(brand_btn)
+        layout.addWidget(brand_btn)
+        layout.addSpacing(6)
+        self.nav_buttons.append(brand_btn)
 
         for section, items in NAV:
             label = QLabel(section)
@@ -486,6 +504,7 @@ class MainWindow(QMainWindow):
                 button.setObjectName("navButton")
                 button.setProperty("title", name)
                 button.setCheckable(True)
+                button.setAutoDefault(False)
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
 
                 group.addButton(button)
@@ -494,7 +513,7 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
-        footer = QLabel("Wersiýa 0.1.0")
+        footer = QLabel(f"Wersiýa {APP_VERSION}")
         footer.setObjectName("sideFooter")
         layout.addWidget(footer)
 

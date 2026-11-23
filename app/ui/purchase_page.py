@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -32,6 +32,7 @@ from app.repositories.product_repository import (
     find_product_by_barcode,
     get_low_stock_products,
 )
+from app.services.finance_service import FinanceService
 from app.services.purchase_service import (
     add_purchase_payment,
     add_purchase_refund,
@@ -44,10 +45,13 @@ from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.selection_dialogs import CatalogProductSelectorDialog
 from app.ui.widgets import (
+    ClickableCard,
+    configure_dialog_buttons,
     configure_table,
     make_button,
     make_stat_card,
     money_str,
+    show_toast,
     style_combo,
 )
 
@@ -122,8 +126,11 @@ class ImeiEntryDialog(QDialog):
         self.cond_input.addItem("Täze", "new")
         self.cond_input.addItem("B/U", "used")
 
-        add_btn = make_button("+ IMEI goş", "primary")
+        add_btn = make_button("+ IMEI goş", "secondary")
         add_btn.clicked.connect(self._add_imei)
+        self.imei1_input.returnPressed.connect(self._add_imei)
+        self.imei2_input.returnPressed.connect(self._add_imei)
+        self.sn_input.returnPressed.connect(self._add_imei)
 
         form_row.addWidget(self.imei1_input, 2)
         form_row.addWidget(self.imei2_input, 2)
@@ -151,7 +158,9 @@ class ImeiEntryDialog(QDialog):
         footer.addWidget(save_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, save_btn, cancel_btn)
         self._refresh_table()
+        self.imei1_input.setFocus()
 
     def _add_imei(self) -> None:
         if len(self.imei_list) >= self.max_quantity:
@@ -446,6 +455,7 @@ class PurchaseDialog(QDialog):
         buttons.addWidget(cancel_button)
         buttons.addWidget(save_button)
         outer.addWidget(footer_bar)
+        configure_dialog_buttons(self, save_button, cancel_button)
 
     def _populate_product_combo(self) -> None:
         cur_id = self.product_input.currentData()
@@ -488,11 +498,7 @@ class PurchaseDialog(QDialog):
     def _fill_low_stock_products(self) -> None:
         low_products = get_low_stock_products()
         if not low_products:
-            QMessageBox.information(
-                self,
-                "Az galan haryt ýok",
-                "Skladda iň az çäkden pes galyndyly haryt ýok.",
-            )
+            show_toast(self, "Skladda iň az çäkden pes galyndyly haryt ýok.", kind="info")
             return
         added = 0
         for prod in low_products:
@@ -509,11 +515,7 @@ class PurchaseDialog(QDialog):
             })
             added += 1
         self._refresh_items()
-        QMessageBox.information(
-            self,
-            "Az galan harytlar goşuldy",
-            f"Sklady doldurmak üçin goşulan setirler: {added}.",
-        )
+        show_toast(self, f"Sklady doldurmak üçin {added} sany setir goşuldy.", kind="success")
 
     def _apply_initial_data(self, data: dict) -> None:
         if data.get("supplier_name"):
@@ -749,11 +751,7 @@ class PurchaseDialog(QDialog):
                 note=self.note_input.text().strip() or None,
                 supplier_name=self.supplier_input.currentText().strip() or None,
             )
-            QMessageBox.information(
-                self,
-                "Alyş ýatda saklandy",
-                f"Alyş №{purchase_id} üstünlikli döredildi.",
-            )
+            show_toast(self.parentWidget() or self, f"Alyş №{purchase_id} üstünlikli ýatda saklandy.", kind="success")
             self.accept()
         except (ValueError, TypeError, KeyError) as error:
             QMessageBox.warning(self, "Maglumatlary barlaň", str(error))
@@ -810,6 +808,8 @@ class RefundDialog(QDialog):
         buttons.addWidget(cancel_button)
         buttons.addWidget(save_button)
         root.addLayout(buttons)
+        configure_dialog_buttons(self, save_button, cancel_button)
+        self.amount_input.setFocus()
 
     def _validate(self) -> None:
         if self.amount_input.value() <= 0:
@@ -960,6 +960,7 @@ class PurchaseDetailsDialog(QDialog):
         buttons.addWidget(self.cancel_purchase_button)
         buttons.addWidget(close_button)
         outer.addWidget(footer)
+        configure_dialog_buttons(self, add_payment_button, close_button)
 
     def _load_data(self) -> None:
         with SessionLocal() as session:
@@ -1112,7 +1113,7 @@ class PurchaseDetailsDialog(QDialog):
 
         try:
             cancel_purchase(self.purchase_id, reason)
-            QMessageBox.information(self, "Alyş ýatyryldy", "Alyş üstünlikli ýatyryldy.")
+            show_toast(self, "Alyş üstünlikli ýatyryldy.", kind="success")
             self._load_data()
         except (ValueError, TypeError) as error:
             QMessageBox.warning(self, "Alyşy ýatyryp bolmaýar", str(error))
@@ -1132,7 +1133,7 @@ class PurchaseDetailsDialog(QDialog):
                 exchange_rate=data["exchange_rate"],
                 description=data["description"],
             )
-            QMessageBox.information(self, "Gaýtarma hasaba alyndy", "Pul kassa žurnalyna goşuldy.")
+            show_toast(self, "Gaýtarma hasaba alyndy we kassa žurnalyna goşuldy.", kind="success")
             self._load_data()
         except (ValueError, TypeError) as error:
             QMessageBox.warning(self, "Gaýtarmany hasaba alyp bolmaýar", str(error))
@@ -1177,13 +1178,48 @@ class PurchasePage(QWidget):
 
         stats = QHBoxLayout()
         stats.setSpacing(14)
-        self.total_value = QLabel("0")
-        self.debt_usd_value = QLabel("0.00 USD")
-        self.debt_tmt_value = QLabel("0.00 TMT")
 
-        stats.addWidget(make_stat_card("Jemi alyşlar", self.total_value, theme.NAVY))
-        stats.addWidget(make_stat_card("Üpjün edijilere USD bergi", self.debt_usd_value, theme.ACCENT))
-        stats.addWidget(make_stat_card("Üpjün edijilere TMT bergi", self.debt_tmt_value, theme.RED))
+        self.total_value = QLabel("0")
+        stats.addWidget(make_stat_card("Jemi alyşlar", self.total_value, theme.NAVY), 1)
+
+        self.debt_combined_value = QLabel("$0.00  |  0.00 TMT")
+        stats.addWidget(
+            make_stat_card(
+                "Üpjün edijilere bergi (USD / TMT)",
+                self.debt_combined_value,
+                theme.RED,
+                subtitle="Ähli işjeň alyşlar boýunça tölenmedik galyndy",
+                small_value=True,
+            ),
+            2,
+        )
+
+        # Активная кликабельная карточка «Çykdajylar (şu aý)» -> открывает окно расходов
+        self.expenses_card = ClickableCard(margins=(16, 12, 16, 12), spacing=4)
+        self.expenses_card.setToolTip("Täze çykdajy ýazmak üçin basyň")
+        self.expenses_card.clicked.connect(self._open_expense_dialog)
+        exp_head = QHBoxLayout()
+        exp_title = QLabel("💸 Çykdajylar (şu aý)")
+        exp_title.setObjectName("mutedText")
+        exp_badge = QLabel("+ Çykdajy ýaz →")
+        exp_badge.setStyleSheet(
+            f"color: {theme.ACCENT}; font-size: 8.5pt; font-weight: 700; "
+            f"background: {theme.ACCENT_BG}; padding: 2px 8px; border-radius: 6px;"
+        )
+        exp_head.addWidget(exp_title, 1)
+        exp_head.addWidget(exp_badge)
+        self.expenses_card.body.addLayout(exp_head)
+
+        self.expenses_value = QLabel("$0.00  |  0.00 TMT")
+        self.expenses_value.setStyleSheet(
+            f"color: {theme.ACCENT}; font-size: 13.5pt; font-weight: 700;"
+        )
+        self.expenses_sub = QLabel("Şu aýda 0 ýazgy • Çykdajy goşmak üçin basyň")
+        self.expenses_sub.setStyleSheet(f"color: {theme.MUTED}; font-size: 8.5pt;")
+        self.expenses_card.body.addWidget(self.expenses_value)
+        self.expenses_card.body.addWidget(self.expenses_sub)
+        stats.addWidget(self.expenses_card, 2)
+
         root.addLayout(stats)
 
         self.search_input = QLineEdit()
@@ -1206,6 +1242,10 @@ class PurchasePage(QWidget):
         ])
         configure_table(self.table, stretch_col=2, row_height=46)
         self.table.cellDoubleClicked.connect(self._open_selected)
+        for seq in ("Return", "Enter"):
+            sc = QShortcut(QKeySequence(seq), self.table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_button)
         root.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
@@ -1219,7 +1259,7 @@ class PurchasePage(QWidget):
 
         actions.addStretch()
 
-        hint = QLabel("Resminamany açmak, töleg geçirmek ýa-da ýatyrmak üçin alyşy iki gezek basyň.")
+        hint = QLabel("Resminamany açmak üçin iki gezek ýa-da Enter basyň • Çykdajy ýazmak üçin «Çykdajylar» kartyna basyň.")
         hint.setObjectName("mutedText")
         actions.addWidget(hint)
         root.addLayout(actions)
@@ -1229,6 +1269,7 @@ class PurchasePage(QWidget):
             purchases = session.scalars(
                 select(Purchase).order_by(Purchase.purchase_date.desc())
             ).all()
+            monthly_exp = FinanceService.get_monthly_expenses_summary(session)
             self.purchases = [
                 {
                     "id": p.id,
@@ -1256,10 +1297,22 @@ class PurchasePage(QWidget):
                     debt_tmt += purchase["balance"]
 
         self.total_value.setText(str(len(self.purchases)))
-        self.debt_usd_value.setText(f"{money_str(debt_usd)} USD")
-        self.debt_tmt_value.setText(f"{money_str(debt_tmt)} TMT")
+        self.debt_combined_value.setText(f"${money_str(debt_usd)} USD  |  {money_str(debt_tmt)} TMT")
+        self.expenses_value.setText(
+            f"${money_str(monthly_exp['USD'])} USD  |  {money_str(monthly_exp['TMT'])} TMT"
+        )
+        self.expenses_sub.setText(
+            f"Şu aýda {monthly_exp['count']} ýazgy • Täze çykdajy goşmak üçin basyň"
+        )
         self.count_label.setText(f"Resminamalar: {len(self.purchases)}")
         self._filter_data()
+
+    def _open_expense_dialog(self) -> None:
+        from app.ui.finance_page import ExpenseDialog
+
+        dlg = ExpenseDialog(self)
+        if dlg.exec():
+            self._load_data()
 
     def _filter_data(self, *_args) -> None:
         query = self.search_input.text().strip().lower()
@@ -1321,18 +1374,14 @@ class PurchasePage(QWidget):
     def _open_selected_button(self) -> None:
         row = self.table.currentRow()
         if row < 0:
-            QMessageBox.information(self, "Alyş saýlaň", "Tablisadan alyş setirini saýlaň.")
+            show_toast(self, "Tablisadan alyş setirini saýlaň.", kind="info")
             return
         self._open_selected(row, 0)
 
     def _repeat_selected_purchase(self) -> None:
         row = self.table.currentRow()
         if row < 0 or self.table.item(row, 0) is None:
-            QMessageBox.information(
-                self,
-                "Alyş saýlaň",
-                "Gaýtalamak isleýän alyşyňyzy tablisadan saýlaň.",
-            )
+            show_toast(self, "Gaýtalamak isleýän alyşyňyzy tablisadan saýlaň.", kind="info")
             return
         purchase_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
         with SessionLocal() as session:

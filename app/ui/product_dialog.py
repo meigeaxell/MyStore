@@ -26,7 +26,7 @@ from app.repositories.product_repository import (
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.category_dialog import CategoryDialog
-from app.ui.widgets import make_button, style_combo
+from app.ui.widgets import configure_dialog_buttons, make_button, show_toast, style_combo
 
 
 class ProductDialog(QDialog):
@@ -59,6 +59,8 @@ class ProductDialog(QDialog):
             self._load_product()
         elif self.initial_barcode:
             self.barcode_input.setText(self.initial_barcode)
+
+        self.name_input.setFocus()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -156,6 +158,8 @@ class ProductDialog(QDialog):
         footer.addWidget(cancel_btn)
         footer.addWidget(save_btn)
         root.addLayout(footer)
+
+        configure_dialog_buttons(self, save_btn, cancel_btn)
 
     def _load_categories(self) -> None:
         self.category_input.clear()
@@ -262,7 +266,7 @@ class ProductDialog(QDialog):
                 if self.product_id is None
                 else f"«{product.name}» harydynyň üýtgeşmeleri ýatda saklandy."
             )
-            QMessageBox.information(self, "Taýýar", msg)
+            show_toast(self.parentWidget() or self, msg, kind="success")
             self.accept()
         except ValueError as err:
             QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
@@ -275,7 +279,11 @@ class ProductDialog(QDialog):
         if not self._is_active:
             try:
                 restore_product(self.product_id)
-                QMessageBox.information(self, "Taýýar", "Haryt arhiwden dikeldildi we işjeň kataloga gaýtaryldy.")
+                show_toast(
+                    self.parentWidget() or self,
+                    "Haryt arhiwden dikeldildi we işjeň kataloga gaýtaryldy.",
+                    kind="success",
+                )
                 self.accept()
             except (ValueError, SQLAlchemyError) as err:
                 QMessageBox.warning(self, "Ýalňyşlyk", str(err))
@@ -301,7 +309,7 @@ class ProductDialog(QDialog):
             return
         try:
             deactivate_product(self.product_id, force=True)
-            QMessageBox.information(self, "Taýýar", "Haryt arhiwe geçirildi.")
+            show_toast(self.parentWidget() or self, "Haryt arhiwe geçirildi.", kind="success")
             self.accept()
         except ValueError as err:
             QMessageBox.warning(self, "Arhiwe geçirip bolmaýar", str(err))

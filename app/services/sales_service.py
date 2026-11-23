@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -249,6 +249,8 @@ class SalesService:
         customer_name: str | None = None,
         customer_phone: str | None = None,
         allow_credit: bool = False,
+        is_simurg: bool = False,
+        simurg_payout_date: datetime | None = None,
     ) -> Sale:
         """Создает продажу (чек) с позициями, проверяет склад и IMEI, списывает остатки и принимает оплату."""
         if not isinstance(currency, str):
@@ -261,6 +263,9 @@ class SalesService:
 
         if not items:
             raise ValueError("Çek boş bolup bilmez.")
+
+        if is_simurg:
+            allow_credit = True
 
         payments = payments or []
         if not payments and not allow_credit:
@@ -278,9 +283,14 @@ class SalesService:
         if customer_phone is not None:
             customer_phone = str(customer_phone).strip() or None
 
+        sale_dt = datetime.now()
+        payout_dt = simurg_payout_date
+        if is_simurg and payout_dt is None:
+            payout_dt = sale_dt + timedelta(days=5)
+
         sale = Sale(
             receipt_number=receipt_number,
-            sale_date=datetime.now(),
+            sale_date=sale_dt,
             currency=currency,
             exchange_rate=exchange_rate,
             total_amount=Decimal("0.00"),
@@ -289,6 +299,8 @@ class SalesService:
             status="completed",
             note=note,
             comment=comment,
+            is_simurg=bool(is_simurg),
+            simurg_payout_date=payout_dt,
         )
         session.add(sale)
         session.flush()

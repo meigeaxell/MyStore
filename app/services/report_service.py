@@ -904,3 +904,89 @@ class ReportService:
                     c["debt_tmt"] = _money(c["debt_tmt"] + c_debt)
 
         return list(customers.values())
+
+    @staticmethod
+    def get_stock_valuation(
+        session: Session,
+        exchange_rate: Decimal | float | str | None = None,
+    ) -> dict:
+        """Рассчитывает общую стоимость всех активных товаров на складе в обеих валютах (USD и TMT).
+
+        Для IMEI-устройств используется фактическая себестоимость каждого in_stock StockItem.
+        Для количественных остатков — себестоимость единицы (из последней закупки или базовой цены).
+        """
+        from app.services.settings_service import SettingsService
+
+        if exchange_rate is None:
+            rate = _validate_rate(SettingsService.get_default_exchange_rate())
+        else:
+            rate = _validate_rate(exchange_rate)
+
+        products = session.scalars(
+            select(Product).where(Product.is_active.is_(True), Product.stock_quantity > 0)
+        ).all()
+
+        in_stock_items = session.scalars(
+            select(StockItem).where(StockItem.status == "in_stock")
+        ).all()
+        items_by_prod: dict[int, list[StockItem]] = {}
+        for st in in_stock_items:
+            items_by_prod.setdefault(st.product_id, []).append(st)
+
+        usd_native = Decimal("0.00")
+        tmt_native = Decimal("0.00")
+        total_units = 0
+        devices_count = 0
+        accessories_count = 0
+
+        for prod in products:
+            qty = int(prod.stock_quantity or 0)
+            if qty <= 0:
+                continue
+            total_units += qty
+            imei_items = items_by_prod.get(prod.id, [])
+            imei_cnt = len(imei_items)
+            devices_count += imei_cnt
+
+            for st in imei_items:
+                u_cost, u_curr, _u_rate = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=prod.id,
+                    stock_item=st,
+                    fallback_currency="USD",
+                    fallback_rate=rate,
+                )
+                if u_curr == "USD":
+                    usd_native = _money(usd_native + u_cost)
+                else:
+                    tmt_native = _money(tmt_native + u_cost)
+
+            rem_qty = max(0, qty - imei_cnt)
+            if rem_qty > 0:
+                accessories_count += rem_qty
+                u_cost, u_curr, _u_rate = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=prod.id,
+                    stock_item=None,
+                    fallback_currency="USD",
+                    fallback_rate=rate,
+                )
+                line_val = _money(u_cost * rem_qty)
+                if u_curr == "USD":
+                    usd_native = _money(usd_native + line_val)
+                else:
+                    tmt_native = _money(tmt_native + line_val)
+
+        total_in_usd = _money(usd_native + (tmt_native / rate))
+        total_in_tmt = _money(tmt_native + (usd_native * rate))
+
+        return {
+            "usd_native": usd_native,
+            "tmt_native": tmt_native,
+            "total_in_usd": total_in_usd,
+            "total_in_tmt": total_in_tmt,
+            "exchange_rate": rate,
+            "total_units": total_units,
+            "devices_count": devices_count,
+            "accessories_count": accessories_count,
+        }

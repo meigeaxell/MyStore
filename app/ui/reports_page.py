@@ -4,7 +4,7 @@ from html import escape
 from pathlib import Path
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor, QPageLayout, QPageSize, QTextDocument
+from PySide6.QtGui import QColor, QKeySequence, QPageLayout, QPageSize, QShortcut, QTextDocument
 from PySide6.QtPrintSupport import QPrinter
 from PySide6.QtWidgets import (
     QComboBox,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -30,7 +29,14 @@ from app.models.category import Category
 from app.services.report_service import ReportService
 from app.ui import theme
 from app.ui.sales_page import SaleDetailsDialog
-from app.ui.widgets import configure_table, money_str, style_combo
+from app.ui.widgets import (
+    configure_dialog_buttons,
+    configure_table,
+    make_button,
+    money_str,
+    show_toast,
+    style_combo,
+)
 
 
 class ProductHistoryDialog(QDialog):
@@ -68,11 +74,12 @@ class ProductHistoryDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch()
-        close_btn = QPushButton("Ýap")
+        close_btn = make_button("Ýap")
         close_btn.clicked.connect(self.accept)
         footer.addWidget(close_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, close_btn)
         self._load()
 
     def _load(self) -> None:
@@ -134,11 +141,12 @@ class ImeiHistoryDialog(QDialog):
 
         footer = QHBoxLayout()
         footer.addStretch()
-        close_btn = QPushButton("Ýap")
+        close_btn = make_button("Ýap")
         close_btn.clicked.connect(self.accept)
         footer.addWidget(close_btn)
         root.addLayout(footer)
 
+        configure_dialog_buttons(self, close_btn)
         self._load()
 
     def _load(self) -> None:
@@ -198,19 +206,15 @@ class ReportsPage(QWidget):
         col.addWidget(sub)
         header.addLayout(col, 1)
 
-        csv_btn = QPushButton("⬇ CSV eksport")
-        csv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        csv_btn = make_button("⬇ CSV eksport")
         csv_btn.clicked.connect(self._export_current_csv)
         header.addWidget(csv_btn)
 
-        pdf_btn = QPushButton("📄 PDF eksport")
-        pdf_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        pdf_btn = make_button("📄 PDF eksport")
         pdf_btn.clicked.connect(self._export_current_pdf)
         header.addWidget(pdf_btn)
 
-        refresh_btn = QPushButton("↻  Täzele")
-        refresh_btn.setObjectName("primaryBtn")
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn = make_button("↻  Täzele", "primary")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -311,6 +315,12 @@ class ReportsPage(QWidget):
             3, QHeaderView.ResizeMode.Stretch
         )
         self.sales_table.cellDoubleClicked.connect(self._open_sales_report_receipt)
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.sales_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(
+                lambda: self._open_sales_report_receipt(self.sales_table.currentRow(), 0)
+            )
         layout.addWidget(self.sales_table, 1)
 
         return widget
@@ -366,8 +376,7 @@ class ReportsPage(QWidget):
         self.prod_search.textChanged.connect(self._load_products_report)
         top.addWidget(self.prod_search, 1)
 
-        hist_btn = QPushButton("📜 Saýlanan harydyň hereket taryhy")
-        hist_btn.setObjectName("primaryBtn")
+        hist_btn = make_button("📜 Saýlanan harydyň hereket taryhy", "primary")
         hist_btn.clicked.connect(self._open_selected_product_history)
         top.addWidget(hist_btn)
         layout.addLayout(top)
@@ -392,6 +401,10 @@ class ReportsPage(QWidget):
         self.products_table.cellDoubleClicked.connect(
             lambda _r, _c: self._open_selected_product_history()
         )
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.products_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_product_history)
         layout.addWidget(self.products_table, 1)
 
         return widget
@@ -416,8 +429,7 @@ class ReportsPage(QWidget):
         self.dev_search.textChanged.connect(self._load_devices_report)
         top.addWidget(self.dev_search, 1)
 
-        imei_hist_btn = QPushButton("📱 Saýlanan IMEI-niň doly taryhy")
-        imei_hist_btn.setObjectName("primaryBtn")
+        imei_hist_btn = make_button("📱 Saýlanan IMEI-niň doly taryhy", "primary")
         imei_hist_btn.clicked.connect(self._open_selected_imei_history)
         top.addWidget(imei_hist_btn)
         layout.addLayout(top)
@@ -442,6 +454,10 @@ class ReportsPage(QWidget):
         self.devices_table.cellDoubleClicked.connect(
             lambda _r, _c: self._open_selected_imei_history()
         )
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.devices_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_imei_history)
         layout.addWidget(self.devices_table, 1)
 
         return widget
@@ -856,11 +872,7 @@ class ReportsPage(QWidget):
     def _open_selected_product_history(self) -> None:
         row = self.products_table.currentRow()
         if not (0 <= row < len(self.product_rows)):
-            QMessageBox.information(
-                self,
-                "Haryt saýlaň",
-                "Hereket taryhyny açmak üçin tablisadan haryt saýlaň.",
-            )
+            show_toast(self, "Hereket taryhyny açmak üçin tablisadan haryt saýlaň.", kind="info")
             return
         p = self.product_rows[row]
         dlg = ProductHistoryDialog(p["product_id"], p["name"], self)
@@ -869,11 +881,7 @@ class ReportsPage(QWidget):
     def _open_selected_imei_history(self) -> None:
         row = self.devices_table.currentRow()
         if not (0 <= row < len(self.device_rows)):
-            QMessageBox.information(
-                self,
-                "Enjam saýlaň",
-                "IMEI-niň doly taryhyny açmak üçin tablisadan enjam saýlaň.",
-            )
+            show_toast(self, "IMEI-niň doly taryhyny açmak üçin tablisadan enjam saýlaň.", kind="info")
             return
         d = self.device_rows[row]
         dlg = ImeiHistoryDialog(d["stock_item_id"], d["imei1"], d["model_name"], self)
@@ -928,10 +936,11 @@ class ReportsPage(QWidget):
                     ]
                     writer.writerow(row_vals)
 
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Eksport tamamlandy",
-                f"Hasabat faýla üstünlikli ýatda saklandy:\n{file_path}",
+                f"CSV hasabat ýatda saklandy: {file_path}",
+                kind="success",
+                duration_ms=4000,
             )
         except OSError as e:
             QMessageBox.critical(self, "Eksport ýalňyşlygy", f"CSV ýatda saklap bolmady:\n{e}")
@@ -993,10 +1002,11 @@ class ReportsPage(QWidget):
             doc.setHtml(html)
             doc.print_(printer)
 
-            QMessageBox.information(
+            show_toast(
                 self,
-                "Eksport tamamlandy",
-                f"PDF hasabat üstünlikli ýatda saklandy:\n{file_path}",
+                f"PDF hasabat ýatda saklandy: {file_path}",
+                kind="success",
+                duration_ms=4000,
             )
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "PDF eksport ýalňyşlygy", f"PDF döredip bolmady:\n{e}")

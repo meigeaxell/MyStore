@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String
+from sqlalchemy import Boolean, DateTime, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database.base import Base
@@ -75,6 +75,18 @@ class Sale(Base):
 
     note: Mapped[str | None] = mapped_column(
         String(255),
+        nullable=True,
+    )
+
+    is_simurg: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
+
+    simurg_payout_date: Mapped[datetime | None] = mapped_column(
+        DateTime,
         nullable=True,
     )
 

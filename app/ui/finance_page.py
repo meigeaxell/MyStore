@@ -2,7 +2,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 
 from PySide6.QtCore import QDate, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -13,10 +13,10 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -34,7 +34,16 @@ from app.ui import theme
 from app.ui.purchase_page import PurchaseDetailsDialog
 from app.ui.receipt_printer import export_shift_report_pdf
 from app.ui.sales_page import SaleDetailsDialog
-from app.ui.widgets import Card, configure_table, make_button, money_str, style_combo
+from app.ui.widgets import (
+    Card,
+    ClickableCard,
+    configure_dialog_buttons,
+    configure_table,
+    make_button,
+    money_str,
+    show_toast,
+    style_combo,
+)
 
 
 class ExpenseDialog(QDialog):
@@ -43,7 +52,7 @@ class ExpenseDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Çykdajy hasaba almak")
-        self.setMinimumWidth(440)
+        self.setMinimumWidth(450)
         self.setStyleSheet(theme.STYLE)
 
         root = QVBoxLayout(self)
@@ -80,7 +89,7 @@ class ExpenseDialog(QDialog):
         self.rate_spin = QDoubleSpinBox()
         self.rate_spin.setRange(0.0001, 100000)
         self.rate_spin.setDecimals(4)
-        self.rate_spin.setValue(19.5)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
         self.rate_spin.setMinimumHeight(38)
 
         self.desc_input = QLineEdit()
@@ -95,14 +104,17 @@ class ExpenseDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel_btn = QPushButton("Ýatyr")
+        cancel_btn = make_button("Ýatyr")
         cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("Çykdajyny ýatda sakla")
-        save_btn.setObjectName("primaryBtn")
+        save_btn = make_button("Çykdajyny ýatda sakla", "primary")
         save_btn.clicked.connect(self._save)
         buttons.addWidget(cancel_btn)
         buttons.addWidget(save_btn)
         root.addLayout(buttons)
+
+        configure_dialog_buttons(self, save_btn, cancel_btn)
+        self.amount_spin.setFocus()
+        self.amount_spin.selectAll()
 
     def _save(self) -> None:
         cat = self.category_input.currentText().strip()
@@ -129,14 +141,18 @@ class ExpenseDialog(QDialog):
                     description=desc,
                 )
                 session.commit()
-            QMessageBox.information(self, "Taýýar", "Çykdajy üstünlikli hasaba alyndy.")
+            show_toast(
+                self.parentWidget() or self,
+                f"Çykdajy hasaba alyndy: {money_str(amt)} {cur} ({cat})",
+                kind="success",
+            )
             self.accept()
         except (ValueError, TypeError, SQLAlchemyError) as e:
             QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
 
 class CashAdjustmentDialog(QDialog):
-    """Окно создания корректирующей / сторнирующей кассовой записи (Раздел 5.7)."""
+    """Окно создания корректирующей / сторнирующей кассовой записи."""
 
     def __init__(self, reference_entry: dict | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -179,7 +195,7 @@ class CashAdjustmentDialog(QDialog):
         self.rate_spin = QDoubleSpinBox()
         self.rate_spin.setRange(0.0001, 100000)
         self.rate_spin.setDecimals(4)
-        self.rate_spin.setValue(19.5)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
         self.rate_spin.setMinimumHeight(38)
 
         self.reason_input = QLineEdit()
@@ -206,14 +222,16 @@ class CashAdjustmentDialog(QDialog):
 
         buttons = QHBoxLayout()
         buttons.addStretch()
-        cancel_btn = QPushButton("Ýatyr")
+        cancel_btn = make_button("Ýatyr")
         cancel_btn.clicked.connect(self.reject)
-        save_btn = QPushButton("Düzedişi geçir")
-        save_btn.setObjectName("primaryBtn")
+        save_btn = make_button("Düzedişi geçir", "primary")
         save_btn.clicked.connect(self._save)
         buttons.addWidget(cancel_btn)
         buttons.addWidget(save_btn)
         root.addLayout(buttons)
+
+        configure_dialog_buttons(self, save_btn, cancel_btn)
+        self.amount_spin.setFocus()
 
     def _save(self) -> None:
         direction = self.direction_combo.currentData()
@@ -253,24 +271,167 @@ class CashAdjustmentDialog(QDialog):
                     reference_movement_id=ref_id,
                 )
                 session.commit()
-            QMessageBox.information(self, "Taýýar", "Düzediş ýazgysy üstünlikli döredildi.")
+            show_toast(self.parentWidget() or self, "Düzediş ýazgysy üstünlikli döredildi.", kind="success")
             self.accept()
         except (ValueError, TypeError, SQLAlchemyError) as e:
             QMessageBox.warning(self, "Ýalňyşlyk", str(e))
 
 
-class ShiftCloseDialog(QDialog):
-    """Окно закрытия смены (Z-отчёт) и сверки фактической и расчётной кассы USD/TMT."""
+class SimurgPayoutDialog(QDialog):
+    """Окно приёма выплаты от Simurg (произвольной или готовой суммой по FIFO)."""
+
+    def __init__(self, summary: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.summary = summary
+        self.setWindowTitle("Simurg tölegini kabul etmek")
+        self.setMinimumWidth(480)
+        self.setStyleSheet(theme.STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel("🏦 Simurg tölegini kabul etmek")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        tot = summary["total_debt"]
+        rdy = summary["ready_amount"]
+        info = QLabel(
+            f"Jemi bergi: <b>{money_str(tot['TMT'])} TMT</b>  |  <b>${money_str(tot['USD'])} USD</b>   "
+            f"({summary['total_items_count']} enjam)\n"
+            f"Almak üçin taýýar (≥5 gün): <span style='color:{theme.GREEN}; font-weight:700;'>"
+            f"{money_str(rdy['TMT'])} TMT  |  ${money_str(rdy['USD'])} USD</span> "
+            f"({summary['ready_items_count']} enjam)"
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet(
+            "background: #FFF8F1; border: 1px solid #FDBA74; border-radius: 8px; padding: 10px 12px;"
+        )
+        root.addWidget(info)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        self.currency_combo = style_combo(QComboBox())
+        self.currency_combo.addItems(["TMT", "USD"])
+        if tot["TMT"] <= 0 and tot["USD"] > 0:
+            self.currency_combo.setCurrentText("USD")
+        self.currency_combo.currentTextChanged.connect(self._on_currency_changed)
+
+        amt_row = QHBoxLayout()
+        self.amount_spin = QDoubleSpinBox()
+        self.amount_spin.setRange(0, 100000000)
+        self.amount_spin.setDecimals(2)
+        self.amount_spin.setMinimumHeight(38)
+        amt_row.addWidget(self.amount_spin, 1)
+
+        fill_ready_btn = make_button("Taýýar jemi", "link")
+        fill_ready_btn.clicked.connect(self._fill_ready)
+        fill_all_btn = make_button("Ähli bergi", "link")
+        fill_all_btn.clicked.connect(self._fill_all)
+        amt_row.addWidget(fill_ready_btn)
+        amt_row.addWidget(fill_all_btn)
+
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setDecimals(4)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        self.rate_spin.setMinimumHeight(38)
+
+        self.ready_only_cb = QCheckBox("Diňe taýýar arzalardan (≥5 gün) ýap")
+        self.ready_only_cb.setChecked(False)
+
+        self.note_input = QLineEdit()
+        self.note_input.setPlaceholderText("Bellik (mysal üçin: Simurg geçirim)...")
+
+        form.addRow("Walýuta *", self.currency_combo)
+        form.addRow("Alnan pul *", amt_row)
+        form.addRow("Kurs (1 USD = X TMT)", self.rate_spin)
+        form.addRow("", self.ready_only_cb)
+        form.addRow("Bellik", self.note_input)
+        root.addLayout(form)
+
+        hint = QLabel("Töleg iň köne Simurg arzalaryndan başlap awtomatiki (FIFO) ýapylýar we kassa geçýär.")
+        hint.setObjectName("mutedText")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel_btn = make_button("Ýatyr")
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = make_button("Tölegi kassa kabul et", "primary")
+        save_btn.clicked.connect(self._collect)
+        buttons.addWidget(cancel_btn)
+        buttons.addWidget(save_btn)
+        root.addLayout(buttons)
+
+        configure_dialog_buttons(self, save_btn, cancel_btn)
+        self._on_currency_changed()
+        self.amount_spin.setFocus()
+        self.amount_spin.selectAll()
+
+    def _on_currency_changed(self) -> None:
+        cur = self.currency_combo.currentText()
+        rdy = self.summary["ready_amount"][cur]
+        tot = self.summary["total_debt"][cur]
+        self.amount_spin.setValue(float(rdy if rdy > 0 else tot))
+
+    def _fill_ready(self) -> None:
+        cur = self.currency_combo.currentText()
+        self.amount_spin.setValue(float(self.summary["ready_amount"][cur]))
+
+    def _fill_all(self) -> None:
+        cur = self.currency_combo.currentText()
+        self.amount_spin.setValue(float(self.summary["total_debt"][cur]))
+
+    def _collect(self) -> None:
+        cur = self.currency_combo.currentText()
+        amt = Decimal(f"{self.amount_spin.value():.2f}")
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+        if amt <= 0:
+            QMessageBox.warning(self, "Ýalňyşlyk", "Töleg mukdary noldan uly bolmaly.")
+            return
+        try:
+            with SessionLocal() as session, session.begin():
+                res = FinanceService.collect_simurg_payout(
+                    session=session,
+                    currency=cur,
+                    amount=amt,
+                    ready_only=self.ready_only_cb.isChecked(),
+                    exchange_rate=rate,
+                    description=self.note_input.text().strip() or "Simurg tölegi",
+                )
+            show_toast(
+                self.parentWidget() or self,
+                f"Simurg tölegi kabul edildi: {money_str(res['collected_amount'])} {cur} ({res['sales_count']} çek)",
+                kind="success",
+                duration_ms=3400,
+            )
+            self.accept()
+        except (ValueError, TypeError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+
+class ShiftAndCashDialog(QDialog):
+    """Единое окно закрытия смены (Z-отчёт), сверки кассы и пересчёта купюр (TMT + USD)."""
+
+    TMT_DENOMS = (500, 100, 50, 20, 10, 5, 1)
+    USD_DENOMS = (100, 50, 20, 10, 5, 1)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Smenany ýapmak we kassa barlagy (Z-hasabat)")
-        self.setMinimumWidth(560)
+        self.setWindowTitle("Smena we kassa sanawy (Z-hasabat)")
+        self.setMinimumSize(720, 580)
         self.setStyleSheet(theme.STYLE)
 
+        self.tmt_spins: dict[int, QSpinBox] = {}
+        self.usd_spins: dict[int, QSpinBox] = {}
         self._load_shift_stats()
         self._build_ui()
         self._recalculate_diff()
+        self._recalculate_bills()
 
     def _load_shift_stats(self) -> None:
         today = date.today()
@@ -298,27 +459,55 @@ class ShiftCloseDialog(QDialog):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(12)
 
-        title = QLabel("Smenany ýapmak we nagt pul barlagy")
+        title = QLabel("🔒 Smena ýapmak we kassany sanamak")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
         summary = QLabel(
             f"Şu günki çekler: <b>{self.receipts_count}</b>   |   "
-            f"Jemi peýda: <b>${money_str(self.profit_usd)} USD / {money_str(self.profit_tmt)} TMT</b>\n"
-            f"Smena girdejisi: +${money_str(self.usd_income)} USD / +{money_str(self.tmt_income)} TMT   |   "
-            f"Smena çykdajysy: −${money_str(self.usd_expense)} USD / −{money_str(self.tmt_expense)} TMT"
+            f"Peýda: <b>${money_str(self.profit_usd)} USD / {money_str(self.profit_tmt)} TMT</b>\n"
+            f"Girdeji: +${money_str(self.usd_income)} USD / +{money_str(self.tmt_income)} TMT   |   "
+            f"Çykdajy: −${money_str(self.usd_expense)} USD / −{money_str(self.tmt_expense)} TMT"
         )
         summary.setObjectName("mutedText")
         summary.setWordWrap(True)
         root.addWidget(summary)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_shift_tab(), "🔒 Smena barlagy (Z-hasabat)")
+        self.tabs.addTab(self._build_bills_tab(), "🧮 Kupýura sanawy (TMT + USD)")
+        root.addWidget(self.tabs, 1)
+
+        footer = QHBoxLayout()
+        self.adjust_btn = make_button("⚖ Kassany hakyky pul boýunça deňle")
+        self.adjust_btn.clicked.connect(self._apply_reconciliation)
+        footer.addWidget(self.adjust_btn)
+
+        footer.addStretch()
+
+        close_btn = make_button("Ýap")
+        close_btn.clicked.connect(self.accept)
+        pdf_btn = make_button("🖨 Z-hasabaty PDF-de ýatda sakla", "primary")
+        pdf_btn.clicked.connect(self._export_pdf)
+        footer.addWidget(close_btn)
+        footer.addWidget(pdf_btn)
+        root.addLayout(footer)
+
+        configure_dialog_buttons(self, pdf_btn, close_btn)
+
+    def _build_shift_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(12)
 
         grid = QGridLayout()
         grid.setVerticalSpacing(10)
         grid.setHorizontalSpacing(14)
 
         grid.addWidget(QLabel("<b>Kassa walýutasy</b>"), 0, 0)
-        grid.addWidget(QLabel("<b>Hasaplanan galyndy</b>"), 0, 1)
-        grid.addWidget(QLabel("<b>Kassada hakyky</b>"), 0, 2)
+        grid.addWidget(QLabel("<b>Programmadaky galyndy</b>"), 0, 1)
+        grid.addWidget(QLabel("<b>Hakyky nagt pul</b>"), 0, 2)
         grid.addWidget(QLabel("<b>Tapawut</b>"), 0, 3)
 
         grid.addWidget(QLabel("Kassa USD ($):"), 1, 0)
@@ -351,30 +540,169 @@ class ShiftCloseDialog(QDialog):
         self.diff_tmt_lbl = QLabel("0.00 m.")
         grid.addWidget(self.diff_tmt_lbl, 2, 3)
 
-        root.addLayout(grid)
+        lay.addLayout(grid)
+
+        self.combined_actual_lbl = QLabel()
+        self.combined_actual_lbl.setStyleSheet(
+            f"background: #EFF6FF; color: {theme.NAVY}; border: 1px solid #BFDBFE; "
+            "border-radius: 8px; padding: 10px 12px; font-weight: 700;"
+        )
+        lay.addWidget(self.combined_actual_lbl)
 
         self.status_banner = QLabel()
         self.status_banner.setWordWrap(True)
-        root.addWidget(self.status_banner)
+        lay.addWidget(self.status_banner)
 
-        footer = QHBoxLayout()
-        self.adjust_btn = make_button("⚖ Kassany hakyky pul boýunça deňle")
-        self.adjust_btn.clicked.connect(self._apply_reconciliation)
-        footer.addWidget(self.adjust_btn)
+        tip = QLabel(
+            "Maslahat: «Kupýura sanawy» goýmasynda kagyz pullary sanasaňyz, hakyky mukdarlar bu ýere awtomatiki geçer."
+        )
+        tip.setObjectName("mutedText")
+        tip.setWordWrap(True)
+        lay.addWidget(tip)
+        lay.addStretch()
+        return w
 
-        pdf_btn = make_button("🖨 Z-hasabaty PDF-de ýatda sakla", "primary")
-        pdf_btn.clicked.connect(self._export_pdf)
-        footer.addWidget(pdf_btn)
+    def _build_bills_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(10)
 
-        footer.addStretch()
-        close_btn = make_button("Ýap")
-        close_btn.clicked.connect(self.accept)
-        footer.addWidget(close_btn)
-        root.addLayout(footer)
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(QLabel("Kurs (1 USD = X TMT):"))
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setDecimals(4)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        self.rate_spin.valueChanged.connect(self._recalculate_bills)
+        rate_row.addWidget(self.rate_spin)
+        rate_row.addStretch()
+
+        clear_btn = make_button("Arassala")
+        clear_btn.clicked.connect(self._clear_bills)
+        rate_row.addWidget(clear_btn)
+
+        sync_btn = make_button("↪ Smena barlagyna geçir")
+        sync_btn.clicked.connect(self._sync_bills_to_shift)
+        rate_row.addWidget(sync_btn)
+        lay.addLayout(rate_row)
+
+        cols = QHBoxLayout()
+        cols.setSpacing(14)
+
+        tmt_card = Card(margins=(12, 10, 12, 10), spacing=6)
+        t_head = QLabel("TMT kupýuralar")
+        t_head.setObjectName("cardTitle")
+        tmt_card.body.addWidget(t_head)
+
+        t_grid = QGridLayout()
+        t_grid.setSpacing(5)
+        for idx, denom in enumerate(self.TMT_DENOMS):
+            t_grid.addWidget(QLabel(f"{denom} TMT ×"), idx, 0)
+            sp = QSpinBox()
+            sp.setRange(0, 100000)
+            sp.setMinimumHeight(28)
+            sp.valueChanged.connect(self._recalculate_bills)
+            self.tmt_spins[denom] = sp
+            t_grid.addWidget(sp, idx, 1)
+        t_grid.addWidget(QLabel("Teňňe / goşmaça:"), len(self.TMT_DENOMS), 0)
+        self.tmt_extra = QDoubleSpinBox()
+        self.tmt_extra.setRange(0, 10000000)
+        self.tmt_extra.setDecimals(2)
+        self.tmt_extra.valueChanged.connect(self._recalculate_bills)
+        t_grid.addWidget(self.tmt_extra, len(self.TMT_DENOMS), 1)
+        tmt_card.body.addLayout(t_grid)
+
+        self.tmt_bills_lbl = QLabel("Sanalan TMT: 0.00")
+        self.tmt_bills_lbl.setStyleSheet(f"font-weight: 700; color: {theme.TEAL};")
+        tmt_card.body.addWidget(self.tmt_bills_lbl)
+        cols.addWidget(tmt_card, 1)
+
+        usd_card = Card(margins=(12, 10, 12, 10), spacing=6)
+        u_head = QLabel("USD kupýuralar")
+        u_head.setObjectName("cardTitle")
+        usd_card.body.addWidget(u_head)
+
+        u_grid = QGridLayout()
+        u_grid.setSpacing(5)
+        for idx, denom in enumerate(self.USD_DENOMS):
+            u_grid.addWidget(QLabel(f"${denom} USD ×"), idx, 0)
+            sp = QSpinBox()
+            sp.setRange(0, 100000)
+            sp.setMinimumHeight(28)
+            sp.valueChanged.connect(self._recalculate_bills)
+            self.usd_spins[denom] = sp
+            u_grid.addWidget(sp, idx, 1)
+        u_grid.addWidget(QLabel("Sent / goşmaça:"), len(self.USD_DENOMS), 0)
+        self.usd_extra = QDoubleSpinBox()
+        self.usd_extra.setRange(0, 10000000)
+        self.usd_extra.setDecimals(2)
+        self.usd_extra.valueChanged.connect(self._recalculate_bills)
+        u_grid.addWidget(self.usd_extra, len(self.USD_DENOMS), 1)
+        usd_card.body.addLayout(u_grid)
+
+        self.usd_bills_lbl = QLabel("Sanalan USD: $0.00")
+        self.usd_bills_lbl.setStyleSheet(f"font-weight: 700; color: {theme.NAVY};")
+        usd_card.body.addWidget(self.usd_bills_lbl)
+        cols.addWidget(usd_card, 1)
+
+        lay.addLayout(cols)
+
+        self.bills_grand_lbl = QLabel()
+        self.bills_grand_lbl.setStyleSheet(
+            f"background: #F8FAFC; border: 1px solid {theme.BORDER}; border-radius: 8px; "
+            f"padding: 8px 12px; font-weight: 800; color: {theme.NAVY};"
+        )
+        lay.addWidget(self.bills_grand_lbl)
+        return w
+
+    def _clear_bills(self) -> None:
+        for sp in (*self.tmt_spins.values(), *self.usd_spins.values()):
+            sp.setValue(0)
+        self.tmt_extra.setValue(0.0)
+        self.usd_extra.setValue(0.0)
+
+    def _get_bills_totals(self) -> tuple[Decimal, Decimal, Decimal]:
+        tmt_sum = sum(Decimal(d) * sp.value() for d, sp in self.tmt_spins.items()) + Decimal(
+            f"{self.tmt_extra.value():.2f}"
+        )
+        usd_sum = sum(Decimal(d) * sp.value() for d, sp in self.usd_spins.items()) + Decimal(
+            f"{self.usd_extra.value():.2f}"
+        )
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
+        return tmt_sum.quantize(Decimal("0.01")), usd_sum.quantize(Decimal("0.01")), rate
+
+    def _recalculate_bills(self) -> None:
+        tmt_sum, usd_sum, rate = self._get_bills_totals()
+        total_tmt = (tmt_sum + usd_sum * rate).quantize(Decimal("0.01"))
+        total_usd = (usd_sum + (tmt_sum / rate)).quantize(Decimal("0.01"))
+        self.tmt_bills_lbl.setText(f"Sanalan TMT: {tmt_sum:,.2f} TMT")
+        self.usd_bills_lbl.setText(f"Sanalan USD: ${usd_sum:,.2f} USD")
+        self.bills_grand_lbl.setText(
+            f"JEMI SANALAN:   {total_tmt:,.2f} TMT   •   ${total_usd:,.2f} USD"
+        )
+        if tmt_sum > 0 or usd_sum > 0:
+            self.actual_tmt_spin.blockSignals(True)
+            self.actual_usd_spin.blockSignals(True)
+            if tmt_sum > 0:
+                self.actual_tmt_spin.setValue(float(tmt_sum))
+            if usd_sum > 0:
+                self.actual_usd_spin.setValue(float(usd_sum))
+            self.actual_tmt_spin.blockSignals(False)
+            self.actual_usd_spin.blockSignals(False)
+            self._recalculate_diff()
+
+    def _sync_bills_to_shift(self) -> None:
+        tmt_sum, usd_sum, _rate = self._get_bills_totals()
+        self.actual_tmt_spin.setValue(float(tmt_sum))
+        self.actual_usd_spin.setValue(float(usd_sum))
+        self.tabs.setCurrentIndex(0)
+        show_toast(self, "Sanalan pul smena barlagyna geçirildi.", kind="info")
 
     def _recalculate_diff(self) -> None:
         act_usd = Decimal(f"{self.actual_usd_spin.value():.2f}")
         act_tmt = Decimal(f"{self.actual_tmt_spin.value():.2f}")
+        rate = Decimal(f"{self.rate_spin.value():.4f}") if hasattr(self, "rate_spin") else SettingsService.get_default_exchange_rate()
         diff_usd = act_usd - self.usd_expected
         diff_tmt = act_tmt - self.tmt_expected
 
@@ -390,6 +718,12 @@ class ShiftCloseDialog(QDialog):
             f"font-weight: 700; color: {theme.GREEN if diff_tmt == 0 else theme.RED};"
         )
 
+        tot_tmt = (act_tmt + act_usd * rate).quantize(Decimal("0.01"))
+        tot_usd = (act_usd + (act_tmt / rate)).quantize(Decimal("0.01"))
+        self.combined_actual_lbl.setText(
+            f"Hakyky jemi kassa (kurs {rate:.2f}):   {tot_tmt:,.2f} TMT   •   ${tot_usd:,.2f} USD"
+        )
+
         has_diff = diff_usd != Decimal("0.00") or diff_tmt != Decimal("0.00")
         self.adjust_btn.setEnabled(has_diff)
         if not has_diff:
@@ -400,7 +734,7 @@ class ShiftCloseDialog(QDialog):
         else:
             self.status_banner.setText(
                 "Programma bilen hakyky nagt puluň arasynda tapawut tapyldy. "
-                "«Kassany hakyky pul boýunça deňle» düwmesi bilen awtomatiki düzediş ýazgysyny döredip bilersiňiz."
+                "«Kassany hakyky pul boýunça deňle» düwmesi bilen düzediş geçirip bilersiňiz."
             )
             self.status_banner.setStyleSheet(
                 f"padding: 8px 10px; border-radius: 8px; background: #FFF3E6; color: {theme.ACCENT}; font-weight: 600;"
@@ -414,7 +748,19 @@ class ShiftCloseDialog(QDialog):
         if diff_usd == 0 and diff_tmt == 0:
             return
 
-        rate = SettingsService.get_default_exchange_rate()
+        ans = QMessageBox.question(
+            self,
+            "Kassany deňlemek",
+            f"Kassa balanslaryny hakyky pula deňlemelimi?\n"
+            f"• USD düzedişi: {diff_usd:+,.2f} USD (täze: ${act_usd:,.2f})\n"
+            f"• TMT düzedişi: {diff_tmt:+,.2f} TMT (täze: {act_tmt:,.2f})",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        rate = Decimal(f"{self.rate_spin.value():.4f}")
         try:
             with SessionLocal() as session:
                 if diff_usd != 0:
@@ -424,7 +770,7 @@ class ShiftCloseDialog(QDialog):
                         amount=abs(diff_usd),
                         currency="USD",
                         exchange_rate=rate,
-                        reason="Smena ýapylanda kassa barlagy",
+                        reason="Smena we kassa barlagy",
                     )
                 if diff_tmt != 0:
                     FinanceService.record_cash_adjustment(
@@ -433,14 +779,14 @@ class ShiftCloseDialog(QDialog):
                         amount=abs(diff_tmt),
                         currency="TMT",
                         exchange_rate=rate,
-                        reason="Smena ýapylanda kassa barlagy",
+                        reason="Smena we kassa barlagy",
                     )
                 session.commit()
             self._load_shift_stats()
             self.exp_usd_lbl.setText(f"${money_str(self.usd_expected)}")
             self.exp_tmt_lbl.setText(f"{money_str(self.tmt_expected)} m.")
             self._recalculate_diff()
-            QMessageBox.information(self, "Kassa deňlendi", "Kassa balansy hakyky galyndy boýunça deňlendi.")
+            show_toast(self, "Kassa balanslary hakyky galyndy boýunça deňlendi.", kind="success")
         except (ValueError, TypeError, SQLAlchemyError) as err:
             QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
@@ -467,228 +813,27 @@ class ShiftCloseDialog(QDialog):
         )
 
 
-class CashCountDialog(QDialog):
-    """Калькулятор пересчёта всей кассы по номиналам купюр (TMT и USD) с общим итогом по курсу."""
-
-    TMT_DENOMS = (500, 100, 50, 20, 10, 5, 1)
-    USD_DENOMS = (100, 50, 20, 10, 5, 1)
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Kassany sana (kupýura kalkulýatory)")
-        self.setMinimumWidth(680)
-        self.setStyleSheet(theme.STYLE)
-
-        self.tmt_spins: dict[int, QSpinBox] = {}
-        self.usd_spins: dict[int, QSpinBox] = {}
-        self.expected_tmt = Decimal("0.00")
-        self.expected_usd = Decimal("0.00")
-
-        with SessionLocal() as session:
-            bal = FinanceService.get_register_balances(session)
-            self.expected_tmt = bal["tmt_balance"]
-            self.expected_usd = bal["usd_balance"]
-
-        self._build_ui()
-        self._recalculate()
-
-    def _build_ui(self) -> None:
-        from PySide6.QtWidgets import QSpinBox
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
-
-        title = QLabel("🧮 Kassadaky ähli puly sanamak (TMT + USD)")
-        title.setObjectName("pageTitle")
-        root.addWidget(title)
-
-        rate_row = QHBoxLayout()
-        rate_row.addWidget(QLabel("Hasaplama kursy (1 USD = X TMT):"))
-        self.rate_spin = QDoubleSpinBox()
-        self.rate_spin.setRange(0.0001, 100000)
-        self.rate_spin.setDecimals(4)
-        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
-        self.rate_spin.valueChanged.connect(self._recalculate)
-        rate_row.addWidget(self.rate_spin)
-        rate_row.addStretch()
-
-        clear_btn = make_button("Arassala")
-        clear_btn.clicked.connect(self._clear_all)
-        rate_row.addWidget(clear_btn)
-        root.addLayout(rate_row)
-
-        cols = QHBoxLayout()
-        cols.setSpacing(16)
-
-        # TMT kupýuralar
-        tmt_card = Card(margins=(14, 12, 14, 12), spacing=8)
-        t_head = QLabel(f"TMT kupýuralar (programmadaky: {self.expected_tmt:,.2f} TMT)")
-        t_head.setObjectName("cardTitle")
-        tmt_card.body.addWidget(t_head)
-
-        t_grid = QGridLayout()
-        t_grid.setSpacing(6)
-        for row_idx, denom in enumerate(self.TMT_DENOMS):
-            t_grid.addWidget(QLabel(f"{denom} TMT  ×"), row_idx, 0)
-            sp = QSpinBox()
-            sp.setRange(0, 100000)
-            sp.setMinimumHeight(30)
-            sp.valueChanged.connect(self._recalculate)
-            self.tmt_spins[denom] = sp
-            t_grid.addWidget(sp, row_idx, 1)
-        t_grid.addWidget(QLabel("Goşmaça / teňňe:"), len(self.TMT_DENOMS), 0)
-        self.tmt_extra = QDoubleSpinBox()
-        self.tmt_extra.setRange(0, 10000000)
-        self.tmt_extra.setDecimals(2)
-        self.tmt_extra.valueChanged.connect(self._recalculate)
-        t_grid.addWidget(self.tmt_extra, len(self.TMT_DENOMS), 1)
-        tmt_card.body.addLayout(t_grid)
-
-        self.tmt_total_lbl = QLabel("Jemi TMT: 0.00")
-        self.tmt_total_lbl.setStyleSheet(f"font-weight: 700; font-size: 11pt; color: {theme.TEAL};")
-        tmt_card.body.addWidget(self.tmt_total_lbl)
-        cols.addWidget(tmt_card, 1)
-
-        # USD kupýuralar
-        usd_card = Card(margins=(14, 12, 14, 12), spacing=8)
-        u_head = QLabel(f"USD kupýuralar (programmadaky: ${self.expected_usd:,.2f})")
-        u_head.setObjectName("cardTitle")
-        usd_card.body.addWidget(u_head)
-
-        u_grid = QGridLayout()
-        u_grid.setSpacing(6)
-        for row_idx, denom in enumerate(self.USD_DENOMS):
-            u_grid.addWidget(QLabel(f"${denom} USD  ×"), row_idx, 0)
-            sp = QSpinBox()
-            sp.setRange(0, 100000)
-            sp.setMinimumHeight(30)
-            sp.valueChanged.connect(self._recalculate)
-            self.usd_spins[denom] = sp
-            u_grid.addWidget(sp, row_idx, 1)
-        u_grid.addWidget(QLabel("Goşmaça / sent:"), len(self.USD_DENOMS), 0)
-        self.usd_extra = QDoubleSpinBox()
-        self.usd_extra.setRange(0, 10000000)
-        self.usd_extra.setDecimals(2)
-        self.usd_extra.valueChanged.connect(self._recalculate)
-        u_grid.addWidget(self.usd_extra, len(self.USD_DENOMS), 1)
-        usd_card.body.addLayout(u_grid)
-
-        self.usd_total_lbl = QLabel("Jemi USD: $0.00")
-        self.usd_total_lbl.setStyleSheet(f"font-weight: 700; font-size: 11pt; color: {theme.NAVY};")
-        usd_card.body.addWidget(self.usd_total_lbl)
-        cols.addWidget(usd_card, 1)
-
-        root.addLayout(cols)
-
-        summary_card = Card(margins=(16, 12, 16, 12), spacing=6)
-        self.grand_total_lbl = QLabel()
-        self.grand_total_lbl.setStyleSheet(f"font-size: 13pt; font-weight: 800; color: {theme.NAVY};")
-        self.diff_lbl = QLabel()
-        self.diff_lbl.setWordWrap(True)
-        summary_card.body.addWidget(self.grand_total_lbl)
-        summary_card.body.addWidget(self.diff_lbl)
-        root.addWidget(summary_card)
-
-        footer = QHBoxLayout()
-        self.apply_btn = make_button("⚖ Kassany sanalan pula deňle", "primary")
-        self.apply_btn.clicked.connect(self._apply_counted_to_registers)
-        footer.addWidget(self.apply_btn)
-        footer.addStretch()
-        close_btn = make_button("Ýap")
-        close_btn.clicked.connect(self.accept)
-        footer.addWidget(close_btn)
-        root.addLayout(footer)
-
-    def _clear_all(self) -> None:
-        for sp in (*self.tmt_spins.values(), *self.usd_spins.values()):
-            sp.setValue(0)
-        self.tmt_extra.setValue(0.0)
-        self.usd_extra.setValue(0.0)
-
-    def _get_totals(self) -> tuple[Decimal, Decimal, Decimal]:
-        tmt_sum = sum(Decimal(d) * sp.value() for d, sp in self.tmt_spins.items()) + Decimal(f"{self.tmt_extra.value():.2f}")
-        usd_sum = sum(Decimal(d) * sp.value() for d, sp in self.usd_spins.items()) + Decimal(f"{self.usd_extra.value():.2f}")
-        rate = Decimal(f"{self.rate_spin.value():.4f}")
-        return tmt_sum.quantize(Decimal("0.01")), usd_sum.quantize(Decimal("0.01")), rate
-
-    def _recalculate(self) -> None:
-        tmt_sum, usd_sum, rate = self._get_totals()
-        total_in_tmt = (tmt_sum + usd_sum * rate).quantize(Decimal("0.01"))
-        total_in_usd = (usd_sum + (tmt_sum / rate)).quantize(Decimal("0.01"))
-
-        diff_tmt = tmt_sum - self.expected_tmt
-        diff_usd = usd_sum - self.expected_usd
-
-        self.tmt_total_lbl.setText(f"Sanalan TMT: {tmt_sum:,.2f} TMT  (tapawut: {diff_tmt:+,.2f})")
-        self.usd_total_lbl.setText(f"Sanalan USD: ${usd_sum:,.2f} USD  (tapawut: {diff_usd:+,.2f})")
-        self.grand_total_lbl.setText(
-            f"JEMI SANALAN KASSA:   {total_in_tmt:,.2f} TMT   •   ${total_in_usd:,.2f} USD"
-        )
-
-        sys_total_tmt = (self.expected_tmt + self.expected_usd * rate).quantize(Decimal("0.01"))
-        total_diff_tmt = total_in_tmt - sys_total_tmt
-        self.diff_lbl.setText(
-            f"Programmadaky jemi kassa: {sys_total_tmt:,.2f} TMT   |   "
-            f"Jemi tapawut: {total_diff_tmt:+,.2f} TMT"
-        )
-        self.apply_btn.setEnabled(diff_tmt != Decimal("0.00") or diff_usd != Decimal("0.00"))
-
-    def _apply_counted_to_registers(self) -> None:
-        tmt_sum, usd_sum, rate = self._get_totals()
-        diff_tmt = tmt_sum - self.expected_tmt
-        diff_usd = usd_sum - self.expected_usd
-        ans = QMessageBox.question(
-            self,
-            "Kassany deňlemek",
-            f"Kassa balanslaryny sanalan pula deňlemelimi?\n"
-            f"• TMT düzedişi: {diff_tmt:+,.2f} TMT (täze balans: {tmt_sum:,.2f})\n"
-            f"• USD düzedişi: {diff_usd:+,.2f} USD (täze balans: ${usd_sum:,.2f})",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ans != QMessageBox.StandardButton.Yes:
-            return
-        try:
-            with SessionLocal() as session, session.begin():
-                if diff_tmt != Decimal("0.00"):
-                    FinanceService.record_cash_adjustment(
-                        session=session,
-                        direction="income" if diff_tmt > 0 else "expense",
-                        amount=abs(diff_tmt),
-                        currency="TMT",
-                        exchange_rate=rate,
-                        reason="Kupýura sanawy boýunça kassa deňlemesi",
-                    )
-                if diff_usd != Decimal("0.00"):
-                    FinanceService.record_cash_adjustment(
-                        session=session,
-                        direction="income" if diff_usd > 0 else "expense",
-                        amount=abs(diff_usd),
-                        currency="USD",
-                        exchange_rate=rate,
-                        reason="Kupýura sanawy boýunça kassa deňlemesi",
-                    )
-            self.expected_tmt = tmt_sum
-            self.expected_usd = usd_sum
-            self._recalculate()
-            QMessageBox.information(self, "Taýýar", "Kassa balanslary sanalan pula deňlendi.")
-        except (ValueError, SQLAlchemyError) as err:
-            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+# Обратная совместимость имён классов для существующих тестов и импортов
+ShiftCloseDialog = ShiftAndCashDialog
+CashCountDialog = ShiftAndCashDialog
 
 
 class FinancePage(QWidget):
-    """Страница «Финансы»: балансы касс, 4 категории долгов, журнал транзакций, расчеты с клиентами и поставщиками."""
+    """Страница «Финансы»: объединённый баланс кассы, Simurg, стоимость склада, поставщики и журнал."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("page")
         self.journal_entries: list[dict] = []
-        self.customer_rows: list[dict] = []
+        self.simurg_rows: list[dict] = []
+        self.simurg_summary: dict = {}
         self.supplier_rows: list[dict] = []
 
         self._build_ui()
         self.refresh_data()
+
+    def open_simurg_tab(self) -> None:
+        self.tabs.setCurrentIndex(1)
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -701,32 +846,24 @@ class FinancePage(QWidget):
         title = QLabel("Maliýe we hasaplaşyklar")
         title.setObjectName("pageTitle")
         subtitle = QLabel(
-            "USD we TMT aýratyn hasaby • Kassalar, müşderi we üpjün ediji bergileri, hereketler žurnaly"
+            "Kassa balansy, Simurg garaşaryna hasaplaşyklary, sklad bahasy we üpjün edijiler"
         )
         subtitle.setObjectName("mutedText")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
         header.addLayout(title_col, 1)
 
-        expense_btn = make_button("+ Çykdajy ýaz")
-        expense_btn.clicked.connect(self._open_expense_dialog)
-        header.addWidget(expense_btn)
-
         adjust_btn = make_button("Düzediş / Storno")
         adjust_btn.clicked.connect(self._open_adjustment_dialog)
         header.addWidget(adjust_btn)
-
-        count_btn = make_button("🧮 Kassany sana")
-        count_btn.clicked.connect(self._open_cash_count_dialog)
-        header.addWidget(count_btn)
 
         zero_cash_btn = make_button("🧹 Kassany nolla", "danger")
         zero_cash_btn.clicked.connect(self._zero_cash_dialog)
         header.addWidget(zero_cash_btn)
 
-        shift_btn = make_button("🔒 Smenany ýapmak / Barlag")
-        shift_btn.clicked.connect(self._open_shift_close_dialog)
-        header.addWidget(shift_btn)
+        shift_cash_btn = make_button("🔒 Smena we kassa sanawy", "dark")
+        shift_cash_btn.clicked.connect(self._open_shift_and_cash_dialog)
+        header.addWidget(shift_cash_btn)
 
         refresh_btn = make_button("↻ Täzele", "primary")
         refresh_btn.clicked.connect(self.refresh_data)
@@ -734,122 +871,99 @@ class FinancePage(QWidget):
 
         root.addLayout(header)
 
-        self.combined_cash_banner = QLabel("Jemi kassa (ähli walýutalar): 0.00 TMT  •  $0.00 USD")
-        self.combined_cash_banner.setStyleSheet(
-            f"background: #EFF6FF; color: {theme.NAVY}; border: 1px solid #BFDBFE; "
-            "border-radius: 8px; padding: 8px 14px; font-weight: 700; font-size: 10.5pt;"
-        )
-        root.addWidget(self.combined_cash_banner)
-
+        # Ровная сетка 2x2 из 4 объединённых карточек
         cards_grid = QGridLayout()
-        cards_grid.setSpacing(12)
+        cards_grid.setSpacing(14)
 
-        self.usd_cash_label = QLabel("0.00 USD")
-        self.usd_flow_label = QLabel("Girdeji: 0.00 | Çykdajy: 0.00")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "Kassa balansy USD",
-                self.usd_cash_label,
-                self.usd_flow_label,
-                theme.NAVY,
-            ),
-            0,
-            0,
+        # 1. Kassa balansy (общая USD + TMT)
+        self.cash_main_label = QLabel("$0.00 USD  |  0.00 TMT")
+        self.cash_eq_label = QLabel("Jemi: 0.00 TMT • $0.00 USD")
+        self.cash_flow_label = QLabel("Girdeji / Çykdajy")
+        cash_card = self._build_rich_card(
+            "💵 Kassa balansy (USD / TMT)",
+            self.cash_main_label,
+            self.cash_eq_label,
+            self.cash_flow_label,
+            theme.NAVY,
+            accent_sub_color=theme.TEAL,
         )
+        cards_grid.addWidget(cash_card, 0, 0)
 
-        self.tmt_cash_label = QLabel("0.00 TMT")
-        self.tmt_flow_label = QLabel("Girdeji: 0.00 | Çykdajy: 0.00")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "Kassa balansy TMT",
-                self.tmt_cash_label,
-                self.tmt_flow_label,
-                theme.TEAL,
-            ),
-            0,
-            1,
+        # 2. Simurg bergisi (кликабельная -> открывает вкладку Simurg)
+        self.simurg_main_label = QLabel("$0.00  |  0.00 TMT")
+        self.simurg_ready_label = QLabel("✔ Almak üçin taýýar (≥5 gün): 0.00 TMT")
+        self.simurg_devices_label = QLabel("0 enjam • 0 taýýar / 0 garaşylýar")
+        simurg_card = self._build_rich_card(
+            "🏦 Simurg bergisi (5 günlük töleg) →",
+            self.simurg_main_label,
+            self.simurg_ready_label,
+            self.simurg_devices_label,
+            theme.ACCENT,
+            accent_sub_color=theme.GREEN,
+            clickable=True,
         )
+        simurg_card.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        cards_grid.addWidget(simurg_card, 0, 1)
 
-        self.cust_debt_val = QLabel("USD: 0.00 | TMT: 0.00")
-        self.cust_debt_sub = QLabel("Müşderileriň dükana bergisi (satyşlar)")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "1. Müşderileriň dükana bergisi",
-                self.cust_debt_val,
-                self.cust_debt_sub,
-                theme.ACCENT,
-                small_value=True,
-            ),
-            0,
-            2,
+        # 3. Sklad jemi baha (USD / TMT)
+        self.stock_val_main_label = QLabel("$0.00 USD  |  0.00 TMT")
+        self.stock_val_eq_label = QLabel("Asyl: $0.00 USD + 0.00 TMT")
+        self.stock_val_units_label = QLabel("0 enjam • 0 aksessuar")
+        stock_card = self._build_rich_card(
+            "🏪 Sklad jemi baha (USD / TMT)",
+            self.stock_val_main_label,
+            self.stock_val_eq_label,
+            self.stock_val_units_label,
+            theme.BLUE,
+            accent_sub_color=theme.NAVY,
         )
+        cards_grid.addWidget(stock_card, 1, 0)
 
-        self.sup_payable_val = QLabel("USD: 0.00 | TMT: 0.00")
-        self.sup_payable_sub = QLabel("Dükanyň üpjün edijilere bergisi (alyşlar)")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "2. Dükanyň üpjün edijilere bergisi",
-                self.sup_payable_val,
-                self.sup_payable_sub,
-                theme.RED,
-                small_value=True,
-            ),
-            1,
-            0,
+        # 4. Dükanyň üpjün edijilere bergisi (кликабельная -> вкладка поставщиков)
+        self.sup_payable_main = QLabel("$0.00 USD  |  0.00 TMT")
+        self.sup_payable_sub = QLabel("Işjeň alyşlar boýunça tölenmedik galyndy")
+        self.sup_payable_hint = QLabel("Hasaplaşyk üçin basyň →")
+        sup_card = self._build_rich_card(
+            "📦 Üpjün edijilere bergi (USD / TMT)",
+            self.sup_payable_main,
+            self.sup_payable_sub,
+            self.sup_payable_hint,
+            theme.RED,
+            accent_sub_color=theme.MUTED,
+            clickable=True,
         )
+        sup_card.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+        cards_grid.addWidget(sup_card, 1, 1)
 
-        self.store_to_cust_val = QLabel("USD: 0.00 | TMT: 0.00")
-        self.store_to_cust_sub = QLabel("Dükanyň müşderilere bergisi (satyş ýatyrma)")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "3. Dükanyň müşderilere bergisi",
-                self.store_to_cust_val,
-                self.store_to_cust_sub,
-                "#7C3AED",
-                small_value=True,
-            ),
-            1,
-            1,
-        )
-
-        self.sup_to_store_val = QLabel("USD: 0.00 | TMT: 0.00")
-        self.sup_to_store_sub = QLabel("Üpjün edijileriň dükana bergisi (alyş ýatyrma)")
-        cards_grid.addWidget(
-            self._build_metric_card(
-                "4. Üpjün edijileriň dükana bergisi",
-                self.sup_to_store_val,
-                self.sup_to_store_sub,
-                theme.BLUE,
-                small_value=True,
-            ),
-            1,
-            2,
-        )
-
+        cards_grid.setColumnStretch(0, 1)
+        cards_grid.setColumnStretch(1, 1)
         root.addLayout(cards_grid)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_journal_tab(), "Maliýe amallary žurnaly")
-        self.tabs.addTab(self._create_customer_debts_tab(), "Müşderiler bilen hasaplaşyk")
+        self.tabs.addTab(self._create_simurg_tab(), "🏦 Simurg hasaplaşyklary")
         self.tabs.addTab(self._create_supplier_debts_tab(), "Üpjün edijiler bilen hasaplaşyk")
         root.addWidget(self.tabs, 1)
 
-    def _build_metric_card(
+    def _build_rich_card(
         self,
         title: str,
         value_label: QLabel,
+        mid_label: QLabel,
         sub_label: QLabel,
         color: str,
-        small_value: bool = False,
+        accent_sub_color: str = theme.MUTED,
+        clickable: bool = False,
     ) -> Card:
-        card = Card(margins=(16, 12, 16, 12), spacing=4)
+        card = ClickableCard(margins=(16, 12, 16, 12), spacing=3) if clickable else Card(margins=(16, 12, 16, 12), spacing=3)
         t = QLabel(title)
         t.setObjectName("mutedText")
-        font_sz = "13.5pt" if small_value else "17pt"
-        value_label.setStyleSheet(f"font-size: {font_sz}; font-weight: 700; color: {color};")
+        value_label.setStyleSheet(f"font-size: 14.5pt; font-weight: 800; color: {color};")
+        mid_label.setStyleSheet(f"font-size: 9.5pt; font-weight: 700; color: {accent_sub_color};")
         sub_label.setStyleSheet(f"font-size: 8.5pt; color: {theme.MUTED};")
         card.body.addWidget(t)
         card.body.addWidget(value_label)
+        card.body.addWidget(mid_label)
         card.body.addWidget(sub_label)
         return card
 
@@ -892,7 +1006,7 @@ class FinancePage(QWidget):
         self.journal_type_combo = style_combo(QComboBox())
         self.journal_type_combo.addItem("Ähli amal görnüşleri", None)
         self.journal_type_combo.addItem("Satyş tölegi", "sale_payment")
-        self.journal_type_combo.addItem("Müşderiniň bergi tölegi", "customer_debt_payment")
+        self.journal_type_combo.addItem("Simurg / Bergi tölegi", "customer_debt_payment")
         self.journal_type_combo.addItem("Müşderä gaýtargy", "sale_change")
         self.journal_type_combo.addItem("Çek ýatyrmada yzyna gaýtarma", "sale_refund")
         self.journal_type_combo.addItem("Üpjün edijä töleg", "purchase_payment")
@@ -922,21 +1036,15 @@ class FinancePage(QWidget):
 
         self.journal_table = QTableWidget(0, 9)
         self.journal_table.setHorizontalHeaderLabels([
-            "ID",
-            "Sene",
-            "Ugur",
-            "Amal görnüşi",
-            "Jemi",
-            "Walýuta",
-            "Kurs",
-            "Resminama",
-            "Bellik",
+            "ID", "Sene", "Ugur", "Amal görnüşi", "Jemi", "Walýuta", "Kurs", "Resminama", "Bellik",
         ])
         configure_table(self.journal_table)
-        self.journal_table.horizontalHeader().setSectionResizeMode(
-            8, QHeaderView.ResizeMode.Stretch
-        )
+        self.journal_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
         self.journal_table.cellDoubleClicked.connect(self._open_journal_document)
+        for seq in ("Return", "Enter"):
+            sc = QShortcut(QKeySequence(seq), self.journal_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_journal_doc)
         layout.addWidget(self.journal_table, 1)
 
         self.period_summary_label = QLabel()
@@ -945,62 +1053,71 @@ class FinancePage(QWidget):
 
         return widget
 
-    def _create_customer_debts_tab(self) -> QWidget:
+    def _create_simurg_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
         top = QHBoxLayout()
-        self.cust_filter_combo = style_combo(QComboBox())
-        self.cust_filter_combo.addItem("Ähli açyk bergiler", "open")
-        self.cust_filter_combo.addItem("Diňe müşderileriň dükana bergisi", "customer_owes_store")
-        self.cust_filter_combo.addItem("Diňe dükanyň müşderilere bergisi (ýatyrma)", "store_owes_customer")
-        self.cust_filter_combo.addItem("Ähli çekler (ýapylanlar bilen)", "all")
-        self.cust_filter_combo.currentIndexChanged.connect(self._load_customer_receivables)
-        top.addWidget(self.cust_filter_combo)
+        top.setSpacing(8)
 
-        self.cust_search = QLineEdit()
-        self.cust_search.setPlaceholderText("Müşderi, telefon ýa-da çek belgisi boýunça gözleg...")
-        self.cust_search.setClearButtonEnabled(True)
-        self.cust_search.textChanged.connect(self._load_customer_receivables)
-        top.addWidget(self.cust_search, 1)
+        self.simurg_filter_combo = style_combo(QComboBox())
+        self.simurg_filter_combo.addItem("Ähli açyk Simurg bergileri", "open")
+        self.simurg_filter_combo.addItem("🟢 Diňe almak üçin taýýar (≥5 gün)", "ready")
+        self.simurg_filter_combo.addItem("🟡 Garaşylýanlar (<5 gün)", "pending")
+        self.simurg_filter_combo.addItem("Ähli çekler (tölenenler bilen)", "all")
+        self.simurg_filter_combo.currentIndexChanged.connect(self._load_simurg_table)
+        top.addWidget(self.simurg_filter_combo)
 
-        open_btn = QPushButton("Çeki aç / Töleg kabul et")
-        open_btn.setObjectName("primaryBtn")
-        open_btn.clicked.connect(self._open_selected_customer_sale)
+        self.simurg_search = QLineEdit()
+        self.simurg_search.setPlaceholderText("Çek, haryt/IMEI ýa-da müşderi boýunça gözleg...")
+        self.simurg_search.setClearButtonEnabled(True)
+        self.simurg_search.textChanged.connect(self._load_simurg_table)
+        top.addWidget(self.simurg_search, 1)
+
+        collect_ready_btn = make_button("💰 Taýýar puly al (≥5 gün)", "success")
+        collect_ready_btn.clicked.connect(self._collect_all_ready_simurg)
+        top.addWidget(collect_ready_btn)
+
+        collect_custom_btn = make_button("💵 Töleg al (summa)", "primary")
+        collect_custom_btn.clicked.connect(self._open_simurg_payout_dialog)
+        top.addWidget(collect_custom_btn)
+
+        open_btn = make_button("📄 Çeki aç")
+        open_btn.clicked.connect(self._open_selected_simurg_sale)
         top.addWidget(open_btn)
 
-        pay_full_btn = make_button("✔ Doly hasaplaş (kassa)")
-        pay_full_btn.clicked.connect(lambda: self._settle_selected_customer_debt(with_cash=True))
-        top.addWidget(pay_full_btn)
-
         zero_debt_btn = make_button("🧹 Bergini nolla", "danger")
-        zero_debt_btn.clicked.connect(lambda: self._settle_selected_customer_debt(with_cash=False))
+        zero_debt_btn.clicked.connect(self._zero_selected_simurg_debt)
         top.addWidget(zero_debt_btn)
 
         layout.addLayout(top)
 
-        self.cust_table = QTableWidget(0, 9)
-        self.cust_table.setHorizontalHeaderLabels([
+        self.simurg_table = QTableWidget(0, 9)
+        self.simurg_table.setHorizontalHeaderLabels([
             "ID",
             "Çek",
-            "Sene",
-            "Müşderi",
-            "Walýuta (Kurs)",
-            "Çekiň jemi",
-            "Tölendi",
-            "Müşderiniň bergisi",
-            "Dükanyň müşderä bergisi",
+            "Satyş senesi",
+            "Aljak güni (+5g)",
+            "Haryt / IMEI",
+            "Müşderi / Arza",
+            "Jemi",
+            "Galan bergi",
+            "Ýagdaýy",
         ])
-        configure_table(self.cust_table)
-        self.cust_table.horizontalHeader().setSectionResizeMode(
-            3, QHeaderView.ResizeMode.Stretch
-        )
-        self.cust_table.cellDoubleClicked.connect(
-            lambda _r, _c: self._open_selected_customer_sale()
-        )
-        layout.addWidget(self.cust_table, 1)
+        configure_table(self.simurg_table)
+        self.simurg_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.simurg_table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected_simurg_sale())
+        for seq in ("Return", "Enter"):
+            sc = QShortcut(QKeySequence(seq), self.simurg_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_simurg_sale)
+        layout.addWidget(self.simurg_table, 1)
+
+        self.simurg_footer_label = QLabel()
+        self.simurg_footer_label.setObjectName("mutedText")
+        layout.addWidget(self.simurg_footer_label)
 
         return widget
 
@@ -1012,9 +1129,7 @@ class FinancePage(QWidget):
 
         top = QHBoxLayout()
         self.sup_filter_combo = style_combo(QComboBox())
-        self.sup_filter_combo.addItem("Ähli açyk bergiler", "open")
-        self.sup_filter_combo.addItem("Diňe dükanyň üpjün edijilere bergisi", "store_owes_supplier")
-        self.sup_filter_combo.addItem("Diňe üpjün edijileriň dükana bergisi (ýatyrma)", "supplier_owes_store")
+        self.sup_filter_combo.addItem("Açyk bergiler", "open")
         self.sup_filter_combo.addItem("Ähli alyşlar (ýapylanlar bilen)", "all")
         self.sup_filter_combo.currentIndexChanged.connect(self._load_supplier_payables)
         top.addWidget(self.sup_filter_combo)
@@ -1025,8 +1140,7 @@ class FinancePage(QWidget):
         self.sup_search.textChanged.connect(self._load_supplier_payables)
         top.addWidget(self.sup_search, 1)
 
-        open_btn = QPushButton("Alyşy aç / Töle / Gaýtarma")
-        open_btn.setObjectName("primaryBtn")
+        open_btn = make_button("Alyşy aç / Töle", "primary")
         open_btn.clicked.connect(self._open_selected_supplier_purchase)
         top.addWidget(open_btn)
 
@@ -1040,7 +1154,7 @@ class FinancePage(QWidget):
 
         layout.addLayout(top)
 
-        self.sup_table = QTableWidget(0, 8)
+        self.sup_table = QTableWidget(0, 7)
         self.sup_table.setHorizontalHeaderLabels([
             "Alyş №",
             "Sene",
@@ -1048,16 +1162,15 @@ class FinancePage(QWidget):
             "Walýuta (Kurs)",
             "Alyş jemi",
             "Tölendi",
-            "Dükanyň üpjün edijä bergisi",
-            "Üpjün edijiniň dükana bergisi",
+            "Galan bergi",
         ])
         configure_table(self.sup_table)
-        self.sup_table.horizontalHeader().setSectionResizeMode(
-            2, QHeaderView.ResizeMode.Stretch
-        )
-        self.sup_table.cellDoubleClicked.connect(
-            lambda _r, _c: self._open_selected_supplier_purchase()
-        )
+        self.sup_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.sup_table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected_supplier_purchase())
+        for seq in ("Return", "Enter"):
+            sc = QShortcut(QKeySequence(seq), self.sup_table)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._open_selected_supplier_purchase)
         layout.addWidget(self.sup_table, 1)
 
         return widget
@@ -1069,37 +1182,57 @@ class FinancePage(QWidget):
             combined = FinanceService.get_combined_cash_totals(session, rate)
             debts = FinanceService.get_all_outstanding_balances(session)
             flow = FinanceService.get_period_cash_summary(session)
+            simurg = FinanceService.get_simurg_summary(session, include_paid=False)
+            stock_val = ReportService.get_stock_valuation(session, rate)
             session.commit()
 
-        self.combined_cash_banner.setText(
-            f"💰 Jemi kassa (USD + TMT, kurs {combined['exchange_rate']:.4f}):   "
-            f"{combined['total_in_tmt']:,.2f} TMT   •   ${combined['total_in_usd']:,.2f} USD"
+        self.simurg_summary = simurg
+
+        # 1. Kassa balansy (объединённый)
+        self.cash_main_label.setText(
+            f"${balances['usd_balance']:,.2f} USD   |   {balances['tmt_balance']:,.2f} TMT"
+        )
+        self.cash_eq_label.setText(
+            f"Jemi (kurs {combined['exchange_rate']:.2f}):  {combined['total_in_tmt']:,.2f} TMT  •  ${combined['total_in_usd']:,.2f} USD"
+        )
+        self.cash_flow_label.setText(
+            f"Girdeji: +${flow['USD']['income']:,.2f} / +{flow['TMT']['income']:,.2f} m.   |   "
+            f"Çykdajy: −${flow['USD']['expense']:,.2f} / −{flow['TMT']['expense']:,.2f} m."
         )
 
-        self.usd_cash_label.setText(f"${balances['usd_balance']:,.2f} USD")
-        self.usd_flow_label.setText(
-            f"Jemi girdeji: +${flow['USD']['income']:,.2f} | Çykdajy: −${flow['USD']['expense']:,.2f}"
+        # 2. Simurg bergisi
+        tot = simurg["total_debt"]
+        rdy = simurg["ready_amount"]
+        self.simurg_main_label.setText(
+            f"${tot['USD']:,.2f} USD   |   {tot['TMT']:,.2f} TMT"
+        )
+        self.simurg_ready_label.setText(
+            f"✔ Almak üçin taýýar (≥5 gün):  ${rdy['USD']:,.2f}  |  {rdy['TMT']:,.2f} TMT"
+        )
+        self.simurg_devices_label.setText(
+            f"{simurg['total_items_count']} enjam ({simurg['ready_items_count']} taýýar • "
+            f"{simurg['pending_items_count']} garaşylýar)  •  {simurg['open_sales_count']} açyk çek"
         )
 
-        self.tmt_cash_label.setText(f"{balances['tmt_balance']:,.2f} TMT")
-        self.tmt_flow_label.setText(
-            f"Jemi girdeji: +{flow['TMT']['income']:,.2f} m. | Çykdajy: −{flow['TMT']['expense']:,.2f} m."
+        # 3. Sklad jemi baha
+        self.stock_val_main_label.setText(
+            f"${stock_val['total_in_usd']:,.2f} USD   |   {stock_val['total_in_tmt']:,.2f} TMT"
+        )
+        self.stock_val_eq_label.setText(
+            f"Asyl walýuta: ${stock_val['usd_native']:,.2f} USD + {stock_val['tmt_native']:,.2f} TMT (kurs {stock_val['exchange_rate']:.2f})"
+        )
+        self.stock_val_units_label.setText(
+            f"{stock_val['devices_count']} enjam (IMEI) • {stock_val['accessories_count']} aksessuar (jemi {stock_val['total_units']} sany)"
         )
 
-        cd = debts["customer_debts"]
-        self.cust_debt_val.setText(f"USD: ${cd['USD']:,.2f}  |  TMT: {cd['TMT']:,.2f} m.")
-
+        # 4. Üpjün edijilere bergi
         sp = debts["supplier_payables"]
-        self.sup_payable_val.setText(f"USD: ${sp['USD']:,.2f}  |  TMT: {sp['TMT']:,.2f} m.")
-
-        stc = debts["store_debts_to_customers"]
-        self.store_to_cust_val.setText(f"USD: ${stc['USD']:,.2f}  |  TMT: {stc['TMT']:,.2f} m.")
-
-        sts = debts["supplier_debts_to_store"]
-        self.sup_to_store_val.setText(f"USD: ${sts['USD']:,.2f}  |  TMT: {sts['TMT']:,.2f} m.")
+        self.sup_payable_main.setText(
+            f"${sp['USD']:,.2f} USD   |   {sp['TMT']:,.2f} TMT"
+        )
 
         self._load_journal()
-        self._load_customer_receivables()
+        self._load_simurg_table()
         self._load_supplier_payables()
 
     def _load_journal(self, *_args) -> None:
@@ -1158,59 +1291,79 @@ class FinancePage(QWidget):
         t = period_flow["TMT"]
         self.period_summary_label.setText(
             f"Saýlanan döwür — USD: Girdeji +${u['income']:,.2f}, Çykdajy −${u['expense']:,.2f}, Arassa akym: ${u['net']:,.2f}   |   "
-            f"TMT: Girdeji +{t['income']:,.2f} m., Çykdajy −{t['expense']:,.2f} m., Arassa akym: {t['net']:,.2f} m. "
-            "(Bagly resminamany açmak üçin setiri iki gezek basyň)"
+            f"TMT: Girdeji +{t['income']:,.2f} m., Çykdajy −{t['expense']:,.2f} m., Arassa akym: {t['net']:,.2f} m."
         )
 
-    def _load_customer_receivables(self, *_args) -> None:
-        mode = self.cust_filter_combo.currentData()
-        query = self.cust_search.text().strip().lower()
+    def _load_simurg_table(self, *_args) -> None:
+        mode = self.simurg_filter_combo.currentData()
+        query = self.simurg_search.text().strip().lower()
 
         with SessionLocal() as session:
-            all_rows = FinanceService.get_customer_receivables_list(
+            summary = FinanceService.get_simurg_summary(
                 session=session,
                 include_paid=(mode == "all"),
             )
+        self.simurg_summary = summary
 
         filtered = []
-        for r in all_rows:
-            if mode == "customer_owes_store" and r["remaining_customer_debt"] <= 0:
+        for r in summary["rows"]:
+            if mode == "open" and r["remaining_debt"] <= 0:
                 continue
-            if mode == "store_owes_customer" and r["store_debt_to_customer"] <= 0:
+            if mode == "ready" and (r["remaining_debt"] <= 0 or not r["is_ready"]):
+                continue
+            if mode == "pending" and (r["remaining_debt"] <= 0 or r["is_ready"]):
                 continue
             if query:
-                hay = f"{r['receipt_number']} {r['customer_name']} {r['customer_phone']}".lower()
+                hay = f"{r['receipt_number']} {r['items_summary']} {r['customer_name']} {r['comment']}".lower()
                 if query not in hay:
                     continue
             filtered.append(r)
 
-        self.customer_rows = filtered
-        self.cust_table.setRowCount(len(filtered))
+        self.simurg_rows = filtered
+        self.simurg_table.setRowCount(len(filtered))
         for i, r in enumerate(filtered):
+            sale_str = r["sale_date"].strftime("%d.%m.%Y") if r["sale_date"] else "—"
+            payout_str = r["payout_date"].strftime("%d.%m.%Y") if r["payout_date"] else "—"
             cust_str = r["customer_name"]
-            if r["customer_phone"]:
-                cust_str += f" ({r['customer_phone']})"
-            date_str = r["sale_date"].strftime("%d.%m.%Y %H:%M") if r["sale_date"] else "—"
+            if r["comment"]:
+                cust_str = f"{cust_str} • {r['comment']}"
             vals = [
                 str(r["sale_id"]),
                 r["receipt_number"],
-                date_str,
+                sale_str,
+                payout_str,
+                r["items_summary"],
                 cust_str,
-                f"{r['currency']} ({r['exchange_rate']:,.2f})",
-                money_str(r["original_amount"]),
-                money_str(r["paid_amount"]),
-                money_str(r["remaining_customer_debt"]),
-                money_str(r["store_debt_to_customer"]),
+                f"{money_str(r['original_amount'])} {r['currency']}",
+                f"{money_str(r['remaining_debt'])} {r['currency']}",
+                r["status_label"],
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 4, 5, 6, 7, 8):
+                if c in (0, 2, 3, 6, 7, 8):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if c == 7 and r["remaining_customer_debt"] > 0:
-                    cell.setForeground(QColor(theme.ACCENT))
-                if c == 8 and r["store_debt_to_customer"] > 0:
-                    cell.setForeground(QColor(theme.RED))
-                self.cust_table.setItem(i, c, cell)
+                if c == 7 and r["remaining_debt"] > 0:
+                    cell.setForeground(QColor(theme.GREEN if r["is_ready"] else theme.ACCENT))
+                if c == 8:
+                    if r["remaining_debt"] <= 0:
+                        cell.setForeground(QColor(theme.MUTED))
+                    elif r["is_ready"]:
+                        cell.setForeground(QColor("white"))
+                        cell.setBackground(QColor(theme.GREEN))
+                    else:
+                        cell.setForeground(QColor("#9A3412"))
+                        cell.setBackground(QColor("#FFEDD5"))
+                self.simurg_table.setItem(i, c, cell)
+
+        tot = summary["total_debt"]
+        rdy = summary["ready_amount"]
+        pnd = summary["pending_amount"]
+        self.simurg_footer_label.setText(
+            f"Simurg jemi: {summary['total_items_count']} enjam • "
+            f"Taýýar (≥5g): {money_str(rdy['TMT'])} TMT / ${money_str(rdy['USD'])} USD   |   "
+            f"Garaşylýar: {money_str(pnd['TMT'])} TMT / ${money_str(pnd['USD'])} USD   |   "
+            f"Jemi bergi: {money_str(tot['TMT'])} TMT / ${money_str(tot['USD'])} USD"
+        )
 
     def _load_supplier_payables(self, *_args) -> None:
         mode = self.sup_filter_combo.currentData()
@@ -1224,9 +1377,7 @@ class FinancePage(QWidget):
 
         filtered = []
         for r in all_rows:
-            if mode == "store_owes_supplier" and r["store_debt_to_supplier"] <= 0:
-                continue
-            if mode == "supplier_owes_store" and r["supplier_debt_to_store"] <= 0:
+            if mode == "open" and r["store_debt_to_supplier"] <= 0:
                 continue
             if query:
                 hay = f"{r['purchase_id']} {r['supplier_name']}".lower()
@@ -1246,41 +1397,121 @@ class FinancePage(QWidget):
                 money_str(r["original_amount"]),
                 money_str(r["paid_amount"]),
                 money_str(r["store_debt_to_supplier"]),
-                money_str(r["supplier_debt_to_store"]),
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 3, 4, 5, 6, 7):
+                if c in (0, 3, 4, 5, 6):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 6 and r["store_debt_to_supplier"] > 0:
                     cell.setForeground(QColor(theme.RED))
-                if c == 7 and r["supplier_debt_to_store"] > 0:
-                    cell.setForeground(QColor(theme.BLUE))
                 self.sup_table.setItem(i, c, cell)
-
-    def _open_expense_dialog(self) -> None:
-        dlg = ExpenseDialog(self)
-        if dlg.exec():
-            self.refresh_data()
 
     def _open_adjustment_dialog(self) -> None:
         dlg = CashAdjustmentDialog(parent=self)
         if dlg.exec():
             self.refresh_data()
 
-    def _open_shift_close_dialog(self) -> None:
-        dlg = ShiftCloseDialog(parent=self)
+    def _open_shift_and_cash_dialog(self) -> None:
+        dlg = ShiftAndCashDialog(parent=self)
         dlg.exec()
         self.refresh_data()
 
-    def _open_cash_count_dialog(self) -> None:
-        dlg = CashCountDialog(parent=self)
+    def _collect_all_ready_simurg(self) -> None:
+        rdy = self.simurg_summary.get("ready_amount", {"USD": Decimal("0.00"), "TMT": Decimal("0.00")})
+        rdy_tmt = rdy.get("TMT", Decimal("0.00"))
+        rdy_usd = rdy.get("USD", Decimal("0.00"))
+        if rdy_tmt <= 0 and rdy_usd <= 0:
+            show_toast(self, "Häzirlikçe almak üçin taýýar (≥5 gün) Simurg puly ýok.", kind="info")
+            return
+
+        parts = []
+        if rdy_tmt > 0:
+            parts.append(f"{money_str(rdy_tmt)} TMT")
+        if rdy_usd > 0:
+            parts.append(f"${money_str(rdy_usd)} USD")
+
+        ans = QMessageBox.question(
+            self,
+            "Simurg taýýar puly almak",
+            f"Taýýar bolan ähli Simurg tölegini ({' + '.join(parts)}) kassa kabul etmelimi?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        rate = SettingsService.get_default_exchange_rate()
+        try:
+            total_sales = 0
+            with SessionLocal() as session, session.begin():
+                if rdy_tmt > 0:
+                    res = FinanceService.collect_simurg_payout(
+                        session, "TMT", amount=None, ready_only=True, exchange_rate=rate
+                    )
+                    total_sales += res["sales_count"]
+                if rdy_usd > 0:
+                    res = FinanceService.collect_simurg_payout(
+                        session, "USD", amount=None, ready_only=True, exchange_rate=rate
+                    )
+                    total_sales += res["sales_count"]
+            self.refresh_data()
+            show_toast(
+                self,
+                f"Simurg taýýar puly kassa kabul edildi: {' + '.join(parts)} ({total_sales} çek).",
+                kind="success",
+                duration_ms=3400,
+            )
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+    def _open_simurg_payout_dialog(self) -> None:
+        tot = self.simurg_summary.get("total_debt", {"USD": Decimal("0.00"), "TMT": Decimal("0.00")})
+        if tot.get("TMT", 0) <= 0 and tot.get("USD", 0) <= 0:
+            show_toast(self, "Açyk Simurg bergisi ýok.", kind="info")
+            return
+        dlg = SimurgPayoutDialog(self.simurg_summary, parent=self)
+        if dlg.exec():
+            self.refresh_data()
+
+    def _open_selected_simurg_sale(self) -> None:
+        row = self.simurg_table.currentRow()
+        if not (0 <= row < len(self.simurg_rows)):
+            show_toast(self, "Simurg tablisasyndan çek saýlaň.", kind="info")
+            return
+        sale_id = self.simurg_rows[row]["sale_id"]
+        dlg = SaleDetailsDialog(sale_id, self)
         dlg.exec()
         self.refresh_data()
+
+    def _zero_selected_simurg_debt(self) -> None:
+        row = self.simurg_table.currentRow()
+        if not (0 <= row < len(self.simurg_rows)):
+            show_toast(self, "Nollamak üçin tablisadan çek saýlaň.", kind="info")
+            return
+        r = self.simurg_rows[row]
+        if r["remaining_debt"] <= 0:
+            show_toast(self, "Bu çek boýunça açyk bergi ýok.", kind="info")
+            return
+
+        reason, ok = QInputDialog.getText(
+            self,
+            "Bergini kassasyz nollamak",
+            f"Çek: {r['receipt_number']} ({money_str(r['remaining_debt'])} {r['currency']})\n\nBellik / sebäp:",
+            text=f"Simurg bergisi nollandy ({r['receipt_number']})",
+        )
+        if not ok:
+            return
+        try:
+            with SessionLocal() as session, session.begin():
+                FinanceService.settle_or_zero_customer_debt(
+                    session, r["sale_id"], with_cash=False, reason=reason.strip()
+                )
+            self.refresh_data()
+            show_toast(self, "Bergi üstünlikli nollandy (0.00).", kind="success")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
     def _zero_cash_dialog(self) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
         rate = SettingsService.get_default_exchange_rate()
         with SessionLocal() as session:
             bal = FinanceService.get_register_balances(session)
@@ -1318,136 +1549,51 @@ class FinancePage(QWidget):
                     amt = FinanceService.zero_cash_register(session, cur, rate, reason.strip())
                     cleared.append(f"{cur}: {amt:,.2f}")
             self.refresh_data()
-            QMessageBox.information(
-                self,
-                "Kassa nollandy",
-                "Kassa balansy 0.00 edildi.\n" + "\n".join(cleared),
-            )
-        except (ValueError, SQLAlchemyError) as err:
-            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
-
-    def _settle_selected_customer_debt(self, with_cash: bool) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
-        row = self.cust_table.currentRow()
-        if not (0 <= row < len(self.customer_rows)):
-            QMessageBox.information(
-                self,
-                "Çek saýlaň",
-                "Hasaplaşmak ýa-da nollamak üçin tablisadan çek setirini saýlaň.",
-            )
-            return
-        r = self.customer_rows[row]
-        sale_id = r["sale_id"]
-        is_store_debt = r["store_debt_to_customer"] > 0
-        is_cust_debt = r["remaining_customer_debt"] > 0
-
-        if not is_store_debt and not is_cust_debt:
-            QMessageBox.information(self, "Bergi ýok", "Bu çek boýunça açyk bergi ýok.")
-            return
-
-        amount = r["store_debt_to_customer"] if is_store_debt else r["remaining_customer_debt"]
-        label = (
-            f"Dükanyň müşderä bergisi ({amount:,.2f} {r['currency']})"
-            if is_store_debt
-            else f"Müşderiniň bergisi ({amount:,.2f} {r['currency']})"
-        )
-        action_title = "Bergini kassa bilen doly ýapmak" if with_cash else "Bergini kassasyz nollamak (öçürmek)"
-        default_reason = (
-            f"Doly hasaplaşyk ({r['receipt_number']})"
-            if with_cash
-            else f"Bergi nollandy / hasapdan öçürildi ({r['receipt_number']})"
-        )
-
-        reason, ok = QInputDialog.getText(
-            self,
-            action_title,
-            f"{label}\nÇek: {r['receipt_number']} ({r['customer_name']})\n\nBellik / sebäp:",
-            text=default_reason,
-        )
-        if not ok:
-            return
-
-        try:
-            with SessionLocal() as session, session.begin():
-                if is_store_debt:
-                    FinanceService.settle_or_zero_store_debt_to_customer(
-                        session, sale_id, with_cash=with_cash, reason=reason.strip()
-                    )
-                else:
-                    FinanceService.settle_or_zero_customer_debt(
-                        session, sale_id, with_cash=with_cash, reason=reason.strip()
-                    )
-            self.refresh_data()
-            QMessageBox.information(self, "Taýýar", "Bergi üstünlikli ýapyldy (0.00).")
+            show_toast(self, "Kassa nollandy (" + " | ".join(cleared) + ").", kind="success")
         except (ValueError, SQLAlchemyError) as err:
             QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
     def _settle_selected_supplier_debt(self, with_cash: bool) -> None:
-        from PySide6.QtWidgets import QInputDialog
-
         row = self.sup_table.currentRow()
         if not (0 <= row < len(self.supplier_rows)):
-            QMessageBox.information(
-                self,
-                "Alyş saýlaň",
-                "Hasaplaşmak ýa-da nollamak üçin tablisadan alyş setirini saýlaň.",
-            )
+            show_toast(self, "Tablisadan alyş setirini saýlaň.", kind="info")
             return
         r = self.supplier_rows[row]
         purchase_id = r["purchase_id"]
-        is_store_owes = r["store_debt_to_supplier"] > 0
-        is_sup_owes = r["supplier_debt_to_store"] > 0
-
-        if not is_store_owes and not is_sup_owes:
-            QMessageBox.information(self, "Bergi ýok", "Bu alyş boýunça açyk bergi ýok.")
+        if r["store_debt_to_supplier"] <= 0:
+            show_toast(self, "Bu alyş boýunça açyk bergi ýok.", kind="info")
             return
 
-        amount = r["store_debt_to_supplier"] if is_store_owes else r["supplier_debt_to_store"]
-        label = (
-            f"Dükanyň üpjün edijä bergisi ({amount:,.2f} {r['currency']})"
-            if is_store_owes
-            else f"Üpjün edijiniň dükana bergisi ({amount:,.2f} {r['currency']})"
-        )
+        amount = r["store_debt_to_supplier"]
         action_title = "Bergini kassa bilen doly ýapmak" if with_cash else "Bergini kassasyz nollamak"
         default_reason = (
             f"Alyş №{purchase_id} doly hasaplaşyk"
             if with_cash
             else f"Alyş №{purchase_id} bergisi nollandy"
         )
-
         reason, ok = QInputDialog.getText(
             self,
             action_title,
-            f"{label}\nAlyş №{purchase_id} ({r['supplier_name']})\n\nBellik / sebäp:",
+            f"Dükanyň üpjün edijä bergisi ({amount:,.2f} {r['currency']})\n"
+            f"Alyş №{purchase_id} ({r['supplier_name']})\n\nBellik / sebäp:",
             text=default_reason,
         )
         if not ok:
             return
-
         try:
             with SessionLocal() as session, session.begin():
-                if is_store_owes:
-                    FinanceService.settle_or_zero_supplier_debt(
-                        session, purchase_id, with_cash=with_cash, reason=reason.strip()
-                    )
-                else:
-                    FinanceService.settle_or_zero_supplier_refund_debt(
-                        session, purchase_id, with_cash=with_cash, reason=reason.strip()
-                    )
+                FinanceService.settle_or_zero_supplier_debt(
+                    session, purchase_id, with_cash=with_cash, reason=reason.strip()
+                )
             self.refresh_data()
-            QMessageBox.information(self, "Taýýar", "Üpjün ediji bergisi üstünlikli ýapyldy (0.00).")
+            show_toast(self, "Üpjün ediji bergisi üstünlikli ýapyldy (0.00).", kind="success")
         except (ValueError, SQLAlchemyError) as err:
             QMessageBox.warning(self, "Ýalňyşlyk", str(err))
 
     def _storno_selected_movement(self) -> None:
         row = self.journal_table.currentRow()
         if not (0 <= row < len(self.journal_entries)):
-            QMessageBox.information(
-                self,
-                "Amal saýlaň",
-                "Storno ýazgysyny döretmek üçin maliýe žurnalyndan setir saýlaň.",
-            )
+            show_toast(self, "Storno üçin maliýe žurnalyndan setir saýlaň.", kind="info")
             return
         entry = self.journal_entries[row]
         dlg = CashAdjustmentDialog(reference_entry=entry, parent=self)
@@ -1457,21 +1603,13 @@ class FinancePage(QWidget):
     def _open_selected_journal_doc(self) -> None:
         row = self.journal_table.currentRow()
         if not (0 <= row < len(self.journal_entries)):
-            QMessageBox.information(
-                self,
-                "Ýazgy saýlaň",
-                "Maliýe amallary žurnalyndan ýazgy saýlaň.",
-            )
+            show_toast(self, "Maliýe žurnalyndan ýazgy saýlaň.", kind="info")
             return
         entry = self.journal_entries[row]
         if entry["doc_type"] in ("sale", "purchase") and entry["doc_id"]:
             self._open_journal_document(row, 0)
         else:
-            QMessageBox.information(
-                self,
-                "Bagly resminama ýok",
-                "Bu amal (çykdajy ýa-da düzediş) çeke ýa-da alyşa bagly däl.",
-            )
+            show_toast(self, "Bu amal çeke ýa-da alyşa bagly däl.", kind="info")
 
     def _open_journal_document(self, row: int, _col: int) -> None:
         if not (0 <= row < len(self.journal_entries)):
@@ -1486,28 +1624,10 @@ class FinancePage(QWidget):
             dlg.exec()
             self.refresh_data()
 
-    def _open_selected_customer_sale(self) -> None:
-        row = self.cust_table.currentRow()
-        if not (0 <= row < len(self.customer_rows)):
-            QMessageBox.information(
-                self,
-                "Çek saýlaň",
-                "Müşderiler bilen hasaplaşyk tablisasyndan çek setirini saýlaň.",
-            )
-            return
-        sale_id = self.customer_rows[row]["sale_id"]
-        dlg = SaleDetailsDialog(sale_id, self)
-        dlg.exec()
-        self.refresh_data()
-
     def _open_selected_supplier_purchase(self) -> None:
         row = self.sup_table.currentRow()
         if not (0 <= row < len(self.supplier_rows)):
-            QMessageBox.information(
-                self,
-                "Alyş saýlaň",
-                "Üpjün edijiler bilen hasaplaşyk tablisasyndan alyş setirini saýlaň.",
-            )
+            show_toast(self, "Üpjün edijiler tablisasyndan alyş setirini saýlaň.", kind="info")
             return
         purchase_id = self.supplier_rows[row]["purchase_id"]
         dlg = PurchaseDetailsDialog(purchase_id, self)

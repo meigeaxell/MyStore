@@ -35,6 +35,8 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+icon_path = project_root / "resources" / "mobilestore.ico"
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -46,6 +48,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(icon_path) if icon_path.exists() else None,
 )
 
 coll = COLLECT(
