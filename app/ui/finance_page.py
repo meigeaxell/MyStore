@@ -871,69 +871,58 @@ class FinancePage(QWidget):
 
         root.addLayout(header)
 
-        # Ровная сетка 2x2 из 4 объединённых карточек
+        # Ровная сетка 2x2 из 4 чистых 2-строчных карточек (детали — во всплывающей подсказке)
         cards_grid = QGridLayout()
         cards_grid.setSpacing(14)
 
         # 1. Kassa balansy (общая USD + TMT)
         self.cash_main_label = QLabel("$0.00 USD  |  0.00 TMT")
-        self.cash_eq_label = QLabel("Jemi: 0.00 TMT • $0.00 USD")
-        self.cash_flow_label = QLabel("Girdeji / Çykdajy")
-        cash_card = self._build_rich_card(
-            "💵 Kassa balansy (USD / TMT)",
+        self.cash_sub_label = QLabel("Jemi: 0.00 TMT • $0.00 USD")
+        self.cash_card = self._build_clean_card(
+            "Kassa balansy",
             self.cash_main_label,
-            self.cash_eq_label,
-            self.cash_flow_label,
+            self.cash_sub_label,
             theme.NAVY,
-            accent_sub_color=theme.TEAL,
         )
-        cards_grid.addWidget(cash_card, 0, 0)
+        cards_grid.addWidget(self.cash_card, 0, 0)
 
         # 2. Simurg bergisi (кликабельная -> открывает вкладку Simurg)
-        self.simurg_main_label = QLabel("$0.00  |  0.00 TMT")
-        self.simurg_ready_label = QLabel("✔ Almak üçin taýýar (≥5 gün): 0.00 TMT")
-        self.simurg_devices_label = QLabel("0 enjam • 0 taýýar / 0 garaşylýar")
-        simurg_card = self._build_rich_card(
-            "🏦 Simurg bergisi (5 günlük töleg) →",
+        self.simurg_main_label = QLabel("$0.00 USD  |  0.00 TMT")
+        self.simurg_sub_label = QLabel("✔ Taýýar: 0.00 TMT • 0 enjam")
+        self.simurg_card = self._build_clean_card(
+            "Simurg bergisi →",
             self.simurg_main_label,
-            self.simurg_ready_label,
-            self.simurg_devices_label,
+            self.simurg_sub_label,
             theme.ACCENT,
-            accent_sub_color=theme.GREEN,
+            sub_color=theme.GREEN,
             clickable=True,
         )
-        simurg_card.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
-        cards_grid.addWidget(simurg_card, 0, 1)
+        self.simurg_card.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        cards_grid.addWidget(self.simurg_card, 0, 1)
 
         # 3. Sklad jemi baha (USD / TMT)
         self.stock_val_main_label = QLabel("$0.00 USD  |  0.00 TMT")
-        self.stock_val_eq_label = QLabel("Asyl: $0.00 USD + 0.00 TMT")
-        self.stock_val_units_label = QLabel("0 enjam • 0 aksessuar")
-        stock_card = self._build_rich_card(
-            "🏪 Sklad jemi baha (USD / TMT)",
+        self.stock_val_sub_label = QLabel("0 sany (0 enjam • 0 aksessuar)")
+        self.stock_card = self._build_clean_card(
+            "Sklad jemi baha",
             self.stock_val_main_label,
-            self.stock_val_eq_label,
-            self.stock_val_units_label,
+            self.stock_val_sub_label,
             theme.BLUE,
-            accent_sub_color=theme.NAVY,
         )
-        cards_grid.addWidget(stock_card, 1, 0)
+        cards_grid.addWidget(self.stock_card, 1, 0)
 
-        # 4. Dükanyň üpjün edijilere bergisi (кликабельная -> вкладка поставщиков)
+        # 4. Üpjün edijilere bergi (кликабельная -> вкладка поставщиков)
         self.sup_payable_main = QLabel("$0.00 USD  |  0.00 TMT")
-        self.sup_payable_sub = QLabel("Işjeň alyşlar boýunça tölenmedik galyndy")
-        self.sup_payable_hint = QLabel("Hasaplaşyk üçin basyň →")
-        sup_card = self._build_rich_card(
-            "📦 Üpjün edijilere bergi (USD / TMT)",
+        self.sup_payable_sub = QLabel("Hasaplaşyk üçin basyň →")
+        self.sup_card = self._build_clean_card(
+            "Üpjün edijilere bergi →",
             self.sup_payable_main,
             self.sup_payable_sub,
-            self.sup_payable_hint,
             theme.RED,
-            accent_sub_color=theme.MUTED,
             clickable=True,
         )
-        sup_card.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
-        cards_grid.addWidget(sup_card, 1, 1)
+        self.sup_card.clicked.connect(lambda: self.tabs.setCurrentIndex(2))
+        cards_grid.addWidget(self.sup_card, 1, 1)
 
         cards_grid.setColumnStretch(0, 1)
         cards_grid.setColumnStretch(1, 1)
@@ -945,25 +934,26 @@ class FinancePage(QWidget):
         self.tabs.addTab(self._create_supplier_debts_tab(), "Üpjün edijiler bilen hasaplaşyk")
         root.addWidget(self.tabs, 1)
 
-    def _build_rich_card(
+    def _build_clean_card(
         self,
         title: str,
         value_label: QLabel,
-        mid_label: QLabel,
         sub_label: QLabel,
         color: str,
-        accent_sub_color: str = theme.MUTED,
+        sub_color: str = theme.MUTED,
         clickable: bool = False,
     ) -> Card:
-        card = ClickableCard(margins=(16, 12, 16, 12), spacing=3) if clickable else Card(margins=(16, 12, 16, 12), spacing=3)
+        card = (
+            ClickableCard(margins=(18, 12, 18, 12), spacing=4)
+            if clickable
+            else Card(margins=(18, 12, 18, 12), spacing=4)
+        )
         t = QLabel(title)
         t.setObjectName("mutedText")
         value_label.setStyleSheet(f"font-size: 14.5pt; font-weight: 800; color: {color};")
-        mid_label.setStyleSheet(f"font-size: 9.5pt; font-weight: 700; color: {accent_sub_color};")
-        sub_label.setStyleSheet(f"font-size: 8.5pt; color: {theme.MUTED};")
+        sub_label.setStyleSheet(f"font-size: 9pt; font-weight: 600; color: {sub_color};")
         card.body.addWidget(t)
         card.body.addWidget(value_label)
-        card.body.addWidget(mid_label)
         card.body.addWidget(sub_label)
         return card
 
@@ -985,7 +975,8 @@ class FinancePage(QWidget):
         self.date_from_edit = QDateEdit(today.addMonths(-1))
         self.date_from_edit.setCalendarPopup(True)
         self.date_from_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_from_edit.dateChanged.connect(self._load_journal)
+        self.date_from_edit.setMinimumWidth(128)
+        self.date_from_edit.dateChanged.connect(self._on_journal_date_changed)
         filters.addWidget(self.date_from_edit)
 
         filters.addWidget(QLabel("—"))
@@ -993,18 +984,20 @@ class FinancePage(QWidget):
         self.date_to_edit = QDateEdit(today)
         self.date_to_edit.setCalendarPopup(True)
         self.date_to_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_to_edit.dateChanged.connect(self._load_journal)
+        self.date_to_edit.setMinimumWidth(128)
+        self.date_to_edit.dateChanged.connect(self._on_journal_date_changed)
         filters.addWidget(self.date_to_edit)
 
         self.journal_curr_combo = style_combo(QComboBox())
-        self.journal_curr_combo.addItem("Ähli walýutalar", None)
+        self.journal_curr_combo.addItem("Walýuta: Ählisi", None)
         self.journal_curr_combo.addItem("USD", "USD")
         self.journal_curr_combo.addItem("TMT", "TMT")
+        self.journal_curr_combo.setMinimumWidth(120)
         self.journal_curr_combo.currentIndexChanged.connect(self._load_journal)
         filters.addWidget(self.journal_curr_combo)
 
         self.journal_type_combo = style_combo(QComboBox())
-        self.journal_type_combo.addItem("Ähli amal görnüşleri", None)
+        self.journal_type_combo.addItem("Ähli amallar", None)
         self.journal_type_combo.addItem("Satyş tölegi", "sale_payment")
         self.journal_type_combo.addItem("Simurg / Bergi tölegi", "customer_debt_payment")
         self.journal_type_combo.addItem("Müşderä gaýtargy", "sale_change")
@@ -1015,20 +1008,24 @@ class FinancePage(QWidget):
         self.journal_type_combo.addItem("Operasion çykdajy", "expense")
         self.journal_type_combo.addItem("Düzediş (girdeji)", "correction_income")
         self.journal_type_combo.addItem("Düzediş (çykdajy)", "correction_expense")
+        self.journal_type_combo.setMinimumWidth(130)
         self.journal_type_combo.currentIndexChanged.connect(self._load_journal)
         filters.addWidget(self.journal_type_combo)
 
         self.journal_search = QLineEdit()
-        self.journal_search.setPlaceholderText("Resminama ýa-da düşündiriş boýunça gözleg...")
+        self.journal_search.setPlaceholderText("Gözleg...")
         self.journal_search.setClearButtonEnabled(True)
+        self.journal_search.setMinimumWidth(120)
         self.journal_search.textChanged.connect(self._load_journal)
         filters.addWidget(self.journal_search, 1)
 
-        open_doc_btn = make_button("📄 Resminamany aç", "primary")
+        open_doc_btn = make_button("📄 Aç", "primary")
+        open_doc_btn.setToolTip("Bagly resminamany aç")
         open_doc_btn.clicked.connect(self._open_selected_journal_doc)
         filters.addWidget(open_doc_btn)
 
-        storno_btn = make_button("Saýlanany storno et", "danger")
+        storno_btn = make_button("Storno", "danger")
+        storno_btn.setToolTip("Saýlanan amaly storno et")
         storno_btn.clicked.connect(self._storno_selected_movement)
         filters.addWidget(storno_btn)
 
@@ -1188,16 +1185,16 @@ class FinancePage(QWidget):
 
         self.simurg_summary = simurg
 
-        # 1. Kassa balansy (объединённый)
+        # 1. Kassa balansy (объединённый, 2 строки + детали в tooltip)
         self.cash_main_label.setText(
             f"${balances['usd_balance']:,.2f} USD   |   {balances['tmt_balance']:,.2f} TMT"
         )
-        self.cash_eq_label.setText(
-            f"Jemi (kurs {combined['exchange_rate']:.2f}):  {combined['total_in_tmt']:,.2f} TMT  •  ${combined['total_in_usd']:,.2f} USD"
+        self.cash_sub_label.setText(
+            f"Jemi (kurs {combined['exchange_rate']:.2f}): {combined['total_in_tmt']:,.2f} TMT • ${combined['total_in_usd']:,.2f} USD"
         )
-        self.cash_flow_label.setText(
-            f"Girdeji: +${flow['USD']['income']:,.2f} / +{flow['TMT']['income']:,.2f} m.   |   "
-            f"Çykdajy: −${flow['USD']['expense']:,.2f} / −{flow['TMT']['expense']:,.2f} m."
+        self.cash_card.setToolTip(
+            f"Girdeji: +${flow['USD']['income']:,.2f} / +{flow['TMT']['income']:,.2f} TMT\n"
+            f"Çykdajy: −${flow['USD']['expense']:,.2f} / −{flow['TMT']['expense']:,.2f} TMT"
         )
 
         # 2. Simurg bergisi
@@ -1206,23 +1203,29 @@ class FinancePage(QWidget):
         self.simurg_main_label.setText(
             f"${tot['USD']:,.2f} USD   |   {tot['TMT']:,.2f} TMT"
         )
-        self.simurg_ready_label.setText(
-            f"✔ Almak üçin taýýar (≥5 gün):  ${rdy['USD']:,.2f}  |  {rdy['TMT']:,.2f} TMT"
+        ready_parts = []
+        if rdy["TMT"] > 0 or rdy["USD"] == 0:
+            ready_parts.append(f"{rdy['TMT']:,.2f} TMT")
+        if rdy["USD"] > 0:
+            ready_parts.append(f"${rdy['USD']:,.2f} USD")
+        self.simurg_sub_label.setText(
+            f"✔ Taýýar (≥5g): {' + '.join(ready_parts)}  •  {simurg['total_items_count']} enjam"
         )
-        self.simurg_devices_label.setText(
-            f"{simurg['total_items_count']} enjam ({simurg['ready_items_count']} taýýar • "
-            f"{simurg['pending_items_count']} garaşylýar)  •  {simurg['open_sales_count']} açyk çek"
+        self.simurg_card.setToolTip(
+            f"Açyk çekler: {simurg['open_sales_count']}\n"
+            f"Enjamlar: {simurg['ready_items_count']} taýýar / {simurg['pending_items_count']} garaşylýar"
         )
 
         # 3. Sklad jemi baha
         self.stock_val_main_label.setText(
             f"${stock_val['total_in_usd']:,.2f} USD   |   {stock_val['total_in_tmt']:,.2f} TMT"
         )
-        self.stock_val_eq_label.setText(
-            f"Asyl walýuta: ${stock_val['usd_native']:,.2f} USD + {stock_val['tmt_native']:,.2f} TMT (kurs {stock_val['exchange_rate']:.2f})"
+        self.stock_val_sub_label.setText(
+            f"{stock_val['total_units']} sany ({stock_val['devices_count']} enjam • {stock_val['accessories_count']} aksessuar)"
         )
-        self.stock_val_units_label.setText(
-            f"{stock_val['devices_count']} enjam (IMEI) • {stock_val['accessories_count']} aksessuar (jemi {stock_val['total_units']} sany)"
+        self.stock_card.setToolTip(
+            f"Asyl walýuta boýunça: ${stock_val['usd_native']:,.2f} USD + {stock_val['tmt_native']:,.2f} TMT "
+            f"(kurs {stock_val['exchange_rate']:.2f})"
         )
 
         # 4. Üpjün edijilere bergi
@@ -1234,6 +1237,13 @@ class FinancePage(QWidget):
         self._load_journal()
         self._load_simurg_table()
         self._load_supplier_payables()
+
+    def _on_journal_date_changed(self, *_args) -> None:
+        if not self.use_date_filter.isChecked():
+            self.use_date_filter.blockSignals(True)
+            self.use_date_filter.setChecked(True)
+            self.use_date_filter.blockSignals(False)
+        self._load_journal()
 
     def _load_journal(self, *_args) -> None:
         date_from = None

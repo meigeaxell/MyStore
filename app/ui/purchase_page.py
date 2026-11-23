@@ -440,9 +440,7 @@ class PurchaseDialog(QDialog):
         outer.addWidget(scroll, 1)
 
         footer_bar = QWidget()
-        footer_bar.setStyleSheet(
-            f"background: white; border-top: 1px solid {theme.BORDER};"
-        )
+        footer_bar.setObjectName("dialogFooter")
         buttons = QHBoxLayout(footer_bar)
         buttons.setContentsMargins(24, 12, 24, 12)
         buttons.addStretch()
@@ -947,7 +945,7 @@ class PurchaseDetailsDialog(QDialog):
         outer.addWidget(scroll, 1)
 
         footer = QWidget()
-        footer.setStyleSheet(f"background: white; border-top: 1px solid {theme.BORDER};")
+        footer.setObjectName("dialogFooter")
         buttons = QHBoxLayout(footer)
         buttons.setContentsMargins(24, 12, 24, 12)
         buttons.addStretch()

@@ -87,12 +87,7 @@ class DashboardPage(QScrollArea):
             self.refresh_data()
 
     def refresh_data(self) -> None:
-        while self.root_layout.count():
-            item = self.root_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
-                self._clear_layout(item.layout())
+        self._clear_layout(self.root_layout)
 
         self.low_stock_products = get_low_stock_products()
         stats = self._query_dashboard_stats()
@@ -115,9 +110,12 @@ class DashboardPage(QScrollArea):
     def _clear_layout(self, layout) -> None:
         while layout.count():
             item = layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-            elif item.layout():
+            w = item.widget()
+            if w is not None:
+                w.hide()
+                w.setParent(None)
+                w.deleteLater()
+            elif item.layout() is not None:
                 self._clear_layout(item.layout())
 
     def _build_buckets_for_range(
@@ -459,9 +457,9 @@ class DashboardPage(QScrollArea):
 
         data = [
             (f"Satyşlar ({period_label})", sales_val, self.current_range, True, theme.ACCENT, "🧾"),
-            (f"Çalyşyk / Ýatyrma ({period_label})", f"{ex_cnt} çal. / {canc_cnt} ýat.", self.current_range, True, theme.NAVY, "↩"),
+            ("Çalyşyk / Ýatyrma", f"{ex_cnt} çal. / {canc_cnt} ýat.", self.current_range, True, theme.NAVY, "↩"),
             (f"Alyşlar ({period_label})", pur_val, self.current_range, True, theme.TEAL, "📦"),
-            ("Sklad jemi baha (USD / TMT)", stock_val_text, stock_units_badge, True, theme.BLUE, "🏪"),
+            ("Sklad jemi baha", stock_val_text, stock_units_badge, True, theme.BLUE, "🏪"),
         ]
 
         for i, d in enumerate(data):
@@ -570,20 +568,18 @@ class DashboardPage(QScrollArea):
             f"QFrame#clickableCard:hover {{ background: {theme.ACCENT_BG}; border: 1.5px solid {theme.ACCENT}; }}"
         )
         sim_box.clicked.connect(lambda: self.navigateRequested.emit("Simurg"))
-        sim_title = QLabel(
-            f"🏦 Simurg bergisi  ({sim['total_items_count']} enjam • "
-            f"{sim['ready_items_count']} taýýar / {sim['pending_items_count']} garaşylýar)"
-        )
+        sim_title = QLabel(f"Simurg bergisi ({sim['total_items_count']} enjam) →")
         sim_title.setStyleSheet(f"color: {theme.MUTED}; font-size: 9pt; font-weight: 600;")
         sim_val = QLabel(
-            f"Jemi: ${sim['total_debt']['USD']:,.2f}  |  {sim['total_debt']['TMT']:,.2f} TMT"
+            f"${sim['total_debt']['USD']:,.2f} USD  |  {sim['total_debt']['TMT']:,.2f} TMT"
         )
         sim_val.setStyleSheet(f"font-size: 11.5pt; font-weight: 800; color: {theme.ACCENT};")
         sim_ready = QLabel(
-            f"✔ Almak üçin taýýar (≥5 gün):  <b>${sim['ready_amount']['USD']:,.2f}</b>  |  "
-            f"<b>{sim['ready_amount']['TMT']:,.2f} TMT</b>   →"
+            f"✔ Taýýar (≥5g): <b>{sim['ready_amount']['TMT']:,.2f} TMT</b>"
+            + (f" / <b>${sim['ready_amount']['USD']:,.2f}</b>" if sim["ready_amount"]["USD"] > 0 else "")
+            + f"  •  {sim['ready_items_count']} taýýar"
         )
-        sim_ready.setStyleSheet(f"font-size: 9pt; color: {theme.GREEN};")
+        sim_ready.setStyleSheet(f"font-size: 8.8pt; color: {theme.GREEN};")
         sim_box.body.addWidget(sim_title)
         sim_box.body.addWidget(sim_val)
         sim_box.body.addWidget(sim_ready)

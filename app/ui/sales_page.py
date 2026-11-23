@@ -281,7 +281,7 @@ class SaleDetailsDialog(QDialog):
         outer.addWidget(scroll, 1)
 
         footer_bar = QWidget()
-        footer_bar.setStyleSheet(f"background: white; border-top: 1px solid {theme.BORDER};")
+        footer_bar.setObjectName("dialogFooter")
         footer = QHBoxLayout(footer_bar)
         footer.setContentsMargins(24, 12, 24, 12)
         footer.addStretch()

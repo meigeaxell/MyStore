@@ -476,16 +476,20 @@ class MainWindow(QMainWindow):
         brand_btn.setAutoDefault(False)
         brand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         brand_btn.setToolTip("Esasy panel (Ctrl+1)")
-        logo_path = BUNDLE_ROOT / "resources" / "mobilestore.png"
-        if logo_path.exists():
-            pix = QPixmap(str(logo_path)).scaled(
-                32,
-                32,
+        logo_svg = BUNDLE_ROOT / "resources" / "mobilestore.svg"
+        logo_png = BUNDLE_ROOT / "resources" / "mobilestore.png"
+        if logo_svg.exists():
+            brand_btn.setIcon(QIcon(str(logo_svg)))
+            brand_btn.setIconSize(QSize(34, 34))
+        elif logo_png.exists():
+            pix = QPixmap(str(logo_png)).scaled(
+                34,
+                34,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
             brand_btn.setIcon(QIcon(pix))
-            brand_btn.setIconSize(QSize(32, 32))
+            brand_btn.setIconSize(QSize(34, 34))
         else:
             brand_btn.setText("⌂  MobileStore")
 

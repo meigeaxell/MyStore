@@ -1,6 +1,8 @@
 
 """Единая светлая тема приложения MobileStore."""
 
+from app.config import BUNDLE_ROOT
+
 ACCENT = "#F58A2E"
 ACCENT_SOFT = "#FFE6CC"
 ACCENT_BG = "#FFF3E6"
@@ -14,6 +16,13 @@ MUTED = "#667085"
 BORDER = "#E8EBF0"
 BG = "#F6F7F9"
 WHITE = "#FFFFFF"
+
+_ICONS_DIR = BUNDLE_ROOT / "resources" / "icons"
+_ICON_CHEVRON_DOWN = (_ICONS_DIR / "chevron_down.svg").as_posix()
+_ICON_CHEVRON_DOWN_ACCENT = (_ICONS_DIR / "chevron_down_accent.svg").as_posix()
+_ICON_CHECK_WHITE = (_ICONS_DIR / "check_white.svg").as_posix()
+_ICON_LEFT_WHITE = (_ICONS_DIR / "chevron_left_white.svg").as_posix()
+_ICON_RIGHT_WHITE = (_ICONS_DIR / "chevron_right_white.svg").as_posix()
 
 STYLE = f"""
 * {{
@@ -31,9 +40,76 @@ QWidget {{
     font-size: 10pt;
 }}
 
-QDialog, QMessageBox, QInputDialog {{
+QDialog, QMessageBox, QInputDialog, QFileDialog {{
     background: {BG};
     color: {TEXT};
+}}
+
+QWidget#dialogFooter {{
+    background: {WHITE};
+    border-top: 1px solid {BORDER};
+}}
+
+QTreeView {{
+    background-color: {WHITE};
+    alternate-background-color: #FAFBFC;
+    color: {TEXT};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    selection-background-color: {ACCENT_BG};
+    selection-color: {TEXT};
+    outline: none;
+}}
+
+QTreeView::item {{
+    padding: 5px 6px;
+    color: {TEXT};
+}}
+
+QTreeView::item:hover {{
+    background: {ACCENT_BG};
+}}
+
+QTreeView::item:selected {{
+    background: {ACCENT_SOFT};
+    color: {NAVY};
+}}
+
+/* ---------- Флажки (QCheckBox) ---------- */
+
+QCheckBox {{
+    spacing: 8px;
+    color: {TEXT};
+    background: transparent;
+}}
+
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1.5px solid #D0D5DD;
+    background-color: {WHITE};
+}}
+
+QCheckBox::indicator:hover {{
+    border-color: {ACCENT};
+    background-color: {ACCENT_BG};
+}}
+
+QCheckBox::indicator:checked {{
+    background-color: {ACCENT};
+    border: 1.5px solid {ACCENT};
+    image: url("{_ICON_CHECK_WHITE}");
+}}
+
+QCheckBox::indicator:checked:hover {{
+    background-color: #E57C20;
+    border-color: #E57C20;
+}}
+
+QCheckBox::indicator:disabled {{
+    background-color: #F2F4F7;
+    border-color: {BORDER};
 }}
 
 /* ---------- Вкладки (QTabWidget / QTabBar) ---------- */
@@ -163,28 +239,54 @@ QComboBox:disabled {{
     color: #98A2B3;
 }}
 
-/* ---------- Выпадающие списки ---------- */
+/* ---------- Выпадающие списки и календари ---------- */
 
-QComboBox {{
-    padding-right: 28px;
+QComboBox,
+QDateEdit,
+QDateTimeEdit {{
+    padding-right: 30px;
 }}
 
-QComboBox::drop-down {{
+QComboBox::drop-down,
+QDateEdit::drop-down,
+QDateTimeEdit::drop-down {{
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 28px;
     background: transparent;
     border: none;
-    width: 28px;
+    border-top-right-radius: 7px;
+    border-bottom-right-radius: 7px;
 }}
 
-QComboBox::down-arrow {{
-    width: 8px;
-    height: 8px;
+QComboBox::drop-down:hover,
+QDateEdit::drop-down:hover,
+QDateTimeEdit::drop-down:hover {{
+    background: {ACCENT_BG};
+}}
+
+QComboBox::down-arrow,
+QDateEdit::down-arrow,
+QDateTimeEdit::down-arrow {{
+    image: url("{_ICON_CHEVRON_DOWN}");
+    width: 12px;
+    height: 12px;
+}}
+
+QComboBox::down-arrow:hover,
+QComboBox::down-arrow:on,
+QDateEdit::down-arrow:hover,
+QDateEdit::down-arrow:on,
+QDateTimeEdit::down-arrow:hover,
+QDateTimeEdit::down-arrow:on {{
+    image: url("{_ICON_CHEVRON_DOWN_ACCENT}");
 }}
 
 QComboBox QAbstractItemView {{
     background-color: {WHITE};
     color: {TEXT};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
+    border: 1px solid #D0D5DD;
+    border-radius: 8px;
     padding: 4px;
     outline: none;
     selection-background-color: {ACCENT_BG};
@@ -193,8 +295,9 @@ QComboBox QAbstractItemView {{
 
 QComboBox QAbstractItemView::item {{
     min-height: 28px;
-    padding: 5px 8px;
+    padding: 5px 10px;
     border: none;
+    border-radius: 6px;
 }}
 
 QComboBox QAbstractItemView::item:hover {{
@@ -202,33 +305,146 @@ QComboBox QAbstractItemView::item:hover {{
     color: {TEXT};
 }}
 
-/* ---------- Кнопки числовых полей ---------- */
-
-QSpinBox::up-button,
-QDoubleSpinBox::up-button,
-QDateEdit::up-button,
-QDateTimeEdit::up-button,
-QTimeEdit::up-button {{
-    background: transparent;
-    border: none;
-    width: 20px;
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {ACCENT_SOFT};
+    color: {NAVY};
 }}
 
+/* ---------- Выпадающий календарь (QCalendarWidget) ---------- */
+
+QCalendarWidget {{
+    background-color: {WHITE};
+    border: 1px solid #D0D5DD;
+    border-radius: 10px;
+    min-width: 330px;
+    min-height: 260px;
+}}
+
+QCalendarWidget QTableView {{
+    background-color: {WHITE};
+    alternate-background-color: #F8F9FB;
+    border: none;
+    border-radius: 0px;
+    padding: 0px;
+    selection-background-color: {ACCENT};
+    selection-color: {WHITE};
+    outline: none;
+}}
+
+QCalendarWidget QTableView::item {{
+    padding: 2px;
+    border: none;
+}}
+
+QCalendarWidget QWidget#qt_calendar_navigationbar {{
+    background-color: {NAVY};
+    min-height: 40px;
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    padding: 4px 6px;
+}}
+
+QCalendarWidget QToolButton {{
+    color: {WHITE};
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-weight: 700;
+    font-size: 10pt;
+}}
+
+QCalendarWidget QToolButton:hover {{
+    background-color: rgba(255, 255, 255, 0.16);
+}}
+
+QCalendarWidget QToolButton::menu-indicator {{
+    image: none;
+    width: 0px;
+}}
+
+QCalendarWidget QToolButton#qt_calendar_prevmonth {{
+    qproperty-icon: none;
+    image: url("{_ICON_LEFT_WHITE}");
+    min-width: 28px;
+    min-height: 28px;
+}}
+
+QCalendarWidget QToolButton#qt_calendar_nextmonth {{
+    qproperty-icon: none;
+    image: url("{_ICON_RIGHT_WHITE}");
+    min-width: 28px;
+    min-height: 28px;
+}}
+
+QCalendarWidget QMenu {{
+    background-color: {WHITE};
+    color: {TEXT};
+    border: 1px solid #D0D5DD;
+    border-radius: 8px;
+    padding: 4px;
+}}
+
+QCalendarWidget QMenu::item {{
+    padding: 6px 14px;
+    border-radius: 5px;
+}}
+
+QCalendarWidget QMenu::item:selected {{
+    background-color: {ACCENT_BG};
+    color: {NAVY};
+}}
+
+QCalendarWidget QSpinBox {{
+    background-color: rgba(255, 255, 255, 0.14);
+    color: {WHITE};
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-weight: 700;
+}}
+
+QCalendarWidget QAbstractItemView:enabled {{
+    background-color: {WHITE};
+    alternate-background-color: #F8F9FB;
+    color: {TEXT};
+    selection-background-color: {ACCENT};
+    selection-color: {WHITE};
+    outline: none;
+    font-size: 9.5pt;
+}}
+
+QCalendarWidget QAbstractItemView:disabled {{
+    color: #98A2B3;
+}}
+
+/* ---------- Числовые поля (без стрелок для чистого вида) ---------- */
+
+QSpinBox::up-button,
 QSpinBox::down-button,
-QDoubleSpinBox::down-button,
-QDateEdit::down-button,
-QDateTimeEdit::down-button,
+QDoubleSpinBox::up-button,
+QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    width: 0px;
+    height: 0px;
+    border: none;
+    background: transparent;
+}}
+
+QSpinBox::up-arrow,
+QSpinBox::down-arrow,
+QDoubleSpinBox::up-arrow,
+QDoubleSpinBox::down-arrow {{
+    image: none;
+    width: 0px;
+    height: 0px;
+}}
+
+QTimeEdit::up-button,
 QTimeEdit::down-button {{
     background: transparent;
     border: none;
-    width: 20px;
-}}
-
-QSpinBox::up-button:hover,
-QDoubleSpinBox::up-button:hover,
-QSpinBox::down-button:hover,
-QDoubleSpinBox::down-button:hover {{
-    background: {ACCENT_BG};
+    width: 18px;
 }}
 
 /* ---------- Сайдбар ---------- */

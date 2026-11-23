@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="20" y1="12" x2="236" y2="244" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF9F43"/>
+      <stop offset="55%" stop-color="#F58A2E"/>
+      <stop offset="100%" stop-color="#E06F14"/>
+    </linearGradient>
+  </defs>
+  <!-- Чистая скруглённая оранжевая иконка на полностью прозрачном фоне -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bgGrad)"/>
+
+  <!-- Минималистичный 2D монитор -->
+  <rect x="44" y="52" width="168" height="114" rx="18" stroke="#FFFFFF" stroke-width="14" fill="none"/>
+  <!-- Ножка и подставка монитора -->
+  <path d="M128 166V194" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+  <path d="M90 198H166" stroke="#FFFFFF" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Минималистичная корзина внутри экрана -->
+  <path d="M78 82H92L104 128H158L169 92H97" stroke="#FFFFFF" stroke-width="11" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="111" cy="144" r="7.5" fill="#FFFFFF"/>
+  <circle cx="151" cy="144" r="7.5" fill="#FFFFFF"/>
+</svg>

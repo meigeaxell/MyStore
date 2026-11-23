@@ -103,30 +103,30 @@ class ToastNotification(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         palettes = {
-            "success": ("#15803D", "#ECFDF3", "#BBF7D0", "✔"),
-            "info": (theme.NAVY, "#EFF6FF", "#BFDBFE", "ℹ"),
-            "warning": ("#B45309", "#FFFBEB", "#FDE68A", "⚠"),
-            "error": (theme.RED, "#FEF2F2", "#FECACA", "✕"),
+            "success": (theme.WHITE, theme.ACCENT, "#E57C20", "✔"),
+            "info": (theme.WHITE, theme.ACCENT, "#E57C20", "ℹ"),
+            "warning": (theme.WHITE, "#D97706", "#B45309", "⚠"),
+            "error": (theme.WHITE, theme.RED, "#C81E1E", "✕"),
         }
         fg, bg, border, icon = palettes.get(kind, palettes["info"])
 
         self.setStyleSheet(
-            f"QFrame#toastNotification {{ background: {bg}; border: 1.5px solid {border}; "
+            f"QFrame#toastNotification {{ background: {bg}; border: 1px solid {border}; "
             f"border-radius: 10px; }}"
         )
 
         row = QHBoxLayout(self)
-        row.setContentsMargins(14, 10, 14, 10)
-        row.setSpacing(10)
+        row.setContentsMargins(16, 8, 18, 8)
+        row.setSpacing(8)
 
         icon_lbl = QLabel(icon)
-        icon_lbl.setStyleSheet(f"color: {fg}; font-size: 12pt; font-weight: 800; background: transparent;")
+        icon_lbl.setStyleSheet(f"color: {fg}; font-size: 11pt; font-weight: 800; background: transparent;")
         row.addWidget(icon_lbl)
 
         text_lbl = QLabel(message)
         text_lbl.setWordWrap(True)
-        text_lbl.setMaximumWidth(380)
-        text_lbl.setStyleSheet(f"color: {fg}; font-size: 9.8pt; font-weight: 600; background: transparent;")
+        text_lbl.setMaximumWidth(460)
+        text_lbl.setStyleSheet(f"color: {fg}; font-size: 9.5pt; font-weight: 600; background: transparent;")
         row.addWidget(text_lbl, 1)
 
         self._opacity = QGraphicsOpacityEffect(self)
@@ -149,8 +149,9 @@ class ToastNotification(QFrame):
         parent = self.parentWidget()
         if parent is not None:
             pw = parent.width()
-            x = max(16, pw - self.width() - 24)
-            y = 18
+            # Центрируем по рабочей области (с учётом сайдбара, если это MainWindow)
+            x = max(16, (pw - self.width()) // 2)
+            y = 12
             self.move(x, y)
         self.show()
         self.raise_()
@@ -190,18 +191,26 @@ def show_toast(
 
 
 def style_combo(combo: QComboBox) -> QComboBox:
-    """Настраивает всплывающий список QComboBox со светлой палитрой и удобной высотой строк."""
+    """Настраивает всплывающий список QComboBox без тёмных рамок/углов и с чистой светлой палитрой."""
     view = QListView(combo)
     view.setSpacing(1)
+    view.setFrameShape(QFrame.Shape.NoFrame)
     combo.setView(view)
     container = view.window()
-    container.setAutoFillBackground(True)
-    pal = container.palette()
+    container.setWindowFlags(
+        Qt.WindowType.Popup
+        | Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.NoDropShadowWindowHint
+    )
+    container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    container.setStyleSheet("background: transparent; border: none;")
+    pal = view.palette()
     pal.setColor(QPalette.ColorRole.Window, QColor(theme.WHITE))
     pal.setColor(QPalette.ColorRole.Base, QColor(theme.WHITE))
     pal.setColor(QPalette.ColorRole.Text, QColor(theme.TEXT))
     pal.setColor(QPalette.ColorRole.WindowText, QColor(theme.TEXT))
-    container.setPalette(pal)
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(theme.ACCENT_SOFT))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.NAVY))
     view.setPalette(pal)
     return combo
 
@@ -337,22 +346,22 @@ class ColorStatCard(QFrame):
         self.setStyleSheet(f"QFrame#stat {{ background:{color}; border-radius:12px; }}")
         self.setObjectName("stat")
         row = QHBoxLayout(self)
-        row.setContentsMargins(18, 16, 18, 16)
-        row.setSpacing(14)
+        row.setContentsMargins(14, 14, 14, 14)
+        row.setSpacing(10)
 
         icon = QLabel(glyph)
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon.setFixedSize(44, 44)
-        icon.setStyleSheet("background:rgba(255,255,255,0.95); border-radius:10px; "
-                           f"color:{color}; font-size:17pt;")
+        icon.setFixedSize(38, 38)
+        icon.setStyleSheet("background:rgba(255,255,255,0.95); border-radius:9px; "
+                           f"color:{color}; font-size:15pt;")
         row.addWidget(icon)
 
         col = QVBoxLayout()
-        col.setSpacing(3)
+        col.setSpacing(2)
         t = QLabel(title)
-        t.setStyleSheet("color:rgba(255,255,255,0.85); font-size:9pt;")
+        t.setStyleSheet("color:rgba(255,255,255,0.88); font-size:8.5pt;")
         v = QLabel(value)
-        v.setStyleSheet("color:white; font-size:15pt; font-weight:700;")
+        v.setStyleSheet("color:white; font-size:12.5pt; font-weight:700;")
         col.addWidget(t)
         col.addWidget(v)
         row.addLayout(col, 1)

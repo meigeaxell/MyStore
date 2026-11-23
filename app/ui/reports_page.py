@@ -239,8 +239,7 @@ class ReportsPage(QWidget):
         self.date_from_edit = QDateEdit(today.addMonths(-1))
         self.date_from_edit.setCalendarPopup(True)
         self.date_from_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_from_edit.setEnabled(False)
-        self.date_from_edit.dateChanged.connect(self.refresh_data)
+        self.date_from_edit.dateChanged.connect(self._on_custom_date_changed)
         filter_bar.addWidget(self.date_from_edit)
 
         filter_bar.addWidget(QLabel("—"))
@@ -248,8 +247,7 @@ class ReportsPage(QWidget):
         self.date_to_edit = QDateEdit(today)
         self.date_to_edit.setCalendarPopup(True)
         self.date_to_edit.setDisplayFormat("dd.MM.yyyy")
-        self.date_to_edit.setEnabled(False)
-        self.date_to_edit.dateChanged.connect(self.refresh_data)
+        self.date_to_edit.dateChanged.connect(self._on_custom_date_changed)
         filter_bar.addWidget(self.date_to_edit)
 
         filter_bar.addWidget(QLabel("Walýuta:"))
@@ -274,9 +272,25 @@ class ReportsPage(QWidget):
         root.addWidget(self.tabs, 1)
 
     def _on_preset_changed(self) -> None:
-        is_custom = self.preset_combo.currentData() == "custom"
-        self.date_from_edit.setEnabled(is_custom)
-        self.date_to_edit.setEnabled(is_custom)
+        preset = self.preset_combo.currentData()
+        if preset != "custom":
+            d_from, d_to = ReportService.resolve_date_range(preset)
+            if d_from and d_to:
+                self.date_from_edit.blockSignals(True)
+                self.date_to_edit.blockSignals(True)
+                self.date_from_edit.setDate(QDate(d_from.year, d_from.month, d_from.day))
+                self.date_to_edit.setDate(QDate(d_to.year, d_to.month, d_to.day))
+                self.date_from_edit.blockSignals(False)
+                self.date_to_edit.blockSignals(False)
+        self.refresh_data()
+
+    def _on_custom_date_changed(self) -> None:
+        if self.preset_combo.currentData() != "custom":
+            idx = self.preset_combo.findData("custom")
+            if idx >= 0:
+                self.preset_combo.blockSignals(True)
+                self.preset_combo.setCurrentIndex(idx)
+                self.preset_combo.blockSignals(False)
         self.refresh_data()
 
     def _get_date_range(self) -> tuple[datetime | None, datetime | None]:

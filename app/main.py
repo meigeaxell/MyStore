@@ -3,12 +3,35 @@ import sys
 import traceback
 
 from PySide6.QtCore import QEvent, QLocale, QObject, Qt
-from PySide6.QtGui import QIcon, QKeyEvent
+from PySide6.QtGui import QColor, QIcon, QKeyEvent, QPalette
 from PySide6.QtWidgets import QApplication, QDoubleSpinBox, QMessageBox
 
 from app.config import BUNDLE_ROOT, DATA_DIR, ensure_app_directories
 from app.database.engine import initialize_database
+from app.ui import theme
 from app.ui.main_window import MainWindow
+
+
+def _build_light_palette() -> QPalette:
+    """Принудительная светлая палитра Qt, чтобы тёмная тема ОС (Linux KDE / Windows Dark)
+    не просвечивала в QFileDialog, QComboBox, QCalendarWidget и QCheckBox."""
+    pal = QPalette()
+    pal.setColor(QPalette.ColorRole.Window, QColor(theme.BG))
+    pal.setColor(QPalette.ColorRole.WindowText, QColor(theme.TEXT))
+    pal.setColor(QPalette.ColorRole.Base, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor("#FAFBFC"))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme.NAVY))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.Text, QColor(theme.TEXT))
+    pal.setColor(QPalette.ColorRole.Button, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.ButtonText, QColor(theme.TEXT))
+    pal.setColor(QPalette.ColorRole.BrightText, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(theme.ACCENT))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.PlaceholderText, QColor("#98A2B3"))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor("#98A2B3"))
+    pal.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor("#98A2B3"))
+    return pal
 
 
 class DecimalDotEventFilter(QObject):
@@ -37,7 +60,12 @@ class DecimalDotEventFilter(QObject):
 
 
 def _resolve_app_icon() -> QIcon:
-    for rel in ("resources/mobilestore.ico", "resources/mobilestore.png"):
+    candidates = (
+        ("resources/mobilestore.ico", "resources/mobilestore.svg", "resources/mobilestore.png")
+        if sys.platform == "win32"
+        else ("resources/mobilestore.svg", "resources/mobilestore.png", "resources/mobilestore.ico")
+    )
+    for rel in candidates:
         path = BUNDLE_ROOT / rel
         if path.exists():
             icon = QIcon(str(path))
@@ -61,6 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     QLocale.setDefault(QLocale.c())
 
     app = QApplication.instance() or QApplication(sys.argv)
+    app.setStyle("Fusion")
+    app.setPalette(_build_light_palette())
     app.setApplicationName("MobileStore")
     app.setOrganizationName("MobileStore")
 
