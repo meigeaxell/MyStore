@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -21,14 +22,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DocumentScanner
 import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.ListAlt
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.MoveToInbox
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -51,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -62,9 +65,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.mobilestore.scanner.data.ReceivingDraftImei
 import com.mobilestore.scanner.data.ReceivingDraftMeta
-import com.mobilestore.scanner.network.ConnectionState
+import com.mobilestore.scanner.network.IncomingQueueCounts
 import com.mobilestore.scanner.scanner.CameraPreviewView
 import com.mobilestore.scanner.scanner.LuhnValidator
 import com.mobilestore.scanner.ui.theme.AccentBg
@@ -72,21 +74,21 @@ import com.mobilestore.scanner.ui.theme.AccentOrange
 import com.mobilestore.scanner.ui.theme.BorderColor
 import com.mobilestore.scanner.ui.theme.GreenSuccess
 import com.mobilestore.scanner.ui.theme.NavyDark
-import com.mobilestore.scanner.ui.theme.RedDanger
 import com.mobilestore.scanner.ui.theme.SurfaceBg
 import com.mobilestore.scanner.ui.theme.SurfaceWhite
 import com.mobilestore.scanner.ui.theme.TealAccent
 import com.mobilestore.scanner.ui.theme.TextMuted
 import com.mobilestore.scanner.ui.theme.TextPrimary
 import com.mobilestore.scanner.viewmodel.ScannerViewModel
+import com.mobilestore.scanner.viewmodel.SessionQueuedEntry
 
 /**
- * Экран 2: Приёмка товара на склад.
- * - Полноэкранная камера с теми же размерами и HUD-панелью, что и на экране «Сканер»
- * - Телефоны (IMEI 1 + IMEI 2 + S/N) -> контрольная карточка с кнопкой «Добавить»
- * - Только товарный штрихкод (аксессуар) -> +1 шт. сразу без контрольного окна
- * - Данные закупки (поставщик, цена, валюта, курс, список IMEI) открываются в удобном Bottom Sheet
- * - Все поля ввода используют локальный Compose state (без блокировки удаления цифр и скачков курсора)
+ * Экран 2: Kabul ediş (Лёгкая станция сканирования -> Буферная очередь ПК).
+ * - Режим 1: «IMEI bilen» (Telefon) — сканирование IMEI/SN и мгновенная отправка в вкладку ПК «Telefonlar (IMEI)»
+ *   без выбора товара или категории на телефоне.
+ * - Режим 2: «Sany bilen» (Haryt / Aksessuar) — сканирование штрихкода (+1 сразу в «Belli» / «Näbelli»),
+ *   Guty OCR (выбор известного или отправка как «Näbelli»), либо выбор существующего товара из каталога.
+ * - Без создания новых товаров на телефоне и без прямой записи в складскую БД.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,49 +100,50 @@ fun ReceivingScreen(
     val connState by vm.connectionState.collectAsState()
     val config by vm.serverConfig.collectAsState()
     val draftMeta by vm.receivingMeta.collectAsState()
-    val draftImeis by vm.receivingImeis.collectAsState()
     val pendingDevice by vm.pendingReceivingDevice.collectAsState()
     val isBusy by vm.isReceivingBusy.collectAsState()
     val catalog by vm.catalogProducts.collectAsState()
-    val categories by vm.categories.collectAsState()
     val cooldownTrigger by vm.scanCooldownTrigger.collectAsState()
     val receivingOcrResult by vm.receivingOcrResult.collectAsState()
     val receivingOcrCatFilter by vm.receivingOcrCategoryFilter.collectAsState()
+    val queueCounts by vm.incomingQueueCounts.collectAsState()
+    val sessionEntries by vm.sessionQueuedEntries.collectAsState()
 
     var cameraStatus by remember { mutableStateOf("Işjeň") }
-    var ocrEnabled by remember { mutableStateOf(true) }
-    var showPurchaseSheet by remember { mutableStateOf(false) }
+    var showQueueSheet by remember { mutableStateOf(false) }
     var showProductPicker by remember { mutableStateOf(false) }
-    var showCreateProduct by remember { mutableStateOf(false) }
-    var createProductPrefill by remember { mutableStateOf<com.mobilestore.scanner.network.AccessoryDraftSuggestion?>(null) }
-    var createProductOcrRawText by remember { mutableStateOf<String?>(null) }
-    var showManualImeiDialog by remember { mutableStateOf(false) }
-    var boxCaptureTrigger by remember { mutableStateOf(0) }
-
-    LaunchedEffect(Unit) {
-        if (catalog.isEmpty()) vm.loadCatalog()
-        if (categories.isEmpty()) vm.loadCategories()
-    }
+    var openSheetAfterPicker by remember { mutableStateOf(false) }
+    var showManualBarcodeDialog by remember { mutableStateOf(false) }
+    var boxCaptureTrigger by remember { mutableIntStateOf(0) }
 
     val meta = draftMeta
     val useImeiMode = meta?.useImeiMode ?: true
-    val batchCount = if (useImeiMode) draftImeis.size else (meta?.nonImeiQuantity ?: 0)
-    val batchBadge = if (useImeiMode) "$batchCount IMEI" else "$batchCount sany"
+
+    LaunchedEffect(useImeiMode) {
+        if (!useImeiMode && catalog.isEmpty()) {
+            vm.loadCatalog()
+        }
+    }
 
     val isPaused = pendingDevice != null ||
         receivingOcrResult != null ||
-        showPurchaseSheet ||
+        showQueueSheet ||
         showProductPicker ||
-        showCreateProduct ||
-        showManualImeiDialog ||
+        showManualBarcodeDialog ||
         isBusy
+
+    val queuePillLabel = if (queueCounts.total > 0) {
+        "PK: ${queueCounts.phoneImei} tel • ${queueCounts.known} belli • ${queueCounts.unknown} näb"
+    } else {
+        "PK nobaty: 0"
+    }
 
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (hasCameraPermission) {
             CameraPreviewView(
                 isPaused = isPaused,
-                enableOcr = ocrEnabled,
-                burstWindowMs = 800L,
+                enableOcr = useImeiMode,
+                burstWindowMs = if (useImeiMode) 800L else 350L,
                 cooldownMs = config.scanCooldownMs,
                 cooldownTriggerKey = cooldownTrigger,
                 boxCaptureTriggerKey = boxCaptureTrigger,
@@ -170,29 +173,58 @@ fun ReceivingScreen(
             }
         }
 
-        // Компактный светящийся индикатор подключения + короткий бейдж товара и партии
-        Row(
+        // Верхняя панель: индикатор ПК-очереди + переключатель режима (IMEI bilen / Sany bilen)
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 12.dp)
                 .align(Alignment.TopCenter),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            val prodTitle = meta?.productName?.ifBlank { null }
-            val pillLabel = if (prodTitle != null) "$prodTitle • $batchBadge" else batchBadge
-            ConnectionGlowPill(state = connState, trailingText = pillLabel)
-
-            Surface(
-                color = NavyDark.copy(alpha = 0.72f),
-                shape = RoundedCornerShape(16.dp),
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "Kabul ediş",
-                    color = AccentOrange,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                ConnectionGlowPill(state = connState, trailingText = queuePillLabel)
+
+                Surface(
+                    color = NavyDark.copy(alpha = 0.78f),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text(
+                        text = "Kabul ediş",
+                        color = AccentOrange,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
+                }
+            }
+
+            // Явный 2-позиционный переключатель режима прямо на экране камеры
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ReceivingModeTogglePill(
+                    label = "IMEI bilen",
+                    subtitle = "Telefon",
+                    icon = Icons.Default.PhoneAndroid,
+                    selected = useImeiMode,
+                    onClick = { vm.updateReceivingMeta(useImeiMode = true) },
+                    modifier = Modifier.weight(1f),
+                )
+                ReceivingModeTogglePill(
+                    label = "Sany bilen",
+                    subtitle = "Haryt / Aksessuar",
+                    icon = Icons.Default.Inventory2,
+                    selected = !useImeiMode,
+                    onClick = {
+                        vm.updateReceivingMeta(useImeiMode = false)
+                        if (catalog.isEmpty()) vm.loadCatalog()
+                    },
+                    modifier = Modifier.weight(1f),
                 )
             }
         }
@@ -204,55 +236,88 @@ fun ReceivingScreen(
                 .padding(start = 14.dp, end = 84.dp, bottom = 14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                OutlinedButton(
-                    onClick = { boxCaptureTrigger += 1 },
-                    enabled = !isBusy && hasCameraPermission,
-                    border = BorderStroke(1.dp, AccentOrange),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = NavyDark.copy(alpha = 0.86f),
-                        contentColor = AccentOrange,
-                    ),
-                ) {
-                    Icon(Icons.Default.DocumentScanner, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Guty OCR", maxLines = 1, fontWeight = FontWeight.Bold)
+            if (useImeiMode) {
+                // Режим 1: IMEI bilen (Telefon) — НИКАКИХ кнопок «Haryt» и «+ Täze»!
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = { vm.openManualPhoneDialog() },
+                        enabled = !isBusy,
+                        border = BorderStroke(1.dp, AccentOrange),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = NavyDark.copy(alpha = 0.86f),
+                            contentColor = AccentOrange,
+                        ),
+                    ) {
+                        Icon(Icons.Default.Keyboard, contentDescription = null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("El bilen IMEI", maxLines = 1, fontWeight = FontWeight.Bold)
+                    }
                 }
-                OutlinedButton(
-                    onClick = { showProductPicker = true },
-                    border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = NavyDark.copy(alpha = 0.82f),
-                        contentColor = Color.White,
-                    ),
-                ) {
-                    Icon(Icons.Default.Inventory2, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Haryt", maxLines = 1)
-                }
-                OutlinedButton(
-                    onClick = { showManualImeiDialog = true },
-                    border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        containerColor = NavyDark.copy(alpha = 0.82f),
-                        contentColor = Color.White,
-                    ),
-                ) {
-                    Icon(Icons.Default.Keyboard, contentDescription = null)
+            } else {
+                // Режим 2: Sany bilen (Haryt / Aksessuar) — «Guty OCR» + «Haryt» (read-only) + ручной штрихкод
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(
+                        onClick = { boxCaptureTrigger += 1 },
+                        enabled = !isBusy && hasCameraPermission,
+                        border = BorderStroke(1.dp, AccentOrange),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = NavyDark.copy(alpha = 0.86f),
+                            contentColor = AccentOrange,
+                        ),
+                    ) {
+                        Icon(Icons.Default.DocumentScanner, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Guty OCR", maxLines = 1, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (catalog.isEmpty()) vm.loadCatalog()
+                            openSheetAfterPicker = true
+                            showProductPicker = true
+                        },
+                        enabled = !isBusy,
+                        border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = NavyDark.copy(alpha = 0.82f),
+                            contentColor = Color.White,
+                        ),
+                    ) {
+                        Icon(Icons.Default.Inventory2, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Haryt", maxLines = 1)
+                    }
+                    OutlinedButton(
+                        onClick = { showManualBarcodeDialog = true },
+                        enabled = !isBusy,
+                        border = BorderStroke(1.dp, BorderColor.copy(alpha = 0.5f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = NavyDark.copy(alpha = 0.82f),
+                            contentColor = Color.White,
+                        ),
+                    ) {
+                        Icon(Icons.Default.Keyboard, contentDescription = null)
+                    }
                 }
             }
 
             Button(
-                onClick = { showPurchaseSheet = true },
+                onClick = { showQueueSheet = true },
                 colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth().height(48.dp),
             ) {
                 Icon(Icons.Default.ListAlt, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
+                val btnText = if (useImeiMode) {
+                    "PK nobaty we sazlama (${queueCounts.phoneImei} tel • ${sessionEntries.size})"
+                } else {
+                    val selName = meta?.productName?.takeIf { it.isNotBlank() }
+                    if (selName != null) "PK nobatyna iber • $selName" else "PK nobatyna iber (${queueCounts.total})"
+                }
                 Text(
-                    text = "Alyş maglumaty we sanaw ($batchBadge)",
+                    text = btnText,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
                 )
             }
         }
@@ -267,6 +332,7 @@ fun ReceivingScreen(
         }
     }
 
+    // Лист результатов Guty OCR (ТОЛЬКО в режиме Sany bilen, БЕЗ создания товара на телефоне!)
     val recOcrRes = receivingOcrResult
     if (recOcrRes != null) {
         ModalBottomSheet(
@@ -277,87 +343,118 @@ fun ReceivingScreen(
                 result = recOcrRes,
                 isBusy = isBusy,
                 selectedCategoryId = receivingOcrCatFilter,
-                showCreateNewButton = true,
+                showCreateNewButton = false,
                 onRequery = { editedText, catId -> vm.matchAccessoryForReceiving(editedText, catId) },
                 onSelectProduct = { chosen ->
-                    vm.selectAccessoryForReceiving(chosen)
-                    showPurchaseSheet = true
-                },
-                onCreateNewFromDraft = { draft, rawText ->
-                    vm.dismissReceivingOcr()
-                    createProductPrefill = draft
-                    createProductOcrRawText = rawText
-                    showCreateProduct = true
+                    vm.queueOcrMatchedProductToPc(chosen, recOcrRes.rawText)
                 },
                 onDismiss = { vm.dismissReceivingOcr() },
             )
+            OutlinedButton(
+                onClick = {
+                    vm.queueOcrUnknownToPc(
+                        rawText = recOcrRes.rawText,
+                        modelHint = recOcrRes.parsed.cleanedQuery,
+                    )
+                },
+                enabled = !isBusy,
+                border = BorderStroke(1.5.dp, AccentOrange),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = AccentOrange),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp)
+                    .padding(bottom = 24.dp)
+                    .height(48.dp),
+            ) {
+                Icon(Icons.Default.MoveToInbox, contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    text = "Näbelli hökmünde PK nobatyna iber",
+                    fontWeight = FontWeight.Bold,
+                )
+            }
         }
     }
 
-    // Модальный лист (Bottom Sheet) с данными закупки и списком отсканированных IMEI
-    if (showPurchaseSheet) {
+    // Нижний лист (Bottom Sheet): PK nobaty, настройки валюты/поставщика и ручная отправка количества
+    if (showQueueSheet) {
         ModalBottomSheet(
             containerColor = SurfaceWhite,
-            onDismissRequest = { if (!isBusy) showPurchaseSheet = false },
+            onDismissRequest = { if (!isBusy) showQueueSheet = false },
         ) {
-            ReceivingPurchaseSheet(
+            ReceivingQueueBottomSheet(
                 meta = meta,
-                imeis = draftImeis,
+                queueCounts = queueCounts,
+                sessionEntries = sessionEntries,
                 isBusy = isBusy,
-                onPickProduct = { showProductPicker = true },
-                onCreateProduct = { showCreateProduct = true },
-                onModeChanged = { imeiMode -> vm.updateReceivingMeta(useImeiMode = imeiMode) },
-                onRemoveImei = { vm.removeReceivingImei(it) },
-                onPersistFields = { sup, cost, curr, rate, qty ->
-                    vm.updateReceivingMeta(
-                        supplierName = sup,
+                onModeChanged = { imeiMode ->
+                    vm.updateReceivingMeta(useImeiMode = imeiMode)
+                    if (!imeiMode && catalog.isEmpty()) vm.loadCatalog()
+                },
+                onPickProduct = {
+                    if (catalog.isEmpty()) vm.loadCatalog()
+                    openSheetAfterPicker = false
+                    showProductPicker = true
+                },
+                onClearProduct = { vm.clearReceivingSelectedProduct() },
+                onPersistDefaults = { sup, curr ->
+                    vm.updateReceivingMeta(supplierName = sup, currency = curr)
+                },
+                onSendQuantityProduct = { qty, cost, curr, sup ->
+                    vm.queueQuantityProductToPc(
+                        productId = meta?.productId,
+                        productName = meta?.productName.orEmpty(),
+                        quantity = qty,
                         unitCost = cost,
                         currency = curr,
-                        exchangeRate = rate,
-                        nonImeiQuantity = qty,
-                    )
-                },
-                onClearDraft = {
-                    vm.clearReceivingDraft()
-                    showPurchaseSheet = false
-                },
-                onSubmit = { sup, cost, curr, rate, qty ->
-                    vm.submitReceivingDraft(
                         supplierName = sup,
-                        unitCost = cost,
-                        currency = curr,
-                        exchangeRate = rate,
-                        nonImeiQuantity = qty,
-                        onSuccess = { showPurchaseSheet = false },
+                        onSuccess = { showQueueSheet = false },
                     )
                 },
+                onClearSession = { vm.clearSessionQueuedEntries() },
             )
         }
     }
 
-    // Контрольное окно для смартфонов (когда считаны IMEI 1 / IMEI 2 / S/N)
+    // Единое окно подтверждения телефона (как после скана камерой, так и при ручном вводе IMEI)
     val dev = pendingDevice
     if (dev != null) {
         var editImei1 by remember(dev) { mutableStateOf(dev.imei1) }
         var editImei2 by remember(dev) { mutableStateOf(dev.imei2) }
         var editSerial by remember(dev) { mutableStateOf(dev.serialNumber) }
+        var condition by remember(dev) { mutableStateOf("new") }
+        var modelHint by remember(dev) { mutableStateOf("") }
+        var unitCost by remember(dev) { mutableStateOf("") }
+        var currency by remember(dev) { mutableStateOf(meta?.currency?.ifBlank { "USD" } ?: "USD") }
         val luhnOk = LuhnValidator.isValidImei(editImei1)
+        val chipColors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = AccentBg,
+            selectedLabelColor = AccentOrange,
+        )
 
         AlertDialog(
             containerColor = SurfaceWhite,
-            onDismissRequest = { vm.dismissPendingReceivingDevice() },
-            title = { Text("Enjam maglumatlaryny barlaň", color = NavyDark) },
+            onDismissRequest = { if (!isBusy) vm.dismissPendingReceivingDevice() },
+            title = {
+                Text(
+                    text = if (dev.source == "manual") "Telefony PK nobatyna iber" else "Telefon maglumatlaryny barlaň",
+                    color = NavyDark,
+                )
+            },
             text = {
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        DetectedFieldBadge("IMEI 1", editImei1.isNotBlank())
-                        DetectedFieldBadge("IMEI 2", editImei2.isNotBlank())
-                        DetectedFieldBadge("S/N", editSerial.isNotBlank())
-                        if (!dev.productBarcode.isNullOrBlank()) {
-                            DetectedFieldBadge("EAN", true)
+                    if (dev.source != "manual") {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            DetectedFieldBadge("IMEI 1", editImei1.isNotBlank())
+                            DetectedFieldBadge("IMEI 2", editImei2.isNotBlank())
+                            DetectedFieldBadge("S/N", editSerial.isNotBlank())
+                            if (!dev.productBarcode.isNullOrBlank()) {
+                                DetectedFieldBadge("EAN", true)
+                            }
                         }
                     }
 
@@ -390,12 +487,59 @@ fun ReceivingScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (!dev.productBarcode.isNullOrBlank()) {
-                        Text(
-                            text = "Gutynyň ştrihkody: ${dev.productBarcode}",
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                            color = TextMuted,
+
+                    // Быстрый переключатель Täze / B/U
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Ýagdaýy:", fontSize = 13.sp, color = TextMuted)
+                        FilterChip(
+                            selected = condition == "new",
+                            onClick = { condition = "new" },
+                            label = { Text("Täze") },
+                            colors = chipColors,
+                        )
+                        FilterChip(
+                            selected = condition == "used",
+                            onClick = { condition = "used" },
+                            label = { Text("B/U") },
+                            colors = chipColors,
+                        )
+                    }
+
+                    OutlinedTextField(
+                        value = modelHint,
+                        onValueChange = { modelHint = it },
+                        label = { Text("Model / bellik (hökmany däl)") },
+                        placeholder = { Text("Mysal: 15pm 256 blk") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = unitCost,
+                            onValueChange = { unitCost = it },
+                            label = { Text("Alyş bahasy (hökm. däl)") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        FilterChip(
+                            selected = currency == "USD",
+                            onClick = { currency = "USD" },
+                            label = { Text("USD", fontSize = 12.sp) },
+                            colors = chipColors,
+                        )
+                        FilterChip(
+                            selected = currency == "TMT",
+                            onClick = { currency = "TMT" },
+                            label = { Text("TMT", fontSize = 12.sp) },
+                            colors = chipColors,
                         )
                     }
                 }
@@ -403,51 +547,57 @@ fun ReceivingScreen(
             confirmButton = {
                 Button(
                     colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
-                    enabled = editImei1.isNotBlank(),
-                    onClick = { vm.confirmPendingReceivingDevice(editImei1, editImei2, editSerial) },
+                    enabled = !isBusy && editImei1.isNotBlank(),
+                    onClick = {
+                        vm.queuePhoneToPc(
+                            imei1 = editImei1,
+                            imei2 = editImei2,
+                            serialNumber = editSerial,
+                            condition = condition,
+                            modelHint = modelHint,
+                            unitCost = unitCost,
+                            currency = currency,
+                            productBarcode = dev.productBarcode,
+                            requestId = dev.requestId,
+                        )
+                    },
                 ) {
-                    Text("Goş")
+                    Text(if (isBusy) "Iberilýär…" else "PK nobatyna iber")
                 }
             },
             dismissButton = {
-                TextButton(onClick = { vm.dismissPendingReceivingDevice() }) {
+                TextButton(
+                    enabled = !isBusy,
+                    onClick = { vm.dismissPendingReceivingDevice() },
+                ) {
                     Text("Ýatyr")
                 }
             },
         )
     }
 
-    // Ручной ввод IMEI (если этикетка повреждена)
-    if (showManualImeiDialog) {
-        var manualImei1 by remember { mutableStateOf("") }
-        var manualImei2 by remember { mutableStateOf("") }
-        var manualSn by remember { mutableStateOf("") }
+    // Ручной ввод штрихкода в режиме Sany bilen
+    if (showManualBarcodeDialog) {
+        var manualCode by remember { mutableStateOf("") }
+        var manualQty by remember { mutableStateOf("1") }
         AlertDialog(
             containerColor = SurfaceWhite,
-            onDismissRequest = { showManualImeiDialog = false },
-            title = { Text("IMEI el bilen goş", color = NavyDark) },
+            onDismissRequest = { if (!isBusy) showManualBarcodeDialog = false },
+            title = { Text("Ştrihkody PK nobatyna iber", color = NavyDark) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
-                        value = manualImei1,
-                        onValueChange = { manualImei1 = it },
-                        label = { Text("IMEI 1 (15 san) *") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        value = manualCode,
+                        onValueChange = { manualCode = it },
+                        label = { Text("Ştrihkod / SKU *") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                     OutlinedTextField(
-                        value = manualImei2,
-                        onValueChange = { manualImei2 = it },
-                        label = { Text("IMEI 2 (hökmany däl)") },
+                        value = manualQty,
+                        onValueChange = { manualQty = it.filter(Char::isDigit) },
+                        label = { Text("Sany") },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = manualSn,
-                        onValueChange = { manualSn = it },
-                        label = { Text("Seriýa belgisi S/N (hökmany däl)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -456,26 +606,38 @@ fun ReceivingScreen(
             confirmButton = {
                 Button(
                     colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
-                    enabled = manualImei1.isNotBlank(),
+                    enabled = !isBusy && manualCode.isNotBlank(),
                     onClick = {
-                        vm.addReceivingDevice(manualImei1, manualImei2, manualSn)
-                        showManualImeiDialog = false
+                        val qtyVal = (manualQty.toIntOrNull() ?: 1).coerceAtLeast(1)
+                        vm.queueBarcodeQuantityToPc(
+                            barcode = manualCode,
+                            quantity = qtyVal,
+                            onSuccess = { showManualBarcodeDialog = false },
+                        )
                     },
-                ) { Text("Goş") }
+                ) {
+                    Text(if (isBusy) "Iberilýär…" else "PK nobatyna iber")
+                }
             },
             dismissButton = {
-                TextButton(onClick = { showManualImeiDialog = false }) { Text("Ýatyr") }
+                TextButton(
+                    enabled = !isBusy,
+                    onClick = { showManualBarcodeDialog = false },
+                ) {
+                    Text("Ýatyr")
+                }
             },
         )
     }
 
+    // Read-only выбор существующего товара из каталога (ТОЛЬКО для режима Sany bilen, БЕЗ «+ Täze»)
     if (showProductPicker) {
         var filter by remember { mutableStateOf("") }
         val filtered = remember(catalog, filter) {
             val q = filter.trim().lowercase()
             if (q.isEmpty()) catalog
             else catalog.filter {
-                "${it.name} ${it.brand} ${it.model} ${it.specification} ${it.sku}".lowercase().contains(q)
+                "${it.name} ${it.brand} ${it.model} ${it.specification} ${it.sku} ${it.barcode}".lowercase().contains(q)
             }
         }
         AlertDialog(
@@ -488,11 +650,8 @@ fun ReceivingScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Haryt saýlaň", color = NavyDark)
-                    TextButton(onClick = {
-                        showProductPicker = false
-                        showCreateProduct = true
-                    }) {
-                        Text("+ Täze", color = AccentOrange)
+                    IconButton(onClick = { vm.loadCatalog() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "Täzele", tint = NavyDark)
                     }
                 }
             },
@@ -505,25 +664,50 @@ fun ReceivingScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    LazyColumn(modifier = Modifier.height(280.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(filtered, key = { it.id }) { prod ->
-                            Card(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        vm.updateReceivingMeta(productId = prod.id, productName = prod.name)
-                                        showProductPicker = false
-                                    },
-                                colors = CardDefaults.cardColors(containerColor = SurfaceBg),
-                                border = BorderStroke(1.dp, BorderColor),
-                            ) {
-                                Column(modifier = Modifier.padding(10.dp)) {
-                                    Text(prod.name, fontWeight = FontWeight.Bold, color = NavyDark)
-                                    Text(
-                                        "${prod.brand} ${prod.model} ${prod.specification}".trim(),
-                                        fontSize = 12.sp,
-                                        color = TextMuted,
-                                    )
+                    if (filtered.isEmpty()) {
+                        Text(
+                            text = "Gabat gelýän haryt tapylmady. Täze harytlar PK nobatyndan goşulýar.",
+                            fontSize = 12.sp,
+                            color = TextMuted,
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.height(280.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            items(filtered, key = { it.id }) { prod ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            vm.updateReceivingMeta(
+                                                productId = prod.id,
+                                                productName = prod.name,
+                                                useImeiMode = false,
+                                            )
+                                            showProductPicker = false
+                                            if (openSheetAfterPicker) {
+                                                openSheetAfterPicker = false
+                                                showQueueSheet = true
+                                            }
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = SurfaceBg),
+                                    border = BorderStroke(1.dp, BorderColor),
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(prod.name, fontWeight = FontWeight.Bold, color = NavyDark)
+                                        val sub = listOf(prod.brand, prod.model, prod.specification)
+                                            .filter { it.isNotBlank() }
+                                            .joinToString(" • ")
+                                        if (sub.isNotBlank()) {
+                                            Text(sub, fontSize = 12.sp, color = TextMuted)
+                                        }
+                                        Text(
+                                            text = "Galyndy: ${prod.stockQuantity} sany • SKU: ${prod.sku}",
+                                            fontSize = 11.sp,
+                                            color = TealAccent,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -535,72 +719,56 @@ fun ReceivingScreen(
             },
         )
     }
+}
 
-    if (showCreateProduct) {
-        val hadOcrPrefill = createProductPrefill != null
-        ProductEditorDialog(
-            categories = categories.filter { it.isActive },
-            existing = null,
-            prefill = createProductPrefill,
-            onDismiss = {
-                showCreateProduct = false
-                createProductPrefill = null
-                createProductOcrRawText = null
-            },
-            onSave = { name, catId, brand, model, mem, color, extra, bc, minStock, cost, costCurr ->
-                val rawAlias = createProductOcrRawText
-                vm.saveProduct(
-                    productId = null,
-                    name = name,
-                    categoryId = catId,
-                    brand = brand,
-                    model = model,
-                    memory = mem,
-                    color = color,
-                    extraSpecs = extra,
-                    minStock = minStock,
-                    defaultCost = cost,
-                    costCurrency = costCurr,
-                    ocrRawText = rawAlias,
-                    barcode = bc,
-                ) { createdId, createdName ->
-                    if (createdId != null) {
-                        vm.updateReceivingMeta(
-                            productId = createdId,
-                            productName = createdName,
-                            useImeiMode = if (hadOcrPrefill) false else null,
-                            unitCost = cost.takeIf { it.isNotBlank() },
-                            currency = costCurr.takeIf { it == "USD" || it == "TMT" },
-                        )
-                        if (hadOcrPrefill) {
-                            showPurchaseSheet = true
-                        }
-                    }
-                    showCreateProduct = false
-                    createProductPrefill = null
-                    createProductOcrRawText = null
-                }
-            },
-        )
+@Composable
+private fun ReceivingModeTogglePill(
+    label: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val bg = if (selected) AccentOrange else NavyDark.copy(alpha = 0.78f)
+    val fg = Color.White
+    val subColor = if (selected) Color.White.copy(alpha = 0.9f) else Color.White.copy(alpha = 0.65f)
+    Surface(
+        color = bg,
+        shape = RoundedCornerShape(12.dp),
+        border = if (selected) null else BorderStroke(1.dp, Color.White.copy(alpha = 0.22f)),
+        modifier = modifier.clickable(onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Column {
+                Text(label, color = fg, fontSize = 12.5.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text(subtitle, color = subColor, fontSize = 10.sp, maxLines = 1)
+            }
+        }
     }
 }
 
 @Composable
-private fun ReceivingPurchaseSheet(
+private fun ReceivingQueueBottomSheet(
     meta: ReceivingDraftMeta?,
-    imeis: List<ReceivingDraftImei>,
+    queueCounts: IncomingQueueCounts,
+    sessionEntries: List<SessionQueuedEntry>,
     isBusy: Boolean,
-    onPickProduct: () -> Unit,
-    onCreateProduct: () -> Unit,
     onModeChanged: (Boolean) -> Unit,
-    onRemoveImei: (String) -> Unit,
-    onPersistFields: (supplier: String, cost: String, currency: String, rate: String, qty: Int) -> Unit,
-    onClearDraft: () -> Unit,
-    onSubmit: (supplier: String, cost: String, currency: String, rate: String, qty: Int) -> Unit,
+    onPickProduct: () -> Unit,
+    onClearProduct: () -> Unit,
+    onPersistDefaults: (supplier: String, currency: String) -> Unit,
+    onSendQuantityProduct: (qty: Int, cost: String, currency: String, supplier: String) -> Unit,
+    onClearSession: () -> Unit,
 ) {
     val useImeiMode = meta?.useImeiMode ?: true
 
-    // Чистый локальный Compose state — удаление всех символов (включая первую цифру) работает мгновенно!
     var supplierText by remember(meta?.requestId) { mutableStateOf(meta?.supplierName ?: "") }
     var unitCostText by remember(meta?.requestId) {
         mutableStateOf(
@@ -608,9 +776,8 @@ private fun ReceivingPurchaseSheet(
         )
     }
     var currency by remember(meta?.requestId) { mutableStateOf(meta?.currency ?: "USD") }
-    var rateText by remember(meta?.requestId) { mutableStateOf(meta?.exchangeRate ?: "19.5000") }
-    var qtyText by remember(meta?.requestId) {
-        mutableStateOf((meta?.nonImeiQuantity ?: 1).toString())
+    var qtyText by remember(meta?.requestId, meta?.productId) {
+        mutableStateOf((meta?.nonImeiQuantity ?: 1).coerceAtLeast(1).toString())
     }
 
     val chipColors = FilterChipDefaults.filterChipColors(
@@ -626,95 +793,122 @@ private fun ReceivingPurchaseSheet(
             .padding(bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("Kabul edişi resmileşdirmek", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = NavyDark)
+        Text("PK kabul ediş nobaty", fontSize = 19.sp, fontWeight = FontWeight.Bold, color = NavyDark)
 
-        // Товар
+        // Сводка живой очереди на ПК
         Card(
             colors = CardDefaults.cardColors(containerColor = SurfaceBg),
             border = BorderStroke(1.dp, BorderColor),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceAround,
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Haryt", fontSize = 11.sp, color = TextMuted)
-                    Text(
-                        text = meta?.productName?.ifBlank { "Saýlanmadyk" } ?: "Saýlanmadyk",
-                        fontWeight = FontWeight.Bold,
-                        color = NavyDark,
-                        fontSize = 15.sp,
-                    )
-                }
-                TextButton(onClick = onPickProduct) { Text("Saýla", color = AccentOrange) }
-                TextButton(onClick = onCreateProduct) { Text("+ Täze", color = NavyDark) }
+                QueueCountStat("Telefon (IMEI)", queueCounts.phoneImei, TealAccent)
+                QueueCountStat("Belli", queueCounts.known, GreenSuccess)
+                QueueCountStat("Näbelli", queueCounts.unknown, AccentOrange)
+                QueueCountStat("Jemi", queueCounts.total, NavyDark)
             }
         }
 
-        // Режим приёмки
+        // Переключатель режима
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
                 selected = useImeiMode,
                 onClick = { onModeChanged(true) },
-                label = { Text("IMEI bilen (${imeis.size} sany)") },
+                label = { Text("IMEI bilen (Telefon)") },
                 colors = chipColors,
             )
             FilterChip(
                 selected = !useImeiMode,
                 onClick = { onModeChanged(false) },
-                label = { Text("Sany bilen") },
+                label = { Text("Sany bilen (Haryt)") },
                 colors = chipColors,
             )
         }
 
-        // Поля закупки (полностью локальный state -> все цифры свободно стираются)
-        OutlinedTextField(
-            value = supplierText,
-            onValueChange = {
-                supplierText = it
-                onPersistFields(it, unitCostText, currency, rateText, qtyText.toIntOrNull() ?: 1)
-            },
-            label = { Text("Üpjün ediji") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        if (useImeiMode) {
+            // В режиме IMEI НЕТ выбора товара и НЕТ «+ Täze»!
+            Card(
+                colors = CardDefaults.cardColors(containerColor = AccentBg),
+                border = BorderStroke(1.dp, AccentOrange.copy(alpha = 0.4f)),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    text = "Telefon IMEI skan edilende göni PK-däki «Telefonlar (IMEI)» nobatyna düşýär. " +
+                        "Haryt ýa-da kategoriýa saýlamak gerek däl.",
+                    fontSize = 12.5.sp,
+                    color = NavyDark,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        } else {
+            // В режиме Sany bilen: выбор существующего товара (БЕЗ «+ Täze») + количество + отправка в PK nobaty
+            Card(
+                colors = CardDefaults.cardColors(containerColor = SurfaceBg),
+                border = BorderStroke(1.dp, BorderColor),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Haryt (katalogdan)", fontSize = 11.sp, color = TextMuted)
+                        Text(
+                            text = meta?.productName?.ifBlank { "Saýlanmadyk" } ?: "Saýlanmadyk",
+                            fontWeight = FontWeight.Bold,
+                            color = NavyDark,
+                            fontSize = 15.sp,
+                        )
+                    }
+                    if (meta?.productId != null) {
+                        IconButton(onClick = onClearProduct) {
+                            Icon(Icons.Default.Close, contentDescription = "Arassala", tint = TextMuted)
+                        }
+                    }
+                    TextButton(onClick = onPickProduct) {
+                        Text("Saýla", color = AccentOrange, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = unitCostText,
-                onValueChange = {
-                    unitCostText = it
-                    onPersistFields(supplierText, it, currency, rateText, qtyText.toIntOrNull() ?: 1)
-                },
-                label = { Text("Alyş bahasy ($currency)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                singleLine = true,
-                modifier = Modifier.weight(1.2f),
-            )
-            OutlinedTextField(
-                value = rateText,
-                onValueChange = {
-                    rateText = it
-                    onPersistFields(supplierText, unitCostText, currency, it, qtyText.toIntOrNull() ?: 1)
-                },
-                label = { Text("Kurs") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                singleLine = true,
-                modifier = Modifier.weight(1f),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedTextField(
+                    value = qtyText,
+                    onValueChange = { qtyText = it.filter(Char::isDigit) },
+                    label = { Text("Sany *") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = unitCostText,
+                    onValueChange = { unitCostText = it },
+                    label = { Text("Alyş bahasy (hökm. däl)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    singleLine = true,
+                    modifier = Modifier.weight(1.3f),
+                )
+            }
         }
 
+        // Общие необязательные поля по умолчанию: Walýuta и Üpjün ediji
         Row(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text("Alyş walýutasy:", fontSize = 13.sp, color = TextMuted)
+            Text("Walýuta:", fontSize = 13.sp, color = TextMuted)
             FilterChip(
                 selected = currency == "USD",
                 onClick = {
                     currency = "USD"
-                    onPersistFields(supplierText, unitCostText, "USD", rateText, qtyText.toIntOrNull() ?: 1)
+                    onPersistDefaults(supplierText, "USD")
                 },
                 label = { Text("USD") },
                 colors = chipColors,
@@ -723,129 +917,146 @@ private fun ReceivingPurchaseSheet(
                 selected = currency == "TMT",
                 onClick = {
                     currency = "TMT"
-                    onPersistFields(supplierText, unitCostText, "TMT", rateText, qtyText.toIntOrNull() ?: 1)
+                    onPersistDefaults(supplierText, "TMT")
                 },
                 label = { Text("TMT") },
                 colors = chipColors,
             )
         }
 
+        OutlinedTextField(
+            value = supplierText,
+            onValueChange = {
+                supplierText = it
+                onPersistDefaults(it, currency)
+            },
+            label = { Text("Üpjün ediji (hökmany däl)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        if (!useImeiMode) {
+            Button(
+                onClick = {
+                    val qtyVal = qtyText.toIntOrNull() ?: 0
+                    onSendQuantityProduct(qtyVal, unitCostText, currency, supplierText)
+                },
+                enabled = !isBusy && meta?.productId != null && (qtyText.toIntOrNull() ?: 0) > 0,
+                colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) {
+                Icon(Icons.Default.Send, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                val qLabel = qtyText.toIntOrNull() ?: 0
+                Text(
+                    text = if (isBusy) "Iberilýär…" else "PK nobatyna iber ($qLabel sany)",
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+
         HorizontalDivider(color = BorderColor)
 
-        if (useImeiMode) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                text = "Skan edilen enjamlar (${imeis.size}):",
+                text = "Şu sessiýada iberilenler (${sessionEntries.size}):",
                 fontWeight = FontWeight.Bold,
                 color = NavyDark,
                 fontSize = 14.sp,
             )
-            if (imeis.isEmpty()) {
-                Text(
-                    text = "Häzirlikçe skan edilen IMEI ýok. Aýnany ýapyň we kamerany gutynyň etiketkasyna tutyň.",
-                    fontSize = 12.sp,
-                    color = TextMuted,
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    items(imeis, key = { it.imei1 }) { entry ->
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = SurfaceBg),
-                            border = BorderStroke(1.dp, BorderColor),
+            if (sessionEntries.isNotEmpty()) {
+                TextButton(onClick = onClearSession) {
+                    Text("Arassala", color = TextMuted, fontSize = 12.sp)
+                }
+            }
+        }
+
+        if (sessionEntries.isEmpty()) {
+            Text(
+                text = if (useImeiMode) {
+                    "Aýnany ýapyň we telefonyň IMEI etiketkasyny skan ediň — göni PK nobatyna düşer."
+                } else {
+                    "Aýnany ýapyň we harydyň ştrihkodyny skan ediň ýa-da «Guty OCR» basyň."
+                },
+                fontSize = 12.sp,
+                color = TextMuted,
+            )
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                items(sessionEntries) { item ->
+                    val (badgeText, badgeColor) = when (item.itemKind) {
+                        "phone_imei" -> "Telefon" to TealAccent
+                        "known" -> "Belli" to GreenSuccess
+                        else -> "Näbelli" to AccentOrange
+                    }
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = SurfaceBg),
+                        border = BorderStroke(1.dp, BorderColor),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
+                            Surface(
+                                color = badgeColor.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(6.dp),
                             ) {
-                                Icon(
-                                    imageVector = if (entry.luhnValid) Icons.Default.CheckCircle else Icons.Default.Warning,
-                                    contentDescription = null,
-                                    tint = if (entry.luhnValid) GreenSuccess else AccentOrange,
+                                Text(
+                                    text = badgeText,
+                                    color = badgeColor,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(
-                                        text = "IMEI 1: ${entry.imei1}",
-                                        fontFamily = FontFamily.Monospace,
-                                        fontWeight = FontWeight.Bold,
-                                        color = TextPrimary,
-                                        fontSize = 13.sp,
-                                    )
-                                    if (!entry.imei2.isNullOrBlank()) {
-                                        Text(
-                                            text = "IMEI 2: ${entry.imei2}",
-                                            fontFamily = FontFamily.Monospace,
-                                            color = TextMuted,
-                                            fontSize = 12.sp,
-                                        )
-                                    }
-                                    if (!entry.serialNumber.isNullOrBlank()) {
-                                        Text(
-                                            text = "S/N:    ${entry.serialNumber}",
-                                            fontFamily = FontFamily.Monospace,
-                                            color = TealAccent,
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                        )
-                                    }
-                                }
-                                IconButton(onClick = { onRemoveImei(entry.imei1) }) {
-                                    Icon(Icons.Default.Delete, contentDescription = "Poz", tint = RedDanger)
-                                }
+                            }
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = item.title,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                )
+                                Text(
+                                    text = item.detail,
+                                    color = TextMuted,
+                                    fontSize = 11.5.sp,
+                                    maxLines = 2,
+                                )
                             }
                         }
                     }
                 }
             }
-        } else {
-            OutlinedTextField(
-                value = qtyText,
-                onValueChange = { raw ->
-                    val filtered = raw.filter(Char::isDigit)
-                    qtyText = filtered
-                    val parsed = filtered.toIntOrNull()
-                    if (parsed != null && parsed > 0) {
-                        onPersistFields(supplierText, unitCostText, currency, rateText, parsed)
-                    }
-                },
-                label = { Text("Sany") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
         }
+    }
+}
 
-        Spacer(Modifier.height(4.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            OutlinedButton(
-                onClick = onClearDraft,
-                enabled = !isBusy,
-                border = BorderStroke(1.dp, BorderColor),
-                modifier = Modifier.weight(1f).height(48.dp),
-            ) {
-                Text("Arassala")
-            }
-            Button(
-                onClick = {
-                    val qtyVal = qtyText.toIntOrNull() ?: 0
-                    onSubmit(supplierText, unitCostText, currency, rateText, qtyVal)
-                },
-                enabled = !isBusy,
-                colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
-                modifier = Modifier.weight(1.8f).height(48.dp),
-            ) {
-                val countLabel = if (useImeiMode) "${imeis.size} IMEI" else "${qtyText.toIntOrNull() ?: 0} sany"
-                Text(if (isBusy) "Iberilýär…" else "Kabul et ($countLabel)")
-            }
-        }
+@Composable
+private fun QueueCountStat(label: String, count: Int, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(
+            text = count.toString(),
+            fontSize = 18.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = color,
+        )
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            color = TextMuted,
+        )
     }
 }
 

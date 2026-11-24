@@ -60,7 +60,7 @@ def product(purchase_db):
         return item.id
 
 
-def create_test_purchase(product_id, quantity=1, payments=None):
+def create_test_purchase(product_id, quantity=1, payments=None, supplier_name="Test Supplier"):
     return purchase_service.create_purchase(
         items=[
             {
@@ -72,6 +72,7 @@ def create_test_purchase(product_id, quantity=1, payments=None):
         currency="USD",
         exchange_rate="19.5000",
         payments=payments,
+        supplier_name=supplier_name,
     )
 
 

@@ -49,3 +49,6 @@ def initialize_database() -> None:
     _run_migrations()
     with engine.connect() as connection:
         connection.exec_driver_sql("SELECT 1")
+    from app.repositories.product_repository import ensure_system_phone_categories
+
+    ensure_system_phone_categories()

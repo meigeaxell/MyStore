@@ -11,8 +11,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Category
-import androidx.compose.material.icons.filled.Inventory2
 import androidx.compose.material.icons.filled.MoveToInbox
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Settings
@@ -40,8 +38,6 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.mobilestore.scanner.ui.CatalogScreen
-import com.mobilestore.scanner.ui.CategoriesScreen
 import com.mobilestore.scanner.ui.ReceivingScreen
 import com.mobilestore.scanner.ui.SaleScanScreen
 import com.mobilestore.scanner.ui.SettingsScreen
@@ -53,6 +49,7 @@ import com.mobilestore.scanner.ui.theme.RedDanger
 import com.mobilestore.scanner.ui.theme.SurfaceBg
 import com.mobilestore.scanner.ui.theme.SurfaceWhite
 import com.mobilestore.scanner.ui.theme.TextMuted
+import com.mobilestore.scanner.viewmodel.BannerMessage
 import com.mobilestore.scanner.viewmodel.ScannerViewModel
 
 class MainActivity : ComponentActivity() {
@@ -94,18 +91,18 @@ private fun MobileStoreScannerRoot(vm: ScannerViewModel = viewModel()) {
         listOf(
             NavTab("Skaner", Icons.Default.QrCodeScanner),
             NavTab("Kabul ediş", Icons.Default.MoveToInbox),
-            NavTab("Katalog", Icons.Default.Inventory2),
-            NavTab("Kategoriýa", Icons.Default.Category),
             NavTab("Sazlama", Icons.Default.Settings),
         )
     }
     var selectedTab by remember { mutableIntStateOf(0) }
 
     val banner by vm.banner.collectAsState()
+    var lastShownBanner by remember { mutableStateOf<BannerMessage?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(banner) {
         val current = banner ?: return@LaunchedEffect
+        lastShownBanner = current
         snackbarHostState.showSnackbar(
             message = current.text,
             duration = SnackbarDuration.Short,
@@ -117,10 +114,15 @@ private fun MobileStoreScannerRoot(vm: ScannerViewModel = viewModel()) {
         containerColor = SurfaceBg,
         snackbarHost = {
             SnackbarHost(hostState = snackbarHostState) { data ->
-                val isError = banner?.isError == true
+                val tone = banner ?: lastShownBanner
+                val bgColor = when {
+                    tone?.isError == true -> RedDanger
+                    tone?.isWarning == true -> AccentOrange
+                    else -> GreenSuccess
+                }
                 Snackbar(
                     snackbarData = data,
-                    containerColor = if (isError) RedDanger else GreenSuccess,
+                    containerColor = bgColor,
                     contentColor = Color.White,
                 )
             }
@@ -160,9 +162,7 @@ private fun MobileStoreScannerRoot(vm: ScannerViewModel = viewModel()) {
                     hasCameraPermission = hasCameraPermission,
                     onRequestCameraPermission = { permissionLauncher.launch(Manifest.permission.CAMERA) },
                 )
-                2 -> CatalogScreen(vm = vm)
-                3 -> CategoriesScreen(vm = vm)
-                4 -> SettingsScreen(vm = vm)
+                2 -> SettingsScreen(vm = vm)
             }
         }
     }

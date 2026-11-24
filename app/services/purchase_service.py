@@ -20,6 +20,12 @@ from app.models.stock_item import StockItem
 CURRENCIES = {"USD", "TMT"}
 CENT = Decimal("0.01")
 RATE_PRECISION = Decimal("0.0001")
+PERSONAL_SOURCE_LABEL = "Şahsy çeşme"
+
+
+def is_personal_source_purchase(purchase: Purchase) -> bool:
+    """Возвращает True, если поставщик не указан (личный источник — долг не ведётся)."""
+    return not (purchase.supplier_name or "").strip()
 
 
 def _decimal(value: Any) -> Decimal:
@@ -159,6 +165,9 @@ def _get_supplier_debt_amount(
     purchase: Purchase,
 ) -> Decimal:
     """Рассчитывает остаток денег, которые поставщик должен вернуть."""
+    if is_personal_source_purchase(purchase):
+        return Decimal("0.00")
+
     paid = _get_paid_amount(session, purchase)
     refunded = _get_refunded_amount(session, purchase)
 
@@ -444,7 +453,7 @@ def add_purchase_payment(
 
 
 def get_purchase_balance(purchase_id: int) -> Decimal:
-    """Возвращает долг магазина по активной закупке."""
+    """Возвращает долг магазина по активной закупке (0.00 для личных источников без поставщика)."""
     purchase_id = _positive_integer(purchase_id, "Alyş ID")
 
     with SessionLocal() as session:
@@ -453,7 +462,7 @@ def get_purchase_balance(purchase_id: int) -> Decimal:
         if purchase is None:
             raise ValueError("Alyş tapylmady.")
 
-        if purchase.status == "cancelled":
+        if purchase.status == "cancelled" or is_personal_source_purchase(purchase):
             return Decimal("0.00")
 
         paid = _get_paid_amount(session, purchase)

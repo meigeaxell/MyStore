@@ -19,12 +19,13 @@ from app.models.product import Product
 from app.models.purchase import Purchase
 from app.models.sale import Sale
 from app.models.stock_item import StockItem
+from app.services.purchase_service import PERSONAL_SOURCE_LABEL, is_personal_source_purchase
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.purchase_page import PurchaseDetailsDialog
 from app.ui.sales_page import SaleDetailsDialog
-from app.ui.stock_page import StockItemDialog
+from app.ui.stock_page import EditStockItemDialog, StockItemDialog
 from app.ui.widgets import configure_dialog_buttons, configure_table, make_button, money_str
 
 
@@ -118,7 +119,10 @@ class QuickSearchDialog(QDialog):
                 .order_by(StockItem.id.desc())
             ).all()
             latest_stock_by_prod: dict[int, StockItem] = {}
+            any_in_stock_by_prod: dict[int, StockItem] = {}
             for st in in_stock_rows:
+                if st.product_id not in any_in_stock_by_prod:
+                    any_in_stock_by_prod[st.product_id] = st
                 if st.product_id not in latest_stock_by_prod and st.unit_cost is not None:
                     latest_stock_by_prod[st.product_id] = st
 
@@ -130,7 +134,12 @@ class QuickSearchDialog(QDialog):
             ).all()
             prod_count = 0
             for p, cat_name in prod_rows:
+                is_phone = bool(getattr(p, "is_phone_unit", False))
+                # Sold standalone phones are hidden from active product search (still searchable in IMEI / receipts)
+                if is_phone and p.stock_quantity <= 0:
+                    continue
                 cat_label = cat_name or "—"
+                st_for_phone = any_in_stock_by_prod.get(p.id) if is_phone else None
                 if words:
                     hay = " ".join(
                         filter(
@@ -142,6 +151,9 @@ class QuickSearchDialog(QDialog):
                                 p.model,
                                 p.specification,
                                 p.barcode,
+                                st_for_phone.imei1 if st_for_phone else None,
+                                st_for_phone.memory if st_for_phone else None,
+                                st_for_phone.color if st_for_phone else None,
                             ],
                         )
                     ).lower()
@@ -150,28 +162,52 @@ class QuickSearchDialog(QDialog):
                 u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
                     session=session,
                     product_id=p.id,
-                    stock_item=latest_stock_by_prod.get(p.id),
+                    stock_item=latest_stock_by_prod.get(p.id) or st_for_phone,
                     fallback_currency=default_curr,
                     fallback_rate=default_rate,
                 )
                 cost_txt = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
-                bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
-                detail_parts = [cat_label, bm]
-                if p.specification:
-                    detail_parts.append(p.specification)
-                if p.barcode:
-                    detail_parts.append(f"Ştrihkod: {p.barcode}")
+                if is_phone:
+                    spec_parts = [
+                        x
+                        for x in (
+                            st_for_phone.memory if st_for_phone else None,
+                            st_for_phone.color if st_for_phone else None,
+                        )
+                        if x
+                    ]
+                    if st_for_phone and st_for_phone.condition != "new" and st_for_phone.battery_health:
+                        bh = st_for_phone.battery_health.strip()
+                        spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+                    detail_parts = [cat_label]
+                    if spec_parts:
+                        detail_parts.append(" • ".join(spec_parts))
+                    elif p.specification:
+                        detail_parts.append(p.specification)
+                    if st_for_phone:
+                        detail_parts.append(f"IMEI: {st_for_phone.imei1}")
+                    status_lbl = "IMEI (Bar)" if st_for_phone else "Satyldy"
+                else:
+                    bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
+                    detail_parts = [cat_label, bm]
+                    if p.specification:
+                        detail_parts.append(p.specification)
+                    if p.barcode:
+                        detail_parts.append(f"Ştrihkod: {p.barcode}")
+                    status_lbl = f"Skladda: {p.stock_quantity} sany"
                 self.results.append({
                     "kind": "product",
-                    "type_label": "Haryt",
+                    "type_label": "Telefon" if is_phone else "Haryt",
                     "title": p.name,
                     "details": "  •  ".join(detail_parts),
                     "cost_or_total": cost_txt,
-                    "status": f"Skladda: {p.stock_quantity} sany",
+                    "status": status_lbl,
                     "color": theme.GREEN if p.stock_quantity > 0 else theme.RED,
                     "product_id": p.id,
                     "product_name": p.name,
-                    "imei": None,
+                    "imei": st_for_phone.imei1 if st_for_phone else None,
+                    "stock_item_id": st_for_phone.id if st_for_phone else None,
+                    "is_phone_unit": is_phone,
                     "can_pos": p.stock_quantity > 0,
                 })
                 prod_count += 1
@@ -201,6 +237,10 @@ class QuickSearchDialog(QDialog):
                                 st.imei1,
                                 st.imei2,
                                 st.serial_number,
+                                st.memory,
+                                st.color,
+                                st.battery_health,
+                                st.cosmetic_condition,
                             ],
                         )
                     ).lower()
@@ -208,7 +248,15 @@ class QuickSearchDialog(QDialog):
                         continue
                 in_stock = st.status == "in_stock"
                 cond = "Täze" if st.condition == "new" else "B/U"
-                bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
+                is_phone = bool(getattr(prod, "is_phone_unit", False))
+                if is_phone:
+                    spec_parts = [x for x in (st.memory, st.color) if x]
+                    if st.condition != "new" and st.battery_health:
+                        bh = st.battery_health.strip()
+                        spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+                    bm = " • ".join(spec_parts) or prod.specification or "—"
+                else:
+                    bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
                 u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
                     session=session,
                     product_id=prod.id,
@@ -229,6 +277,8 @@ class QuickSearchDialog(QDialog):
                     "product_id": prod.id,
                     "product_name": prod.name,
                     "imei": st.imei1,
+                    "stock_item_id": st.id,
+                    "is_phone_unit": is_phone,
                     "can_pos": in_stock and prod.stock_quantity > 0,
                 })
                 imei_count += 1
@@ -273,13 +323,18 @@ class QuickSearchDialog(QDialog):
             purchases = session.scalars(select(Purchase).order_by(Purchase.purchase_date.desc())).all()
             pur_count = 0
             for pur in purchases:
+                sup_label = (
+                    PERSONAL_SOURCE_LABEL
+                    if is_personal_source_purchase(pur)
+                    else (pur.supplier_name or "").strip()
+                )
                 if words:
                     hay = " ".join(
                         filter(
                             None,
                             [
                                 f"alyş {pur.id}",
-                                pur.supplier_name,
+                                sup_label,
                                 pur.note,
                             ],
                         )
@@ -290,7 +345,7 @@ class QuickSearchDialog(QDialog):
                     "kind": "purchase",
                     "type_label": "Alyş",
                     "title": f"Alyş №{pur.id}",
-                    "details": f"Üpjün ediji: {pur.supplier_name or '—'}  •  {pur.purchase_date:%d.%m.%Y %H:%M}",
+                    "details": f"Üpjün ediji: {sup_label}  •  {pur.purchase_date:%d.%m.%Y %H:%M}",
                     "cost_or_total": f"{money_str(pur.total_amount)} {pur.currency}",
                     "status": "Ýatyryldy" if pur.status == "cancelled" else "Aktiw",
                     "color": theme.RED if pur.status == "cancelled" else theme.TEAL,
@@ -328,11 +383,14 @@ class QuickSearchDialog(QDialog):
         item = self.results[row]
         kind = item["kind"]
         if kind in ("product", "imei"):
-            dlg = StockItemDialog(
-                product_id=item["product_id"],
-                product_name=item["product_name"],
-                parent=self,
-            )
+            if item.get("is_phone_unit") and item.get("stock_item_id") is not None:
+                dlg = EditStockItemDialog(int(item["stock_item_id"]), self)
+            else:
+                dlg = StockItemDialog(
+                    product_id=item["product_id"],
+                    product_name=item["product_name"],
+                    parent=self,
+                )
             dlg.exec()
             self._run_search()
         elif kind == "sale":

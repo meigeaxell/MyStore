@@ -13,13 +13,15 @@ from app.models.purchase_refund import PurchaseRefund
 from app.models.sale import Sale
 from app.services.cash_service import CashService, _decimal, _money, _validate_rate
 from app.services.purchase_service import (
+    PERSONAL_SOURCE_LABEL,
+    _get_supplier_debt_amount,
+    is_personal_source_purchase,
+)
+from app.services.purchase_service import (
     _get_paid_amount as _get_purchase_paid_amount,
 )
 from app.services.purchase_service import (
     _get_refunded_amount as _get_purchase_refunded_amount,
-)
-from app.services.purchase_service import (
-    _get_supplier_debt_amount,
 )
 from app.services.sales_service import SalesService
 
@@ -154,6 +156,8 @@ class FinanceService:
 
         purchases = session.scalars(select(Purchase)).all()
         for purchase in purchases:
+            if is_personal_source_purchase(purchase):
+                continue
             cur = purchase.currency.strip().upper()
             if cur not in ("USD", "TMT"):
                 continue
@@ -250,6 +254,31 @@ class FinanceService:
             total = _money(_decimal(purchase.total_amount))
             paid = _get_purchase_paid_amount(session, purchase)
             refunded = _get_purchase_refunded_amount(session, purchase)
+            is_personal = is_personal_source_purchase(purchase)
+            sup_label = (purchase.supplier_name or "").strip() or PERSONAL_SOURCE_LABEL
+
+            if is_personal:
+                if not include_paid:
+                    continue
+                rows.append({
+                    "purchase_id": purchase.id,
+                    "purchase_date": purchase.purchase_date,
+                    "supplier_name": sup_label,
+                    "currency": purchase.currency,
+                    "exchange_rate": _validate_rate(purchase.exchange_rate),
+                    "original_amount": total,
+                    "paid_amount": paid,
+                    "refunded_amount": refunded,
+                    "store_debt_to_supplier": Decimal("0.00"),
+                    "supplier_debt_to_store": Decimal("0.00"),
+                    "debt_category": "personal_source",
+                    "status_label": (
+                        "Şahsy çeşme (ýatyryldy)"
+                        if purchase.status == "cancelled"
+                        else "Şahsy çeşme (bergisiz)"
+                    ),
+                })
+                continue
 
             if purchase.status == "cancelled":
                 supplier_debt = _get_supplier_debt_amount(session, purchase)
@@ -258,7 +287,7 @@ class FinanceService:
                 rows.append({
                     "purchase_id": purchase.id,
                     "purchase_date": purchase.purchase_date,
-                    "supplier_name": purchase.supplier_name or "Üpjün ediji görkezilmedik",
+                    "supplier_name": sup_label,
                     "currency": purchase.currency,
                     "exchange_rate": _validate_rate(purchase.exchange_rate),
                     "original_amount": total,
@@ -280,7 +309,7 @@ class FinanceService:
                 rows.append({
                     "purchase_id": purchase.id,
                     "purchase_date": purchase.purchase_date,
-                    "supplier_name": purchase.supplier_name or "Üpjün ediji görkezilmedik",
+                    "supplier_name": sup_label,
                     "currency": purchase.currency,
                     "exchange_rate": _validate_rate(purchase.exchange_rate),
                     "original_amount": total,

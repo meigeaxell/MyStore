@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import APP_VERSION, BUNDLE_ROOT
 from app.database.engine import SessionLocal
@@ -25,6 +26,7 @@ from app.models.product import Product
 from app.models.sale import Sale
 from app.models.stock_item import StockItem
 from app.services.backup_service import BackupService
+from app.services.incoming_queue_service import count_queue_items
 from app.services.mobile_ws_server import MobileWebSocketServer
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
@@ -32,6 +34,7 @@ from app.ui import theme
 from app.ui.dashboard_page import DashboardPage
 from app.ui.exchange_page import ExchangePage
 from app.ui.finance_page import FinancePage
+from app.ui.incoming_queue_page import IncomingQueuePage
 from app.ui.purchase_page import PurchasePage
 from app.ui.quick_search_dialog import QuickSearchDialog
 from app.ui.reports_page import ReportsPage
@@ -44,6 +47,7 @@ NAV = [
     ("Harytlar", [
         ("Harytlar we sklad", "▦"),
         ("Alyşlar", "⇩"),
+        ("Kabul ediş nobaty", "📥"),
     ]),
     ("Satyş", [
         ("Satyş we kassa", "◉"),
@@ -108,14 +112,20 @@ class MainWindow(QMainWindow):
             is_imei_in_cart_callback=self._is_imei_in_cart,
             parent=self,
         )
+        self.dashboard_page: DashboardPage | None = None
+        self.stock_page: StockPage | None = None
+        self.purchase_page: PurchasePage | None = None
+        self.incoming_queue_page: IncomingQueuePage | None = None
+        self.incoming_queue_button: QPushButton | None = None
         self.sales_page: SalesPage | None = None
         self.settings_page: SettingsPage | None = None
 
         self._register_pages()
+        self._update_incoming_queue_badge()
         self._restore_ui_state()
         QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_quick_search)
         QShortcut(QKeySequence("F5"), self, activated=self._refresh_current_page)
-        for idx in range(min(8, len(self.nav_buttons))):
+        for idx in range(min(9, len(self.nav_buttons))):
             QShortcut(
                 QKeySequence(f"Ctrl+{idx + 1}"),
                 self,
@@ -130,6 +140,7 @@ class MainWindow(QMainWindow):
         self.mobile_server.devicesChanged.connect(self._on_mobile_devices_changed)
         self.mobile_server.serverStateChanged.connect(self._on_mobile_server_state_changed)
         self.mobile_server.dataMutated.connect(self._on_mobile_data_mutated)
+        self.mobile_server.incomingQueued.connect(self._on_mobile_incoming_queued)
 
         if SettingsService.get("mobile_server_enabled", "1") == "1":
             self.mobile_server.start()
@@ -207,8 +218,10 @@ class MainWindow(QMainWindow):
             if name in ("MobileStore", "Esasy panel"):
                 page = DashboardPage()
                 page.navigateRequested.connect(self.navigate_to_title)
+                self.dashboard_page = page
             elif name == "Harytlar we sklad":
                 page = StockPage()
+                self.stock_page = page
             elif name == "Satyş we kassa":
                 page = SalesPage()
                 self.sales_page = page
@@ -216,6 +229,13 @@ class MainWindow(QMainWindow):
                 page = ExchangePage()
             elif name == "Alyşlar":
                 page = PurchasePage()
+                self.purchase_page = page
+            elif name == "Kabul ediş nobaty":
+                page = IncomingQueuePage()
+                self.incoming_queue_page = page
+                self.incoming_queue_button = button
+                page.queueChanged.connect(self._update_incoming_queue_badge)
+                page.stockCommitted.connect(self._on_incoming_queue_committed)
             elif name == "Maliýe":
                 page = FinancePage()
             elif name == "Hasabatlar":
@@ -273,6 +293,8 @@ class MainWindow(QMainWindow):
         )
 
     def _on_mobile_data_mutated(self, action_type: str) -> None:
+        if action_type == "queue_incoming_item":
+            return
         widget = self.pages.currentWidget()
         if widget is None or widget is self.settings_page:
             return
@@ -284,6 +306,53 @@ class MainWindow(QMainWindow):
             f"📱 Maglumatlar mobil skanerden täzelendi ({action_type})",
             6000,
         )
+
+    def _update_incoming_queue_badge(self, count: int | None = None) -> None:
+        if self.incoming_queue_button is None:
+            return
+        if count is None:
+            try:
+                count = int(count_queue_items().get("total", 0))
+            except SQLAlchemyError:
+                count = 0
+        n = max(0, int(count))
+        if n > 0:
+            self.incoming_queue_button.setText(f"📥 Kabul ediş nobaty ({n})")
+        else:
+            self.incoming_queue_button.setText("📥 Kabul ediş nobaty")
+
+    def _on_mobile_incoming_queued(self, data: dict) -> None:
+        counts = data.get("counts") if isinstance(data, dict) else None
+        if isinstance(counts, dict) and "total" in counts:
+            self._update_incoming_queue_badge(int(counts["total"]))
+        else:
+            self._update_incoming_queue_badge()
+
+        if self.incoming_queue_page is not None:
+            self.incoming_queue_page.refresh_data()
+
+        msg = (
+            str(data.get("message") or "").strip()
+            if isinstance(data, dict)
+            else ""
+        ) or "Täze haryt kabul ediş nobatyna goşuldy"
+        show_toast(self, f"📥 {msg}", kind="info", duration_ms=4200)
+        self.statusBar().showMessage(f"📥 {msg}", 8000)
+
+    def _on_incoming_queue_committed(self) -> None:
+        for page in (
+            self.dashboard_page,
+            self.stock_page,
+            self.purchase_page,
+            self.sales_page,
+        ):
+            if page is None:
+                continue
+            if hasattr(page, "refresh_data"):
+                page.refresh_data()
+            elif hasattr(page, "_load_data"):
+                page._load_data()
+        self._update_incoming_queue_badge()
 
     def _switch_page(self, index: int) -> None:
         self._hide_top_search_popup()

@@ -14,10 +14,12 @@ from app.models.sale_item import SaleItem
 from app.models.stock_item import StockItem
 from app.services.cash_service import _decimal, _money, _validate_rate
 from app.services.purchase_service import (
-    _get_paid_amount as _get_purchase_paid_amount,
+    PERSONAL_SOURCE_LABEL,
+    _get_supplier_debt_amount,
+    is_personal_source_purchase,
 )
 from app.services.purchase_service import (
-    _get_supplier_debt_amount,
+    _get_paid_amount as _get_purchase_paid_amount,
 )
 from app.services.sales_service import SalesService, _convert_currency
 
@@ -794,7 +796,8 @@ class ReportService:
         q = (search_query or "").strip().lower()
 
         for pur in purchases:
-            name = (pur.supplier_name or "Üpjün ediji görkezilmedik").strip()
+            is_personal = is_personal_source_purchase(pur)
+            name = (pur.supplier_name or PERSONAL_SOURCE_LABEL).strip()
             if q and q not in name.lower():
                 continue
 
@@ -821,7 +824,7 @@ class ReportService:
 
             if pur.status == "cancelled":
                 s["cancelled_purchases"] += 1
-                sup_debt = _get_supplier_debt_amount(session, pur)
+                sup_debt = Decimal("0.00") if is_personal else _get_supplier_debt_amount(session, pur)
                 if cur == "USD":
                     s["supplier_owes_usd"] = _money(s["supplier_owes_usd"] + sup_debt)
                 elif cur == "TMT":
@@ -829,7 +832,7 @@ class ReportService:
             else:
                 s["active_purchases"] += 1
                 s["units_supplied"] += qty_by_purchase.get(pur.id, 0)
-                rem = max(Decimal("0.00"), _money(total - paid))
+                rem = Decimal("0.00") if is_personal else max(Decimal("0.00"), _money(total - paid))
                 if cur == "USD":
                     s["total_usd"] = _money(s["total_usd"] + total)
                     s["paid_usd"] = _money(s["paid_usd"] + paid)

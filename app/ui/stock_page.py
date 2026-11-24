@@ -6,6 +6,7 @@ from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
+    QCompleter,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.database.engine import SessionLocal
@@ -29,9 +31,12 @@ from app.repositories.product_repository import (
     deactivate_product,
     delete_stock_item,
     get_product_with_devices,
+    list_distinct_phone_models,
     list_products_inventory,
+    register_standalone_phone,
     register_stock_item,
     restore_product,
+    update_standalone_phone,
     update_stock_item,
 )
 from app.services.report_service import ReportService
@@ -70,6 +75,349 @@ ROLE_PRODUCT_ID = Qt.ItemDataRole.UserRole + 1
 ROLE_PRODUCT_NAME = Qt.ItemDataRole.UserRole + 2
 ROLE_IS_ACTIVE = Qt.ItemDataRole.UserRole + 3
 ROLE_TOTAL_DEVICES = Qt.ItemDataRole.UserRole + 4
+ROLE_IS_PHONE_UNIT = Qt.ItemDataRole.UserRole + 5
+ROLE_PRIMARY_STOCK_ITEM_ID = Qt.ItemDataRole.UserRole + 6
+
+
+def _apply_phone_category_badge(label: QLabel, is_used: bool) -> None:
+    if is_used:
+        label.setText("🔒 Kategoriýa: Telefon B/U")
+        label.setStyleSheet(
+            f"font-weight: 700; color: {theme.ACCENT}; background: #FFF8F1; "
+            "border: 1px solid #FDBA74; padding: 5px 10px; border-radius: 6px;"
+        )
+    else:
+        label.setText("🔒 Kategoriýa: Telefon Täze")
+        label.setStyleSheet(
+            f"font-weight: 700; color: {theme.BLUE}; background: #EFF6FF; "
+            "border: 1px solid #93C5FD; padding: 5px 10px; border-radius: 6px;"
+        )
+
+
+class StandalonePhoneIntakeDialog(QDialog):
+    """Özbaşdak IMEI telefon kabul ediş penjiresi (katalogdan saýlamazdan, hemişelik kategoriýa bilen)."""
+
+    def __init__(self, default_condition: str = "new", parent=None) -> None:
+        super().__init__(parent)
+        self.default_condition = "used" if default_condition == "used" else "new"
+        self.session_added_count = 0
+
+        self.setWindowTitle("Telefony sklada kabul etmek (IMEI)")
+        self.setMinimumSize(860, 720)
+        self.setStyleSheet(theme.STYLE)
+
+        self._build_ui()
+        self._refresh_model_completer()
+        self._sync_condition_ui()
+        self._load_in_stock_phones()
+        self.model_input.setFocus()
+
+    @staticmethod
+    def _wrap_row(hbox: QHBoxLayout) -> QWidget:
+        box = QWidget()
+        hbox.setContentsMargins(0, 1, 0, 1)
+        box.setMinimumHeight(40)
+        box.setLayout(hbox)
+        return box
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
+
+        title = QLabel("Telefony sklada goşmak (IMEI)")
+        title.setObjectName("pageTitle")
+        root.addWidget(title)
+
+        subtitle = QLabel(
+            "Her telefon öz IMEI belgisi bilen aýratyn hasaba alynýar we awtomatiki hemişelik "
+            "«Telefon Täze» ýa-da «Telefon B/U» kategoriýasyna düşýär."
+        )
+        subtitle.setObjectName("mutedText")
+        subtitle.setWordWrap(True)
+        root.addWidget(subtitle)
+
+        card = Card(margins=(18, 16, 18, 16), spacing=10)
+
+        self._form = QFormLayout()
+        self._form.setSpacing(10)
+        self._form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.model_input = QLineEdit()
+        self.model_input.setPlaceholderText("Mysal: iPhone 15 Pro Max, Samsung S24 Ultra, Redmi Note 14...")
+        self._form.addRow("Model ady *:", self.model_input)
+
+        spec_row = QHBoxLayout()
+        spec_row.setSpacing(8)
+        self.memory_input = QLineEdit()
+        self.memory_input.setPlaceholderText("128GB, 256GB, 512GB...")
+        self.color_input = QLineEdit()
+        self.color_input.setPlaceholderText("Black, Natural Titanium...")
+        spec_row.addWidget(QLabel("Ýat (Memory):"))
+        spec_row.addWidget(self.memory_input, 1)
+        spec_row.addWidget(QLabel("Reňk (Color):"))
+        spec_row.addWidget(self.color_input, 1)
+        self._form.addRow("Aýratynlyklar:", self._wrap_row(spec_row))
+
+        imei_row = QHBoxLayout()
+        imei_row.setSpacing(8)
+        self.imei1_input = QLineEdit()
+        self.imei1_input.setPlaceholderText("IMEI 1 (hökmany)*")
+        self.imei2_input = QLineEdit()
+        self.imei2_input.setPlaceholderText("IMEI 2 (hökmany däl)")
+        self.sn_input = QLineEdit()
+        self.sn_input.setPlaceholderText("Seriýa belgisi (S/N)")
+        imei_row.addWidget(self.imei1_input, 2)
+        imei_row.addWidget(self.imei2_input, 2)
+        imei_row.addWidget(self.sn_input, 1)
+        self._form.addRow("IMEI / S/N:", self._wrap_row(imei_row))
+
+        cond_row = QHBoxLayout()
+        cond_row.setSpacing(10)
+        self.condition_combo = style_combo(QComboBox())
+        self.condition_combo.addItem("Täze", "new")
+        self.condition_combo.addItem("B/U (Ulanylan)", "used")
+        if self.default_condition == "used":
+            self.condition_combo.setCurrentIndex(1)
+        self.condition_combo.currentIndexChanged.connect(self._sync_condition_ui)
+
+        self.category_badge = QLabel()
+        self.category_badge.setToolTip("Telefonlaryň kategoriýasy ýagdaýyna görä awtomatiki berkidilýär.")
+        cond_row.addWidget(self.condition_combo)
+        cond_row.addWidget(self.category_badge)
+        cond_row.addStretch()
+        self._form.addRow("Ýagdaýy:", self._wrap_row(cond_row))
+
+        # Conditional optional fields shown ONLY when B/U is selected
+        self.used_fields_box = QWidget()
+        self.used_fields_box.setMinimumHeight(40)
+        used_layout = QHBoxLayout(self.used_fields_box)
+        used_layout.setContentsMargins(0, 1, 0, 1)
+        used_layout.setSpacing(8)
+        self.battery_input = QLineEdit()
+        self.battery_input.setPlaceholderText("88%, 92%...")
+        self.cosmetic_input = QLineEdit()
+        self.cosmetic_input.setPlaceholderText("Arassa, korpusda çyzyk ýok, komplekt...")
+        used_layout.addWidget(QLabel("Batareýa %:"))
+        used_layout.addWidget(self.battery_input, 1)
+        used_layout.addWidget(QLabel("Umumy ýagdaýy:"))
+        used_layout.addWidget(self.cosmetic_input, 2)
+        self._form.addRow("B/U maglumat:", self.used_fields_box)
+
+        cost_row = QHBoxLayout()
+        cost_row.setSpacing(8)
+        self.cost_spin = QDoubleSpinBox()
+        self.cost_spin.setRange(0, 10000000)
+        self.cost_spin.setDecimals(2)
+        self.cost_curr_combo = style_combo(QComboBox())
+        self.cost_curr_combo.addItems(["USD", "TMT"])
+        self.rate_spin = QDoubleSpinBox()
+        self.rate_spin.setRange(0.0001, 100000)
+        self.rate_spin.setDecimals(4)
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        self.source_combo = style_combo(QComboBox())
+        for label, code in SOURCES:
+            self.source_combo.addItem(label, code)
+        if self.default_condition == "used":
+            self.source_combo.setCurrentIndex(1)
+
+        cost_row.addWidget(self.cost_spin, 1)
+        cost_row.addWidget(self.cost_curr_combo)
+        cost_row.addWidget(QLabel("Kurs:"))
+        cost_row.addWidget(self.rate_spin)
+        cost_row.addWidget(QLabel("Çeşme:"))
+        cost_row.addWidget(self.source_combo, 1)
+        self._form.addRow("Öz bahasy:", self._wrap_row(cost_row))
+
+        self.notes_input = QLineEdit()
+        self.notes_input.setPlaceholderText("Goşmaça bellik (hökmany däl)...")
+        self._form.addRow("Bellik:", self.notes_input)
+
+        card.body.addLayout(self._form)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        clear_btn = make_button("↺ Arassala")
+        clear_btn.setToolTip("Ähli öýjükleri arassalamak")
+        clear_btn.clicked.connect(self._clear_all)
+        btn_row.addWidget(clear_btn)
+        btn_row.addStretch()
+
+        self.add_phone_btn = make_button("+ Telefony sklada goş", "primary")
+        self.add_phone_btn.clicked.connect(self._add_phone)
+        btn_row.addWidget(self.add_phone_btn)
+        card.body.addLayout(btn_row)
+
+        root.addWidget(card)
+
+        list_header = QHBoxLayout()
+        self.list_title = QLabel("Skladdaky özbaşdak telefonlar (IMEI)")
+        self.list_title.setObjectName("cardTitle")
+        list_header.addWidget(self.list_title, 1)
+        self.session_badge = QLabel("Şu sessiýada goşulan: 0")
+        self.session_badge.setObjectName("mutedText")
+        list_header.addWidget(self.session_badge)
+        root.addLayout(list_header)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels([
+            "ID",
+            "Model",
+            "Ýat / Reňk",
+            "IMEI 1",
+            "Ýagdaýy",
+            "Öz bahasy",
+            "Kategoriýa",
+        ])
+        configure_table(self.table, stretch_col=[1, 2], row_height=40)
+        self.table.setMinimumHeight(165)
+        self.table.cellDoubleClicked.connect(lambda _r, _c: self._edit_selected())
+        root.addWidget(self.table, 1)
+
+        footer = QHBoxLayout()
+        edit_btn = make_button("✏ Saýlanan telefony üýtget")
+        edit_btn.clicked.connect(self._edit_selected)
+        footer.addWidget(edit_btn)
+        footer.addStretch()
+
+        close_btn = make_button("Ýap")
+        close_btn.clicked.connect(self.accept)
+        footer.addWidget(close_btn)
+        root.addLayout(footer)
+
+        configure_dialog_buttons(self, self.add_phone_btn, close_btn)
+
+    def _refresh_model_completer(self) -> None:
+        try:
+            models = list_distinct_phone_models()
+        except SQLAlchemyError:
+            models = []
+        completer = QCompleter(models, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.model_input.setCompleter(completer)
+
+    def _sync_condition_ui(self) -> None:
+        is_used = self.condition_combo.currentData() == "used"
+        _apply_phone_category_badge(self.category_badge, is_used)
+        self._form.setRowVisible(self.used_fields_box, is_used)
+
+    def _clear_all(self) -> None:
+        self.model_input.clear()
+        self.memory_input.clear()
+        self.color_input.clear()
+        self.imei1_input.clear()
+        self.imei2_input.clear()
+        self.sn_input.clear()
+        self.condition_combo.setCurrentIndex(0)
+        self.battery_input.clear()
+        self.cosmetic_input.clear()
+        self.cost_spin.setValue(0.0)
+        self.cost_curr_combo.setCurrentText("USD")
+        self.rate_spin.setValue(float(SettingsService.get_default_exchange_rate()))
+        self.source_combo.setCurrentIndex(0)
+        self.notes_input.clear()
+        self._sync_condition_ui()
+        self.model_input.setFocus()
+
+    def _add_phone(self) -> None:
+        cond = self.condition_combo.currentData() or "new"
+        is_used = cond == "used"
+        try:
+            register_standalone_phone(
+                model_name=self.model_input.text(),
+                imei1=self.imei1_input.text(),
+                memory=self.memory_input.text(),
+                color=self.color_input.text(),
+                imei2=self.imei2_input.text(),
+                serial_number=self.sn_input.text(),
+                condition=cond,
+                battery_health=self.battery_input.text() if is_used else None,
+                cosmetic_condition=self.cosmetic_input.text() if is_used else None,
+                unit_cost=Decimal(f"{self.cost_spin.value():.2f}"),
+                cost_currency=self.cost_curr_combo.currentText(),
+                cost_exchange_rate=Decimal(f"{self.rate_spin.value():.4f}"),
+                acquisition_source=self.source_combo.currentData(),
+                notes=self.notes_input.text(),
+            )
+            self.session_added_count += 1
+            self.session_badge.setText(f"Şu sessiýada goşulan: {self.session_added_count}")
+            # Clear ONLY IMEI 1 / IMEI 2 / S/N for fast consecutive phone entry
+            self.imei1_input.clear()
+            self.imei2_input.clear()
+            self.sn_input.clear()
+            self._refresh_model_completer()
+            self._load_in_stock_phones()
+            self.imei1_input.setFocus()
+            show_toast(self, "Telefon sklada üstünlikli goşuldy.", kind="success")
+        except ValueError as err:
+            QMessageBox.warning(self, "Maglumatlary barlaň", str(err))
+        except (IntegrityError, SQLAlchemyError) as err:
+            QMessageBox.critical(self, "Ýalňyşlyk", f"Telefony ýatda saklap bolmady:\n{err}")
+
+    def _load_in_stock_phones(self) -> None:
+        from app.models.category import Category
+        from app.models.product import Product
+        from app.models.stock_item import StockItem
+
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(StockItem, Product, Category.name)
+                .join(Product, StockItem.product_id == Product.id)
+                .outerjoin(Category, Product.category_id == Category.id)
+                .where(
+                    Product.is_active.is_(True),
+                    Product.is_phone_unit.is_(True),
+                    StockItem.status == "in_stock",
+                )
+                .order_by(StockItem.id.desc())
+                .limit(100)
+            ).all()
+
+        self.table.setRowCount(len(rows))
+        for r, (st, prod, cat_name) in enumerate(rows):
+            spec_parts = [x for x in (st.memory, st.color) if x]
+            if st.condition != "new" and st.battery_health:
+                bh = st.battery_health.strip()
+                spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+            spec_text = " • ".join(spec_parts) or "—"
+            cond_text = "Täze" if st.condition == "new" else "B/U"
+            cost_text = (
+                f"{money_str(st.unit_cost)} {st.cost_currency or ''}".strip()
+                if st.unit_cost is not None and Decimal(str(st.unit_cost)) > 0
+                else "—"
+            )
+            vals = [
+                str(st.id),
+                prod.name,
+                spec_text,
+                st.imei1,
+                cond_text,
+                cost_text,
+                cat_name or ("Telefon Täze" if st.condition == "new" else "Telefon B/U"),
+            ]
+            for c, val in enumerate(vals):
+                cell = QTableWidgetItem(val)
+                if c in (0, 3, 4, 5, 6):
+                    cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 4:
+                    cell.setForeground(
+                        QColor(theme.BLUE if st.condition == "new" else theme.ACCENT)
+                    )
+                self.table.setItem(r, c, cell)
+
+    def _edit_selected(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            show_toast(self, "Üýtgetmek üçin tablisadan telefon saýlaň.", kind="info")
+            return
+        id_cell = self.table.item(row, 0)
+        if not id_cell:
+            return
+        dlg = EditStockItemDialog(int(id_cell.text()), self)
+        if dlg.exec():
+            self._refresh_model_completer()
+            self._load_in_stock_phones()
 
 
 class EditStockItemDialog(QDialog):
@@ -78,28 +426,66 @@ class EditStockItemDialog(QDialog):
     def __init__(self, stock_item_id: int, parent=None) -> None:
         super().__init__(parent)
         self.stock_item_id = stock_item_id
+        self.is_phone_unit = False
+        self._product_name = ""
+        self._imei1_loaded = ""
         self.setWindowTitle(f"Enjamy üýtgetmek (ID #{stock_item_id})")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self.setStyleSheet(theme.STYLE)
 
         self._build_ui()
         self._load_data()
-        self.imei1_input.setFocus()
+        if self.is_phone_unit:
+            self.model_name_input.setFocus()
+        else:
+            self.imei1_input.setFocus()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(12)
 
-        title = QLabel(f"Enjamyň (StockItem #{self.stock_item_id}) maglumatlaryny üýtgetmek")
-        title.setObjectName("pageTitle")
-        root.addWidget(title)
+        self.title_label = QLabel(f"Enjamyň (ID #{self.stock_item_id}) maglumatlaryny üýtgetmek")
+        self.title_label.setObjectName("pageTitle")
+        root.addWidget(self.title_label)
+
+        # Legacy product selector (hidden for standalone phones)
+        self.legacy_product_box = QWidget()
+        legacy_form = QFormLayout(self.legacy_product_box)
+        legacy_form.setContentsMargins(0, 0, 0, 0)
+        legacy_form.setSpacing(10)
+        self.product_combo = style_combo(QComboBox())
+        legacy_form.addRow("Model / Haryt *:", self.product_combo)
+        root.addWidget(self.legacy_product_box)
+
+        # Standalone phone direct fields (shown only for standalone phones)
+        self.phone_identity_box = QWidget()
+        phone_form = QFormLayout(self.phone_identity_box)
+        phone_form.setContentsMargins(0, 0, 0, 0)
+        phone_form.setSpacing(10)
+
+        self.model_name_input = QLineEdit()
+        self.model_name_input.setPlaceholderText("Mysal: iPhone 15 Pro Max, Samsung S24 Ultra...")
+        phone_form.addRow("Model ady *:", self.model_name_input)
+
+        mem_col_box = QWidget()
+        mem_col_box.setMinimumHeight(40)
+        mem_col_row = QHBoxLayout(mem_col_box)
+        mem_col_row.setContentsMargins(0, 1, 0, 1)
+        mem_col_row.setSpacing(8)
+        self.memory_input = QLineEdit()
+        self.memory_input.setPlaceholderText("128GB, 256GB, 512GB...")
+        self.color_input = QLineEdit()
+        self.color_input.setPlaceholderText("Black, Natural Titanium...")
+        mem_col_row.addWidget(QLabel("Ýat:"))
+        mem_col_row.addWidget(self.memory_input, 1)
+        mem_col_row.addWidget(QLabel("Reňk:"))
+        mem_col_row.addWidget(self.color_input, 1)
+        phone_form.addRow("Ýat / Reňk:", mem_col_box)
+        root.addWidget(self.phone_identity_box)
 
         form = QFormLayout()
         form.setSpacing(10)
-
-        self.product_combo = style_combo(QComboBox())
-        form.addRow("Model / Haryt *:", self.product_combo)
 
         self.imei1_input = QLineEdit()
         self.imei1_input.setPlaceholderText("IMEI 1 *")
@@ -113,23 +499,54 @@ class EditStockItemDialog(QDialog):
         self.sn_input.setPlaceholderText("Seriýa belgisi S/N (hökmany däl)")
         form.addRow("Seriýa belgisi (S/N):", self.sn_input)
 
+        cond_box = QWidget()
+        cond_box.setMinimumHeight(40)
+        cond_row = QHBoxLayout(cond_box)
+        cond_row.setContentsMargins(0, 1, 0, 1)
+        cond_row.setSpacing(10)
         self.condition_combo = style_combo(QComboBox())
         self.condition_combo.addItem("Täze", "new")
         self.condition_combo.addItem("B/U (Ulanylan)", "used")
-        form.addRow("Ýagdaýy:", self.condition_combo)
+        self.condition_combo.currentIndexChanged.connect(self._sync_condition_ui)
+        self.category_badge = QLabel()
+        cond_row.addWidget(self.condition_combo)
+        cond_row.addWidget(self.category_badge)
+        cond_row.addStretch()
+        form.addRow("Ýagdaýy:", cond_box)
+
+        root.addLayout(form)
+
+        # Conditional B/U fields (shown only for standalone phones when B/U is selected)
+        self.used_fields_box = QWidget()
+        used_form = QFormLayout(self.used_fields_box)
+        used_form.setContentsMargins(0, 0, 0, 0)
+        used_form.setSpacing(10)
+        self.battery_input = QLineEdit()
+        self.battery_input.setPlaceholderText("88%, 92%...")
+        used_form.addRow("Batareýa %:", self.battery_input)
+        self.cosmetic_input = QLineEdit()
+        self.cosmetic_input.setPlaceholderText("Arassa, korpusda çyzyk ýok, komplekt...")
+        used_form.addRow("Umumy ýagdaýy:", self.cosmetic_input)
+        root.addWidget(self.used_fields_box)
+
+        form2 = QFormLayout()
+        form2.setSpacing(10)
 
         self.status_combo = style_combo(QComboBox())
         for label, code in STOCK_ITEM_STATUSES:
             self.status_combo.addItem(label, code)
-        form.addRow("Status:", self.status_combo)
+        form2.addRow("Status:", self.status_combo)
 
         self.source_combo = style_combo(QComboBox())
         self.source_combo.addItem("— Görkezilmedik —", "")
         for label, code in SOURCES:
             self.source_combo.addItem(label, code)
-        form.addRow("Çeşme:", self.source_combo)
+        form2.addRow("Çeşme:", self.source_combo)
 
-        cost_row = QHBoxLayout()
+        cost_box = QWidget()
+        cost_box.setMinimumHeight(40)
+        cost_row = QHBoxLayout(cost_box)
+        cost_row.setContentsMargins(0, 1, 0, 1)
         self.cost_spin = QDoubleSpinBox()
         self.cost_spin.setRange(0, 10000000)
         self.cost_spin.setDecimals(2)
@@ -143,15 +560,25 @@ class EditStockItemDialog(QDialog):
         cost_row.addWidget(self.cost_curr_combo)
         cost_row.addWidget(QLabel("Kurs:"))
         cost_row.addWidget(self.rate_spin)
-        form.addRow("Öz bahasy:", cost_row)
+        form2.addRow("Öz bahasy:", cost_box)
 
         self.notes_input = QLineEdit()
-        self.notes_input.setPlaceholderText("Korpus, batareýa %, komplekt, bellik...")
-        form.addRow("Bellik:", self.notes_input)
+        self.notes_input.setPlaceholderText("Goşmaça bellik...")
+        form2.addRow("Bellik:", self.notes_input)
 
-        root.addLayout(form)
+        root.addLayout(form2)
 
         footer = QHBoxLayout()
+        self.delete_btn = make_button("🗑 Poz", "danger")
+        self.delete_btn.clicked.connect(self._delete_item)
+        self.delete_btn.hide()
+        footer.addWidget(self.delete_btn)
+
+        self.history_btn = make_button("📜 IMEI taryhy")
+        self.history_btn.clicked.connect(self._open_imei_history)
+        self.history_btn.hide()
+        footer.addWidget(self.history_btn)
+
         footer.addStretch()
         cancel_btn = make_button("Ýatyr")
         cancel_btn.clicked.connect(self.reject)
@@ -163,15 +590,19 @@ class EditStockItemDialog(QDialog):
 
         configure_dialog_buttons(self, save_btn, cancel_btn)
 
-    def _load_data(self) -> None:
-        from app.models.stock_item import StockItem
+    def _sync_condition_ui(self) -> None:
+        if not self.is_phone_unit:
+            self.category_badge.hide()
+            self.used_fields_box.hide()
+            return
+        is_used = self.condition_combo.currentData() == "used"
+        self.category_badge.show()
+        _apply_phone_category_badge(self.category_badge, is_used)
+        self.used_fields_box.setVisible(is_used)
 
-        products, _cats = list_products_inventory(include_archived=True)
-        self.product_combo.clear()
-        for p in products:
-            suffix = " [ARHIW]" if not p.get("is_active", True) else ""
-            cat_part = f" ({p['category']})" if p.get("category") else ""
-            self.product_combo.addItem(f"{p['name']}{cat_part}{suffix}", p["id"])
+    def _load_data(self) -> None:
+        from app.models.product import Product
+        from app.models.stock_item import StockItem
 
         with SessionLocal() as session:
             st = session.get(StockItem, self.stock_item_id)
@@ -179,10 +610,51 @@ class EditStockItemDialog(QDialog):
                 QMessageBox.warning(self, "Tapylmady", "Enjam bazada tapylmady.")
                 self.reject()
                 return
+            prod = session.get(Product, st.product_id)
+            self.is_phone_unit = bool(prod is not None and getattr(prod, "is_phone_unit", False))
+            self._product_name = prod.name if prod is not None else ""
+            self._imei1_loaded = st.imei1 or ""
 
-            idx = self.product_combo.findData(st.product_id)
-            if idx >= 0:
-                self.product_combo.setCurrentIndex(idx)
+            if self.is_phone_unit:
+                self.setWindowTitle(f"Telefony üýtgetmek — {self._product_name}")
+                self.title_label.setText(f"Telefony üýtgetmek — {self._product_name}")
+                self.legacy_product_box.hide()
+                self.phone_identity_box.show()
+                self.delete_btn.show()
+                self.history_btn.show()
+
+                try:
+                    models = list_distinct_phone_models()
+                except SQLAlchemyError:
+                    models = []
+                completer = QCompleter(models, self)
+                completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+                completer.setFilterMode(Qt.MatchFlag.MatchContains)
+                self.model_name_input.setCompleter(completer)
+
+                self.model_name_input.setText(prod.name if prod is not None else "")
+                self.memory_input.setText(st.memory or "")
+                self.color_input.setText(st.color or "")
+                self.battery_input.setText(st.battery_health or "")
+                self.cosmetic_input.setText(st.cosmetic_condition or "")
+            else:
+                self.legacy_product_box.show()
+                self.phone_identity_box.hide()
+                self.used_fields_box.hide()
+                self.category_badge.hide()
+
+                products, _cats = list_products_inventory(include_archived=True)
+                self.product_combo.clear()
+                for p in products:
+                    if p.get("is_phone_unit") and p["id"] != st.product_id:
+                        continue
+                    suffix = " [ARHIW]" if not p.get("is_active", True) else ""
+                    cat_part = f" ({p['category']})" if p.get("category") else ""
+                    self.product_combo.addItem(f"{p['name']}{cat_part}{suffix}", p["id"])
+                idx = self.product_combo.findData(st.product_id)
+                if idx >= 0:
+                    self.product_combo.setCurrentIndex(idx)
+
             self.imei1_input.setText(st.imei1 or "")
             self.imei2_input.setText(st.imei2 or "")
             self.sn_input.setText(st.serial_number or "")
@@ -203,26 +675,78 @@ class EditStockItemDialog(QDialog):
                 self.rate_spin.setValue(float(st.cost_exchange_rate))
             self.notes_input.setText(st.notes or "")
 
-    def _save(self) -> None:
-        pid = self.product_combo.currentData()
-        if pid is None:
-            QMessageBox.warning(self, "Ýalňyşlyk", "Haryt modelini saýlaň.")
+        self._sync_condition_ui()
+
+    def _delete_item(self) -> None:
+        ans = QMessageBox.question(
+            self,
+            "Telefony pozmak",
+            f"«{self._product_name}» (IMEI: {self._imei1_loaded}) telefonyny skladyň sanawyndan pozmalymy?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
             return
         try:
-            update_stock_item(
-                stock_item_id=self.stock_item_id,
-                product_id=int(pid),
-                imei1=self.imei1_input.text(),
-                imei2=self.imei2_input.text(),
-                serial_number=self.sn_input.text(),
-                condition=self.condition_combo.currentData(),
-                status=self.status_combo.currentData(),
-                unit_cost=Decimal(f"{self.cost_spin.value():.2f}"),
-                cost_currency=self.cost_curr_combo.currentText(),
-                cost_exchange_rate=Decimal(f"{self.rate_spin.value():.4f}"),
-                acquisition_source=self.source_combo.currentData() or None,
-                notes=self.notes_input.text(),
-            )
+            delete_stock_item(self.stock_item_id)
+            show_toast(self.parentWidget() or self, "Telefon üstünlikli pozuldy.", kind="success")
+            self.accept()
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Pozup bolmady", str(err))
+
+    def _open_imei_history(self) -> None:
+        from app.ui.reports_page import ImeiHistoryDialog
+
+        dlg = ImeiHistoryDialog(
+            self.stock_item_id,
+            self.imei1_input.text().strip() or self._imei1_loaded,
+            self.model_name_input.text().strip() or self._product_name,
+            self,
+        )
+        dlg.exec()
+
+    def _save(self) -> None:
+        try:
+            if self.is_phone_unit:
+                cond = self.condition_combo.currentData() or "new"
+                is_used = cond == "used"
+                update_standalone_phone(
+                    stock_item_id=self.stock_item_id,
+                    model_name=self.model_name_input.text(),
+                    imei1=self.imei1_input.text(),
+                    memory=self.memory_input.text(),
+                    color=self.color_input.text(),
+                    imei2=self.imei2_input.text(),
+                    serial_number=self.sn_input.text(),
+                    condition=cond,
+                    status=self.status_combo.currentData(),
+                    battery_health=self.battery_input.text() if is_used else None,
+                    cosmetic_condition=self.cosmetic_input.text() if is_used else None,
+                    unit_cost=Decimal(f"{self.cost_spin.value():.2f}"),
+                    cost_currency=self.cost_curr_combo.currentText(),
+                    cost_exchange_rate=Decimal(f"{self.rate_spin.value():.4f}"),
+                    acquisition_source=self.source_combo.currentData() or None,
+                    notes=self.notes_input.text(),
+                )
+            else:
+                pid = self.product_combo.currentData()
+                if pid is None:
+                    QMessageBox.warning(self, "Ýalňyşlyk", "Haryt modelini saýlaň.")
+                    return
+                update_stock_item(
+                    stock_item_id=self.stock_item_id,
+                    product_id=int(pid),
+                    imei1=self.imei1_input.text(),
+                    imei2=self.imei2_input.text(),
+                    serial_number=self.sn_input.text(),
+                    condition=self.condition_combo.currentData(),
+                    status=self.status_combo.currentData(),
+                    unit_cost=Decimal(f"{self.cost_spin.value():.2f}"),
+                    cost_currency=self.cost_curr_combo.currentText(),
+                    cost_exchange_rate=Decimal(f"{self.rate_spin.value():.4f}"),
+                    acquisition_source=self.source_combo.currentData() or None,
+                    notes=self.notes_input.text(),
+                )
             show_toast(
                 self.parentWidget() or self,
                 "Enjamyň maglumatlary üstünlikli täzelendi.",
@@ -438,7 +962,10 @@ class StockItemDialog(QDialog):
         self.product_combo.blockSignals(True)
         self.product_combo.clear()
         for p in products:
-            self.product_combo.addItem(f"{p['name']} ({p['sku']})", p["id"])
+            if p.get("is_phone_unit") and p["id"] != self.product_id:
+                continue
+            cat_part = f" ({p['category']})" if p.get("category") else ""
+            self.product_combo.addItem(f"{p['name']}{cat_part}", p["id"])
         if self.product_id is not None:
             idx = self.product_combo.findData(self.product_id)
             if idx >= 0:
@@ -685,7 +1212,7 @@ class StockPage(QWidget):
         header.addWidget(cat_btn)
 
         used_btn = make_button("+ Enjam (IMEI)")
-        used_btn.clicked.connect(lambda: self._open_device_intake(default_condition="used"))
+        used_btn.clicked.connect(lambda: self._open_device_intake(default_condition="new"))
         header.addWidget(used_btn)
 
         add_prod_btn = make_button("+ Haryt goş (Ctrl+N)", "primary")
@@ -836,7 +1363,7 @@ class StockPage(QWidget):
 
         actions_bar.addStretch()
         hint = QLabel(
-            "Iki gezek / Enter: IMEI enjamda — enjamlar karty, sanly harytda — harydy üýtgetmek."
+            "Iki gezek / Enter: telefon (IMEI) — enjamy üýtgetmek, sanly haryt — harydy üýtgetmek."
         )
         hint.setObjectName("mutedText")
         actions_bar.addWidget(hint)
@@ -863,16 +1390,27 @@ class StockPage(QWidget):
         self._filter_products()
 
     def _update_statistics(self) -> None:
-        active_products = [p for p in self.products if p.get("is_active", True)]
+        active_products = [
+            p
+            for p in self.products
+            if p.get("is_active", True) and not p.get("phone_sold", False)
+        ]
         total = len(active_products)
         new_devs = sum(p["new_devices"] for p in active_products)
         used_devs = sum(p["used_devices"] for p in active_products)
         low_stock = sum(
             1
             for p in active_products
-            if p["quantity"] > 0 and p["minimum"] > 0 and p["quantity"] <= p["minimum"]
+            if not p.get("is_phone_unit", False)
+            and p["quantity"] > 0
+            and p["minimum"] > 0
+            and p["quantity"] <= p["minimum"]
         )
-        out_of_stock = sum(1 for p in active_products if p["quantity"] == 0)
+        out_of_stock = sum(
+            1
+            for p in active_products
+            if not p.get("is_phone_unit", False) and p["quantity"] == 0
+        )
 
         self.total_value.setText(str(total))
         self.devices_value.setText(f"{new_devs + used_devs} (Täze: {new_devs} • B/U: {used_devs})")
@@ -900,25 +1438,35 @@ class StockPage(QWidget):
         filtered = []
         for p in self.products:
             is_active = p.get("is_active", True)
+            is_phone = bool(p.get("is_phone_unit", False))
+            phone_sold = bool(p.get("phone_sold", False))
+
             if status_mode == "archived":
                 if is_active:
                     continue
             else:
                 if not is_active:
                     continue
+                # Sold standalone phone units disappear from warehouse & active stock filters
+                if phone_sold:
+                    continue
             if category_id is not None and p["category_id"] != category_id:
                 continue
-            if status_mode == "in_stock" and p["quantity"] <= 0:
-                continue
+            if status_mode == "in_stock":
+                if is_phone:
+                    if p.get("devices_in_stock", 0) <= 0:
+                        continue
+                elif p["quantity"] <= 0:
+                    continue
             if status_mode == "has_used" and p["used_devices"] <= 0:
                 continue
             if status_mode == "stale_30" and p.get("max_days_in_stock", 0) < 30:
                 continue
-            if status_mode == "low_stock" and not (
-                0 < p["quantity"] <= p["minimum"] and p["minimum"] > 0
+            if status_mode == "low_stock" and (
+                is_phone or not (0 < p["quantity"] <= p["minimum"] and p["minimum"] > 0)
             ):
                 continue
-            if status_mode == "out_of_stock" and p["quantity"] != 0:
+            if status_mode == "out_of_stock" and (is_phone or p["quantity"] != 0):
                 continue
 
             if tokens:
@@ -939,36 +1487,72 @@ class StockPage(QWidget):
         self._show_products(filtered, has_search=bool(tokens))
 
     def _make_product_tree_item(self, p: dict) -> QTreeWidgetItem:
-        brand_model = " / ".join(filter(None, [p["brand"], p["model"]])) or "—"
-        if p["total_devices"] > 0:
-            imei_summary = f"Täze: {p['new_devices']} • B/U: {p['used_devices']}"
-        else:
-            imei_summary = "San boýunça hasap"
+        is_phone = bool(p.get("is_phone_unit", False))
 
-        if not p.get("is_active", True):
-            status = "Arhiw"
-            color = theme.MUTED
-        elif p["quantity"] == 0:
-            status = "Skladda ýok"
-            color = theme.RED
-        elif p["minimum"] > 0 and p["quantity"] <= p["minimum"]:
-            status = "Az galyndy"
-            color = theme.ACCENT
+        if is_phone:
+            spec_parts = [x for x in (p.get("memory"), p.get("color")) if x]
+            if p.get("phone_condition") != "new" and p.get("battery_health"):
+                bh = str(p["battery_health"]).strip()
+                spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+            brand_model = " • ".join(spec_parts) or p.get("specification") or "—"
+
+            stock_col = "IMEI"
+
+            cond_lbl = "Täze" if p.get("phone_condition") == "new" else "B/U"
+            if cond_lbl == "B/U" and p.get("battery_health"):
+                cond_badge = f"B/U • {str(p['battery_health']).strip()}"
+            else:
+                cond_badge = cond_lbl
+            imei1 = (p.get("imei1") or "").strip()
+            imei_summary = f"{imei1} ({cond_badge})" if imei1 else cond_badge
+
+            if not p.get("is_active", True):
+                status = "Arhiw"
+                color = theme.MUTED
+            elif p.get("phone_sold"):
+                status = "Satyldy"
+                color = theme.MUTED
+            else:
+                status = "Bar"
+                color = theme.GREEN
         else:
-            status = "Bar"
-            color = theme.GREEN
+            brand_model = " / ".join(filter(None, [p["brand"], p["model"]])) or "—"
+            stock_col = f"{p['quantity']} sany"
+            if p["total_devices"] > 0:
+                imei_summary = f"Täze: {p['new_devices']} • B/U: {p['used_devices']}"
+            else:
+                imei_summary = "San boýunça hasap"
+
+            if not p.get("is_active", True):
+                status = "Arhiw"
+                color = theme.MUTED
+            elif p["quantity"] == 0:
+                status = "Skladda ýok"
+                color = theme.RED
+            elif p["minimum"] > 0 and p["quantity"] <= p["minimum"]:
+                status = "Az galyndy"
+                color = theme.ACCENT
+            else:
+                status = "Bar"
+                color = theme.GREEN
 
         item = QTreeWidgetItem([
             p["name"],
             p["category"],
             brand_model,
             p.get("cost_display", "—"),
-            f"{p['quantity']} sany",
+            stock_col,
             imei_summary,
             status,
         ])
         for col in (3, 4, 5, 6):
             item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+
+        if is_phone:
+            item.setForeground(
+                5,
+                QColor(theme.BLUE if p.get("phone_condition") == "new" else theme.ACCENT),
+            )
 
         status_font = QFont(self.tree.font())
         status_font.setBold(True)
@@ -977,12 +1561,28 @@ class StockPage(QWidget):
         item.setSizeHint(0, QSize(0, 42))
 
         tooltip_parts = []
-        if p.get("reference"):
-            tooltip_parts.append(f"Referens (OCR): {p['reference']}")
-        if p.get("barcode"):
-            tooltip_parts.append(f"Ştrihkod: {p['barcode']}")
-        if p.get("minimum"):
-            tooltip_parts.append(f"Iň az galyndy: {p['minimum']} sany")
+        if is_phone:
+            if p.get("imei1"):
+                tooltip_parts.append(f"IMEI 1: {p['imei1']}")
+            if p.get("imei2"):
+                tooltip_parts.append(f"IMEI 2: {p['imei2']}")
+            if p.get("serial_number"):
+                tooltip_parts.append(f"S/N: {p['serial_number']}")
+            if p.get("memory"):
+                tooltip_parts.append(f"Ýat: {p['memory']}")
+            if p.get("color"):
+                tooltip_parts.append(f"Reňk: {p['color']}")
+            if p.get("battery_health"):
+                tooltip_parts.append(f"Batareýa: {p['battery_health']}")
+            if p.get("cosmetic_condition"):
+                tooltip_parts.append(f"Umumy ýagdaýy: {p['cosmetic_condition']}")
+        else:
+            if p.get("reference"):
+                tooltip_parts.append(f"Referens (OCR): {p['reference']}")
+            if p.get("barcode"):
+                tooltip_parts.append(f"Ştrihkod: {p['barcode']}")
+            if p.get("minimum"):
+                tooltip_parts.append(f"Iň az galyndy: {p['minimum']} sany")
         if tooltip_parts:
             tip = "\n".join(tooltip_parts)
             for col in range(7):
@@ -993,6 +1593,8 @@ class StockPage(QWidget):
         item.setData(0, ROLE_PRODUCT_NAME, p["name"])
         item.setData(0, ROLE_IS_ACTIVE, bool(p.get("is_active", True)))
         item.setData(0, ROLE_TOTAL_DEVICES, int(p.get("total_devices", 0)))
+        item.setData(0, ROLE_IS_PHONE_UNIT, is_phone)
+        item.setData(0, ROLE_PRIMARY_STOCK_ITEM_ID, p.get("primary_stock_item_id"))
         return item
 
     def _show_products(self, products: list[dict], has_search: bool = False) -> None:
@@ -1016,8 +1618,15 @@ class StockPage(QWidget):
             for p in products:
                 if group_mode == "brand":
                     raw = (p.get("brand") or "").strip()
-                    key = raw.lower() if raw else "\uffff__no_brand__"
-                    display = raw if raw else "Brendsiz"
+                    if raw:
+                        key = raw.lower()
+                        display = raw
+                    elif p.get("is_phone_unit"):
+                        key = "\ufffe__phones__"
+                        display = "Telefonlar (IMEI)"
+                    else:
+                        key = "\uffff__no_brand__"
+                        display = "Brendsiz"
                 elif group_mode == "category":
                     raw = (p.get("category") or "").strip()
                     key = raw.lower() if raw else "\uffff__no_cat__"
@@ -1039,10 +1648,20 @@ class StockPage(QWidget):
             group_fg = QColor(theme.NAVY)
 
             for _key, (label, items) in sorted_groups:
-                total_qty = sum(int(x.get("quantity", 0)) for x in items)
+                quant_qty = sum(
+                    int(x.get("quantity", 0)) for x in items if not x.get("is_phone_unit", False)
+                )
+                phone_cnt = sum(1 for x in items if x.get("is_phone_unit", False))
                 total_devs = sum(int(x.get("total_devices", 0)) for x in items)
                 g_new = sum(int(x.get("new_devices", 0)) for x in items)
                 g_used = sum(int(x.get("used_devices", 0)) for x in items)
+
+                if quant_qty > 0 and phone_cnt > 0:
+                    qty_col = f"{quant_qty} sany / {phone_cnt} enjam"
+                elif phone_cnt > 0:
+                    qty_col = f"{phone_cnt} enjam"
+                else:
+                    qty_col = f"{quant_qty} sany"
 
                 if group_mode == "name":
                     cats = list(dict.fromkeys(x["category"] for x in items if x.get("category")))
@@ -1051,7 +1670,7 @@ class StockPage(QWidget):
                     else:
                         cats_str = ", ".join(cats)
                     header_title = f"📁 {label}"
-                    sub_col = f"{len(items)} görnüş"
+                    sub_col = f"{len(items)} enjam" if phone_cnt == len(items) else f"{len(items)} görnüş"
                     meta_col = cats_str
                 elif group_mode == "brand":
                     header_title = f"🏷 {label}"
@@ -1069,7 +1688,7 @@ class StockPage(QWidget):
                     sub_col,
                     meta_col,
                     "",
-                    f"{total_qty} sany",
+                    qty_col,
                     imei_col,
                     "",
                 ])
@@ -1109,6 +1728,8 @@ class StockPage(QWidget):
             "name": item.data(0, ROLE_PRODUCT_NAME) or item.text(0),
             "is_active": bool(item.data(0, ROLE_IS_ACTIVE)),
             "total_devices": int(item.data(0, ROLE_TOTAL_DEVICES) or 0),
+            "is_phone_unit": bool(item.data(0, ROLE_IS_PHONE_UNIT)),
+            "primary_stock_item_id": item.data(0, ROLE_PRIMARY_STOCK_ITEM_ID),
         }
 
     def _open_add_product(self) -> None:
@@ -1119,6 +1740,11 @@ class StockPage(QWidget):
     def _edit_selected_product(self) -> None:
         meta = self._selected_product_meta()
         if meta is None:
+            return
+        if meta.get("is_phone_unit") and meta.get("primary_stock_item_id") is not None:
+            dlg = EditStockItemDialog(int(meta["primary_stock_item_id"]), self)
+            if dlg.exec():
+                self._load_data()
             return
         dlg = ProductDialog(self, product_id=meta["id"])
         if dlg.exec():
@@ -1167,13 +1793,8 @@ class StockPage(QWidget):
         dlg.exec()
         self._load_data()
 
-    def _open_device_intake(self, default_condition: str = "used") -> None:
-        meta = self._selected_product_meta(silent=True)
-        prod_id = meta["id"] if meta is not None else None
-        prod_name = meta["name"] if meta is not None else ""
-        dlg = StockItemDialog(
-            product_id=prod_id,
-            product_name=prod_name,
+    def _open_device_intake(self, default_condition: str = "new") -> None:
+        dlg = StandalonePhoneIntakeDialog(
             default_condition=default_condition,
             parent=self,
         )
@@ -1183,6 +1804,11 @@ class StockPage(QWidget):
     def _open_selected_imei_dialog(self) -> None:
         meta = self._selected_product_meta()
         if meta is None:
+            return
+        if meta.get("is_phone_unit") and meta.get("primary_stock_item_id") is not None:
+            dlg = EditStockItemDialog(int(meta["primary_stock_item_id"]), self)
+            if dlg.exec():
+                self._load_data()
             return
         dlg = StockItemDialog(product_id=meta["id"], product_name=meta["name"], parent=self)
         dlg.exec()
@@ -1210,8 +1836,14 @@ class StockPage(QWidget):
         prod_id = item.data(0, ROLE_PRODUCT_ID)
         prod_name = item.data(0, ROLE_PRODUCT_NAME) or item.text(0)
         total_devices = int(item.data(0, ROLE_TOTAL_DEVICES) or 0)
+        is_phone_unit = bool(item.data(0, ROLE_IS_PHONE_UNIT))
+        primary_stock_item_id = item.data(0, ROLE_PRIMARY_STOCK_ITEM_ID)
 
-        if total_devices > 0:
+        if is_phone_unit and primary_stock_item_id is not None:
+            dlg = EditStockItemDialog(int(primary_stock_item_id), self)
+            if dlg.exec():
+                self._load_data()
+        elif total_devices > 0:
             dlg = StockItemDialog(product_id=prod_id, product_name=prod_name, parent=self)
             dlg.exec()
             self._load_data()

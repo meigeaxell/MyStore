@@ -30,6 +30,7 @@ from app.services.accessory_matcher import (
     match_accessory_text,
     record_ocr_alias,
 )
+from app.services.incoming_queue_service import enqueue_incoming_item
 from app.services.purchase_service import create_purchase
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
@@ -47,6 +48,7 @@ MUTATING_COMMANDS = {
     "category_update",
     "category_deactivate",
     "receive_purchase",
+    "queue_incoming_item",
 }
 
 
@@ -238,6 +240,7 @@ class MobileProtocolProcessor:
                 "cancel_operation": self._handle_cancel_operation,
                 "check_imei": self._handle_check_imei,
                 "receive_purchase": self._handle_receive_purchase,
+                "queue_incoming_item": self._handle_queue_incoming_item,
                 "catalog_list": self._handle_catalog_list,
                 "product_details": self._handle_product_details,
                 "product_create": self._handle_product_create,
@@ -910,6 +913,19 @@ class MobileProtocolProcessor:
         return (
             make_response("operation_ok", request_id, {"purchase_id": purchase_id, "message": msg}),
             msg,
+        )
+
+    def _handle_queue_incoming_item(
+        self,
+        request_id: str,
+        device_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        dev_name = str(payload.get("device_name") or device_id or "Android Scanner").strip()
+        result = enqueue_incoming_item(payload, device_name=dev_name)
+        return (
+            make_response("incoming_queued", request_id, result),
+            result["message"],
         )
 
     def _handle_catalog_list(

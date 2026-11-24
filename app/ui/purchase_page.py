@@ -34,12 +34,14 @@ from app.repositories.product_repository import (
 )
 from app.services.finance_service import FinanceService
 from app.services.purchase_service import (
+    PERSONAL_SOURCE_LABEL,
     add_purchase_payment,
     add_purchase_refund,
     cancel_purchase,
     create_purchase,
     get_purchase_balance,
     get_supplier_debt,
+    is_personal_source_purchase,
 )
 from app.services.settings_service import SettingsService
 from app.ui import theme
@@ -288,7 +290,7 @@ class PurchaseDialog(QDialog):
             self.supplier_input.addItem(sup)
         if self.supplier_input.lineEdit():
             self.supplier_input.lineEdit().setPlaceholderText(
-                "Üpjün edijini saýlaň ýa-da ýazyň (hökmany däl)"
+                "Üpjün ediji (boş goýulsa — şahsy çeşme, bergisiz)"
             )
 
         self.currency_input = style_combo(QComboBox())
@@ -976,7 +978,12 @@ class PurchaseDetailsDialog(QDialog):
                 purchase.cancellation_reason if purchase.status == "cancelled" else None
             )
 
-            supplier_text = purchase.supplier_name or "Görkezilmedik"
+            self.is_personal_source = is_personal_source_purchase(purchase)
+            supplier_text = (
+                PERSONAL_SOURCE_LABEL
+                if self.is_personal_source
+                else (purchase.supplier_name or "").strip()
+            )
             self.info_label.setText(
                 f"Sene: {purchase.purchase_date:%d.%m.%Y %H:%M}   |   "
                 f"Üpjün ediji: {supplier_text}   |   "
@@ -1054,19 +1061,35 @@ class PurchaseDetailsDialog(QDialog):
             self.refund_button.setEnabled(debt > 0)
         else:
             balance = get_purchase_balance(self.purchase_id)
-            self.status_label.setText("Status: Tölendi" if balance == 0 else "Status: Işjeň alyş")
-            self.status_label.setStyleSheet(
-                f"font-weight: 700; color: {theme.GREEN}; background: #EAF7EF; padding: 8px 12px; border-radius: 8px;"
-            )
-            self.balance_label.setText(f"Dükanyň galan bergisi: {money_str(balance)} {self.currency}")
-            self.balance_label.setStyleSheet(
-                f"font-size: 15pt; font-weight: 700; color: {theme.ACCENT};"
-            )
-            self.cancellation_label.clear()
-            self.payment_section.show()
-            self.cancel_purchase_button.show()
-            self.refund_section.hide()
-            self.payment_rate.setValue(float(self.document_rate))
+            if self.is_personal_source:
+                self.status_label.setText(f"Status: {PERSONAL_SOURCE_LABEL}")
+                self.status_label.setStyleSheet(
+                    f"font-weight: 700; color: {theme.BLUE}; background: #EFF6FF; padding: 8px 12px; border-radius: 8px;"
+                )
+                self.balance_label.setText(
+                    f"Dükanyň galan bergisi: 0.00 {self.currency} ({PERSONAL_SOURCE_LABEL}, bergisiz)"
+                )
+                self.balance_label.setStyleSheet(
+                    f"font-size: 15pt; font-weight: 700; color: {theme.GREEN};"
+                )
+                self.cancellation_label.clear()
+                self.payment_section.hide()
+                self.cancel_purchase_button.show()
+                self.refund_section.hide()
+            else:
+                self.status_label.setText("Status: Tölendi" if balance == 0 else "Status: Işjeň alyş")
+                self.status_label.setStyleSheet(
+                    f"font-weight: 700; color: {theme.GREEN}; background: #EAF7EF; padding: 8px 12px; border-radius: 8px;"
+                )
+                self.balance_label.setText(f"Dükanyň galan bergisi: {money_str(balance)} {self.currency}")
+                self.balance_label.setStyleSheet(
+                    f"font-size: 15pt; font-weight: 700; color: {theme.ACCENT};"
+                )
+                self.cancellation_label.clear()
+                self.payment_section.show()
+                self.cancel_purchase_button.show()
+                self.refund_section.hide()
+                self.payment_rate.setValue(float(self.document_rate))
 
     def _add_payment(self) -> None:
         amount = Decimal(str(self.payment_amount.value()))
@@ -1272,7 +1295,12 @@ class PurchasePage(QWidget):
                 {
                     "id": p.id,
                     "date": p.purchase_date,
-                    "supplier": p.supplier_name or "—",
+                    "supplier": (
+                        PERSONAL_SOURCE_LABEL
+                        if is_personal_source_purchase(p)
+                        else (p.supplier_name or "").strip()
+                    ),
+                    "is_personal": is_personal_source_purchase(p),
                     "currency": p.currency,
                     "total": Decimal(str(p.total_amount)),
                     "note": p.note or "",
@@ -1285,7 +1313,7 @@ class PurchasePage(QWidget):
         debt_tmt = Decimal("0.00")
         for purchase in self.purchases:
             purchase["balance"] = get_purchase_balance(purchase["id"])
-            if purchase["status"] == "cancelled":
+            if purchase["status"] == "cancelled" or purchase["is_personal"]:
                 purchase["paid"] = Decimal("0.00")
             else:
                 purchase["paid"] = purchase["total"] - purchase["balance"]
@@ -1334,6 +1362,11 @@ class PurchasePage(QWidget):
                 status_color = "#858B94"
                 paid_text = "—"
                 balance_text = "—"
+            elif purchase.get("is_personal"):
+                status = PERSONAL_SOURCE_LABEL
+                status_color = theme.BLUE
+                paid_text = "—"
+                balance_text = "0.00"
             else:
                 status = "Tölendi" if balance == 0 else "Bergi bar"
                 status_color = theme.GREEN if balance == 0 else theme.ACCENT

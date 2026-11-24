@@ -65,3 +65,10 @@ class Product(Base):
         default=True,
         nullable=False,
     )
+
+    is_phone_unit: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )

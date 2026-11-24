@@ -1171,14 +1171,25 @@ class SalesPage(QWidget):
                             st.imei1,
                             st.imei2,
                             st.serial_number,
+                            st.memory,
+                            st.color,
+                            st.battery_health,
+                            st.cosmetic_condition,
                         ],
                     )
                 ).lower()
                 if not self._matches_multiword(hay, words, words_en):
                     continue
                 cat_label = cat_name or "—"
-                bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
                 cond = "Täze" if st.condition == "new" else "B/U"
+                if getattr(prod, "is_phone_unit", False):
+                    spec_parts = [x for x in (st.memory, st.color) if x]
+                    if st.condition != "new" and st.battery_health:
+                        bh = st.battery_health.strip()
+                        spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+                    meta_str = " • ".join(spec_parts) or prod.specification or ""
+                else:
+                    meta_str = " / ".join(filter(None, [prod.brand, prod.model])) or ""
                 u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
                     session=session,
                     product_id=prod.id,
@@ -1187,13 +1198,14 @@ class SalesPage(QWidget):
                     fallback_rate=fallback_rate,
                 )
                 cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
+                title_part = f"{prod.name} ({meta_str})" if meta_str else prod.name
                 item = QListWidgetItem(
-                    f"📱 {prod.name}  •  {cat_label}  •  {bm}  •  IMEI: {st.imei1} ({cond})  •  Öz bahasy: {cost_str}"
+                    f"📱 {title_part}  •  {cat_label}  •  IMEI: {st.imei1} ({cond})  •  Öz bahasy: {cost_str}"
                 )
                 item.setData(Qt.ItemDataRole.UserRole, {"product_id": prod.id, "imei": st.imei1})
                 self.live_search_popup.addItem(item)
                 imei_added += 1
-                if imei_added >= 6:
+                if imei_added >= 8:
                     break
 
             prod_rows = session.execute(
@@ -1202,11 +1214,14 @@ class SalesPage(QWidget):
                 .where(
                     Product.is_active.is_(True),
                     Product.stock_quantity > 0,
+                    Product.is_phone_unit.is_(False),
                 )
                 .order_by(Product.name.asc())
             ).all()
             prod_added = 0
             for p, cat_name in prod_rows:
+                if getattr(p, "is_phone_unit", False) and p.stock_quantity <= 0:
+                    continue
                 hay = " ".join(
                     filter(
                         None,
@@ -1358,7 +1373,8 @@ class SalesPage(QWidget):
             matches = [
                 p
                 for p, cat_name in prod_rows
-                if self._matches_multiword(
+                if not (getattr(p, "is_phone_unit", False) and p.stock_quantity <= 0)
+                and self._matches_multiword(
                     " ".join(
                         filter(
                             None,
@@ -1385,14 +1401,20 @@ class SalesPage(QWidget):
                         StockItem.status == "in_stock",
                     )
                 ).all()
-                if len(in_stock_imeis) == 1 and prod.stock_quantity == 1:
-                    self._append_to_cart(prod, in_stock_imeis[0].imei1)
-                    self.search_input.clear()
-                    return
-                if len(in_stock_imeis) == 0:
-                    self._append_to_cart(prod)
-                    self.search_input.clear()
-                    return
+                if getattr(prod, "is_phone_unit", False):
+                    if len(in_stock_imeis) == 1:
+                        self._append_to_cart(prod, in_stock_imeis[0].imei1)
+                        self.search_input.clear()
+                        return
+                else:
+                    if len(in_stock_imeis) == 1 and prod.stock_quantity == 1:
+                        self._append_to_cart(prod, in_stock_imeis[0].imei1)
+                        self.search_input.clear()
+                        return
+                    if len(in_stock_imeis) == 0:
+                        self._append_to_cart(prod)
+                        self.search_input.clear()
+                        return
 
         self._open_inventory_selector(text)
 

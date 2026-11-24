@@ -21,6 +21,7 @@ DATA_MUTATING_TYPES = {
     "category_update",
     "category_deactivate",
     "receive_purchase",
+    "queue_incoming_item",
 }
 
 
@@ -30,6 +31,7 @@ class MobileWebSocketServer(QObject):
     devicesChanged = Signal(list)
     activityLogged = Signal(str)
     dataMutated = Signal(str)
+    incomingQueued = Signal(dict)
     serverStateChanged = Signal(bool, str)
 
     def __init__(
@@ -215,14 +217,16 @@ class MobileWebSocketServer(QObject):
             self._log(f"{info['ip']} salgydan nädogry JSON")
             return
 
+        msg_type = str(parsed.get("type") or "")
+        if msg_type == "queue_incoming_item" and isinstance(parsed.get("payload"), dict):
+            parsed["payload"].setdefault("device_name", info["device_name"])
+
         auth_count = sum(1 for c in self._clients.values() if c["authenticated"])
         response, log_line = self.processor.handle_message(
             message=parsed,
             is_authenticated=bool(info["authenticated"]),
             connected_count=auth_count + (0 if info["authenticated"] else 1),
         )
-
-        msg_type = str(parsed.get("type") or "")
         if msg_type == "auth" and response.get("ok"):
             payload = parsed.get("payload") or {}
             dev_id = str(payload.get("device_id") or parsed.get("device_id") or "").strip()
@@ -245,6 +249,9 @@ class MobileWebSocketServer(QObject):
         if log_line:
             prefix = f"[{info['device_name']}] " if info["authenticated"] else f"[{info['ip']}] "
             self._log(prefix + log_line)
+
+        if response.get("ok") and msg_type == "queue_incoming_item":
+            self.incomingQueued.emit(response.get("data") or {})
 
         if response.get("ok") and msg_type in DATA_MUTATING_TYPES:
             self.dataMutated.emit(msg_type)

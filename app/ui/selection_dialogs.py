@@ -19,7 +19,11 @@ from app.database.engine import SessionLocal
 from app.models.category import Category
 from app.models.product import Product
 from app.models.stock_item import StockItem
-from app.repositories.product_repository import list_products_inventory
+from app.repositories.product_repository import (
+    is_system_category_code,
+    list_categories,
+    list_products_inventory,
+)
 from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
 from app.ui import theme
@@ -124,7 +128,14 @@ class CatalogProductSelectorDialog(QDialog):
         self.search_input.setFocus()
 
     def _reload_data(self) -> None:
-        self.products, self.categories = list_products_inventory()
+        raw_products, _all_cats = list_products_inventory()
+        # Hide standalone IMEI phone units from quantitative catalog selector
+        self.products = [p for p in raw_products if not p.get("is_phone_unit", False)]
+        self.categories = {
+            c.id: c.name
+            for c in list_categories(active_only=True)
+            if not is_system_category_code(c.code)
+        }
         cur_cat = self.category_combo.currentData()
         self.category_combo.blockSignals(True)
         self.category_combo.clear()
@@ -350,6 +361,13 @@ class InventorySelectorDialog(QDialog):
                     )
                     cost_display = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
 
+                is_phone = bool(getattr(prod, "is_phone_unit", False))
+                spec_parts = [x for x in (st.memory, st.color) if x]
+                if not is_new and st.battery_health:
+                    bh = st.battery_health.strip()
+                    spec_parts.append(bh if bh.lower().startswith("bat") else f"Bat: {bh}")
+                phone_spec_str = " • ".join(spec_parts)
+
                 self.all_entries.append({
                     "product_id": prod.id,
                     "product_name": prod.name,
@@ -364,14 +382,22 @@ class InventorySelectorDialog(QDialog):
                     "imei": st.imei1,
                     "imei2": st.imei2 or "",
                     "serial_number": st.serial_number or "",
+                    "memory": st.memory or "",
+                    "color": st.color or "",
+                    "battery_health": st.battery_health or "",
+                    "cosmetic_condition": st.cosmetic_condition or "",
+                    "phone_spec_str": phone_spec_str,
+                    "is_phone_unit": is_phone,
                     "condition": st.condition,
                     "type_code": "new_imei" if is_new else "used_imei",
                     "type_label": "Täze (IMEI)" if is_new else "B/U (IMEI)",
                     "stock_quantity": prod.stock_quantity,
-                    "avail_label": "1 sany (IMEI)",
+                    "avail_label": "IMEI" if is_phone else "1 sany (IMEI)",
                 })
 
             for prod in products:
+                if getattr(prod, "is_phone_unit", False):
+                    continue
                 non_imei_qty = prod.stock_quantity - imei_count_by_prod.get(prod.id, 0)
                 if non_imei_qty > 0:
                     u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
@@ -396,6 +422,12 @@ class InventorySelectorDialog(QDialog):
                         "imei": None,
                         "imei2": "",
                         "serial_number": "",
+                        "memory": "",
+                        "color": "",
+                        "battery_health": "",
+                        "cosmetic_condition": "",
+                        "phone_spec_str": "",
+                        "is_phone_unit": False,
                         "condition": "new",
                         "type_code": "accessory",
                         "type_label": "Sanly",
@@ -427,6 +459,10 @@ class InventorySelectorDialog(QDialog):
                     entry["imei"] or "",
                     entry["imei2"],
                     entry["serial_number"],
+                    entry.get("memory", ""),
+                    entry.get("color", ""),
+                    entry.get("battery_health", ""),
+                    entry.get("cosmetic_condition", ""),
                 ]).lower()
                 if not all(w in hay for w in words):
                     continue
@@ -435,7 +471,10 @@ class InventorySelectorDialog(QDialog):
         self.table.setRowCount(len(self.filtered))
         self.count_label.setText(f"Elýeterli setirler: {len(self.filtered)}")
         for r, entry in enumerate(self.filtered):
-            bm = " / ".join(filter(None, [entry["brand"], entry["model"]])) or "—"
+            if entry.get("is_phone_unit"):
+                bm = entry.get("phone_spec_str") or entry.get("reference") or "—"
+            else:
+                bm = " / ".join(filter(None, [entry["brand"], entry["model"]])) or "—"
             if entry["imei"]:
                 imei_type_col = f"{entry['imei']} ({entry['type_label']})"
                 if entry["serial_number"]:

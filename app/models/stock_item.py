@@ -70,6 +70,26 @@ class StockItem(Base):
         nullable=True,
     )
 
+    memory: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    color: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    battery_health: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
+    cosmetic_condition: Mapped[str | None] = mapped_column(
+        String(120),
+        nullable=True,
+    )
+
     notes: Mapped[str | None] = mapped_column(
         String(255),
         nullable=True,

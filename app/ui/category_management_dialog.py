@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.repositories.product_repository import (
     deactivate_category,
+    is_system_category_code,
     list_categories,
     rename_category,
 )
@@ -47,6 +48,7 @@ class CategoryManagementDialog(QDialog):
 
         self.category_list = QListWidget()
         self.category_list.setSpacing(2)
+        self.category_list.currentItemChanged.connect(self._update_buttons_state)
         root.addWidget(self.category_list, 1)
 
         actions = QHBoxLayout()
@@ -70,21 +72,35 @@ class CategoryManagementDialog(QDialog):
         self.category_list.clear()
         try:
             for cat in list_categories(active_only=False):
-                status = "" if cat.is_active else "  •  işjeň däl"
-                item = QListWidgetItem(f"{cat.name}{status}")
+                is_system = is_system_category_code(cat.code)
+                markers: list[str] = []
+                if is_system:
+                    markers.append("🔒 Hemişelik")
+                if not cat.is_active:
+                    markers.append("işjeň däl")
+                suffix = f"  •  {'  •  '.join(markers)}" if markers else ""
+                item = QListWidgetItem(f"{cat.name}{suffix}")
                 item.setData(Qt.ItemDataRole.UserRole, cat.id)
                 item.setData(Qt.ItemDataRole.UserRole + 1, cat.is_active)
                 item.setData(Qt.ItemDataRole.UserRole + 2, cat.name)
+                item.setData(Qt.ItemDataRole.UserRole + 3, is_system)
                 self.category_list.addItem(item)
         except SQLAlchemyError as error:
             QMessageBox.critical(self, "Ýalňyşlyk", f"Kategoriýalary ýükläp bolmady:\n{error}")
+        self._update_buttons_state()
+
+    def _update_buttons_state(self, *_args) -> None:
+        item = self.category_list.currentItem()
+        is_system = bool(item.data(Qt.ItemDataRole.UserRole + 3)) if item is not None else False
+        self.rename_button.setEnabled(not is_system)
+        self.deactivate_button.setEnabled(not is_system)
 
     def _add_category(self) -> None:
         dlg = CategoryDialog(self)
         if dlg.exec():
             self._load_categories()
 
-    def _selected_category(self) -> tuple[int, bool, str] | None:
+    def _selected_category(self) -> tuple[int, bool, str, bool] | None:
         item = self.category_list.currentItem()
         if item is None:
             show_toast(self, "Ilki sanawdan kategoriýa saýlaň.", kind="info")
@@ -93,13 +109,21 @@ class CategoryManagementDialog(QDialog):
             item.data(Qt.ItemDataRole.UserRole),
             item.data(Qt.ItemDataRole.UserRole + 1),
             item.data(Qt.ItemDataRole.UserRole + 2),
+            bool(item.data(Qt.ItemDataRole.UserRole + 3)),
         )
 
     def _rename_category(self) -> None:
         selected = self._selected_category()
         if selected is None:
             return
-        cat_id, _active, old_name = selected
+        cat_id, _active, old_name, is_system = selected
+        if is_system:
+            show_toast(
+                self,
+                "Hemişelik ulgam kategoriýasynyň adyny üýtgedip bolmaýar.",
+                kind="warning",
+            )
+            return
         new_name, ok = QInputDialog.getText(
             self,
             "Kategoriýanyň adyny üýtgetmek",
@@ -121,7 +145,14 @@ class CategoryManagementDialog(QDialog):
         selected = self._selected_category()
         if selected is None:
             return
-        cat_id, is_active, name = selected
+        cat_id, is_active, name, is_system = selected
+        if is_system:
+            show_toast(
+                self,
+                "Hemişelik ulgam kategoriýasyny öçürip bolmaýar.",
+                kind="warning",
+            )
+            return
         if not is_active:
             show_toast(self, "Bu kategoriýa eýýäm öçürilen.", kind="info")
             return

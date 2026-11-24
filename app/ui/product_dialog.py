@@ -21,6 +21,7 @@ from app.models.purchase_item import PurchaseItem
 from app.repositories.product_repository import (
     deactivate_product,
     get_product_with_devices,
+    is_system_category_code,
     list_categories,
     list_distinct_brands_and_models,
     restore_product,
@@ -254,6 +255,8 @@ class ProductDialog(QDialog):
     def _load_categories(self) -> None:
         self.category_input.clear()
         for category in list_categories(active_only=True):
+            if is_system_category_code(category.code):
+                continue
             self.category_input.addItem(category.name, category.id)
         if self.category_input.count() > 0 and self.product_id is None:
             self.category_input.setCurrentIndex(0)
@@ -324,7 +327,8 @@ class ProductDialog(QDialog):
             else:
                 for cat in list_categories(active_only=False):
                     if cat.id == product.category_id:
-                        self.category_input.addItem(f"{cat.name} (işjeň däl)", cat.id)
+                        label = cat.name if cat.is_active else f"{cat.name} (işjeň däl)"
+                        self.category_input.addItem(label, cat.id)
                         self.category_input.setCurrentIndex(self.category_input.count() - 1)
                         break
         except SQLAlchemyError as error:

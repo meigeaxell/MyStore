@@ -71,6 +71,7 @@ def test_create_purchase_without_payment(product):
         ],
         currency="USD",
         exchange_rate="19.5000",
+        supplier_name="Test Supplier",
     )
 
     assert purchase_service.get_purchase_balance(purchase_id) == Decimal("300.00")
@@ -94,6 +95,7 @@ def test_create_purchase_with_mixed_payments(product):
         ],
         currency="USD",
         exchange_rate="19.5000",
+        supplier_name="Test Supplier",
         payments=[
             {
                 "currency": "USD",
@@ -141,6 +143,7 @@ def test_add_payment_to_existing_purchase(product):
         ],
         currency="USD",
         exchange_rate="19.5000",
+        supplier_name="Test Supplier",
     )
 
     purchase_service.add_purchase_payment(

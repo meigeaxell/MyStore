@@ -15,8 +15,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -46,6 +49,25 @@ sealed interface ConnectionState {
 
     data class Error(val message: String) : ConnectionState
 }
+
+@Serializable
+data class IncomingQueueCounts(
+    val known: Int = 0,
+    val unknown: Int = 0,
+    @SerialName("phone_imei") val phoneImei: Int = 0,
+    val total: Int = 0,
+)
+
+@Serializable
+data class IncomingQueuedData(
+    @SerialName("queue_id") val queueId: Int = 0,
+    @SerialName("item_kind") val itemKind: String = "",
+    val merged: Boolean = false,
+    val quantity: Int = 1,
+    @SerialName("product_name") val productName: String = "",
+    val message: String = "",
+    val counts: IncomingQueueCounts = IncomingQueueCounts(),
+)
 
 /**
  * Надёжный локальный WebSocket-клиент для MobileStore:
@@ -288,6 +310,47 @@ class MobileStoreWsClient(
                 )
             )
         }
+    }
+
+    suspend fun queueIncomingItem(
+        mode: String,
+        productId: Int? = null,
+        barcode: String? = null,
+        imei1: String? = null,
+        imei2: String? = null,
+        serialNumber: String? = null,
+        condition: String = "new",
+        modelHint: String? = null,
+        ocrRawText: String? = null,
+        quantity: Int = 1,
+        unitCost: String? = null,
+        currency: String = "USD",
+        supplierName: String? = null,
+        requestId: String = UUID.randomUUID().toString(),
+    ): WsResponseEnvelope {
+        val cleanCost = unitCost?.trim()?.replace(",", ".")?.takeIf { it.isNotBlank() }
+        val payload = buildJsonObject {
+            put("mode", mode)
+            if (productId != null) put("product_id", productId) else put("product_id", JsonNull)
+            if (!barcode.isNullOrBlank()) put("barcode", barcode.trim()) else put("barcode", JsonNull)
+            if (!imei1.isNullOrBlank()) put("imei1", imei1.trim()) else put("imei1", JsonNull)
+            if (!imei2.isNullOrBlank()) put("imei2", imei2.trim()) else put("imei2", JsonNull)
+            if (!serialNumber.isNullOrBlank()) put("serial_number", serialNumber.trim()) else put("serial_number", JsonNull)
+            put("condition", if (condition.equals("used", ignoreCase = true)) "used" else "new")
+            if (!modelHint.isNullOrBlank()) put("model_hint", modelHint.trim()) else put("model_hint", JsonNull)
+            if (!ocrRawText.isNullOrBlank()) put("ocr_raw_text", ocrRawText.trim()) else put("ocr_raw_text", JsonNull)
+            put("quantity", quantity.coerceAtLeast(1))
+            if (cleanCost != null) put("unit_cost", cleanCost) else put("unit_cost", JsonNull)
+            put("currency", if (currency.equals("TMT", ignoreCase = true)) "TMT" else "USD")
+            if (!supplierName.isNullOrBlank()) put("supplier_name", supplierName.trim()) else put("supplier_name", JsonNull)
+            if (activeConfig.deviceName.isNotBlank()) put("device_name", activeConfig.deviceName)
+        }
+        return sendCommand(
+            type = "queue_incoming_item",
+            payload = payload,
+            requestId = requestId,
+            timeoutMs = 12_000L,
+        )
     }
 
     suspend fun sendCommand(

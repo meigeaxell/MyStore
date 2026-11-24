@@ -1,7 +1,9 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.database.engine import SessionLocal
 from app.models.category import Category
@@ -11,14 +13,58 @@ from app.models.purchase_item import PurchaseItem
 from app.models.stock_item import StockItem
 from app.services.settings_service import SettingsService
 
+SYSTEM_PHONE_NEW_CODE = "PHONE_NEW"
+SYSTEM_PHONE_USED_CODE = "PHONE_USED"
+SYSTEM_PHONE_CATEGORY_CODES = frozenset({SYSTEM_PHONE_NEW_CODE, SYSTEM_PHONE_USED_CODE})
+
+SYSTEM_PHONE_CATEGORY_SPECS = (
+    (SYSTEM_PHONE_NEW_CODE, "Telefon Täze", "Täze telefonlar (IMEI boýunça hemişelik kategoriýa)"),
+    (SYSTEM_PHONE_USED_CODE, "Telefon B/U", "Ulanylan B/U telefonlar (IMEI boýunça hemişelik kategoriýa)"),
+)
+
+
+def is_system_category_code(code: str | None) -> bool:
+    return (code or "").strip().upper() in SYSTEM_PHONE_CATEGORY_CODES
+
+
+def ensure_system_phone_categories(session: Session | None = None) -> dict[str, int]:
+    """Гарантирует наличие двух постоянных категорий 'Telefon Täze' и 'Telefon B/U'."""
+    def _ensure(sess: Session) -> dict[str, int]:
+        ids: dict[str, int] = {}
+        for code, name, desc in SYSTEM_PHONE_CATEGORY_SPECS:
+            cat = sess.scalar(select(Category).where(Category.code == code))
+            if cat is None:
+                cat = sess.scalar(select(Category).where(func.lower(Category.name) == name.lower()))
+            if cat is None:
+                cat = Category(name=name, code=code, description=desc, is_active=True)
+                sess.add(cat)
+                sess.flush()
+            else:
+                if not cat.is_active:
+                    cat.is_active = True
+                if cat.code != code:
+                    cat.code = code
+                if cat.name != name:
+                    cat.name = name
+                sess.flush()
+            key = "new" if code == SYSTEM_PHONE_NEW_CODE else "used"
+            ids[key] = cat.id
+        return ids
+
+    if session is not None:
+        return _ensure(session)
+    with SessionLocal() as owned, owned.begin():
+        return _ensure(owned)
+
 
 def get_low_stock_products():
-    """Возвращает активные товары, остаток которых достиг минимума."""
+    """Возвращает активные товары, остаток которых достиг минимума (исключая одиночные телефоны)."""
     with SessionLocal() as session:
         statement = (
             select(Product)
             .where(
                 Product.is_active.is_(True),
+                Product.is_phone_unit.is_(False),
                 Product.min_stock_quantity > 0,
                 Product.stock_quantity <= Product.min_stock_quantity,
             )
@@ -82,6 +128,8 @@ def rename_category(category_id: int, new_name: str) -> None:
         category = session.get(Category, category_id)
         if category is None:
             raise ValueError("Kategoriýa tapylmady.")
+        if is_system_category_code(category.code):
+            raise ValueError("Hemişelik ulgam kategoriýasynyň adyny üýtgedip bolmaýar.")
         category.name = clean_name
 
 
@@ -91,6 +139,8 @@ def deactivate_category(category_id: int) -> None:
         category = session.get(Category, category_id)
         if category is None:
             raise ValueError("Kategoriýa tapylmady.")
+        if is_system_category_code(category.code):
+            raise ValueError("Hemişelik ulgam kategoriýasyny öçürip bolmaýar.")
         category.is_active = False
 
 
@@ -189,6 +239,13 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
         for product, category_name in rows:
             p_items = by_product.get(product.id, [])
             in_stock_items = [i for i in p_items if i.status == "in_stock"]
+            is_phone_unit = bool(getattr(product, "is_phone_unit", False))
+            phone_sold = is_phone_unit and len(in_stock_items) == 0
+
+            # Проданные самостоятельные телефоны исчезают со склада (оставаясь только в истории чеков)
+            if phone_sold and not include_archived:
+                continue
+
             new_cnt = sum(1 for i in in_stock_items if i.condition == "new")
             used_cnt = sum(1 for i in in_stock_items if i.condition != "new")
             max_days = max(
@@ -196,9 +253,11 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
                 default=0,
             )
             imei_blob = " ".join(
-                f"{i.imei1} {i.imei2 or ''} {i.serial_number or ''}"
+                f"{i.imei1} {i.imei2 or ''} {i.serial_number or ''} {i.memory or ''} {i.color or ''} {i.battery_health or ''} {i.cosmetic_condition or ''}"
                 for i in p_items
             ).lower()
+
+            primary_st = in_stock_items[-1] if in_stock_items else (p_items[-1] if p_items else None)
 
             unit_cost = Decimal("0.00")
             cost_currency = ""
@@ -245,6 +304,17 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
                 "max_days_in_stock": max(0, max_days),
                 "imei_search_blob": imei_blob,
                 "is_active": bool(product.is_active),
+                "is_phone_unit": is_phone_unit,
+                "phone_sold": phone_sold,
+                "primary_stock_item_id": primary_st.id if primary_st else None,
+                "imei1": primary_st.imei1 if primary_st else "",
+                "imei2": (primary_st.imei2 or "") if primary_st else "",
+                "serial_number": (primary_st.serial_number or "") if primary_st else "",
+                "memory": (primary_st.memory or "") if primary_st else "",
+                "color": (primary_st.color or "") if primary_st else "",
+                "battery_health": (primary_st.battery_health or "") if primary_st else "",
+                "cosmetic_condition": (primary_st.cosmetic_condition or "") if primary_st else "",
+                "phone_condition": primary_st.condition if primary_st else "new",
             })
 
         return products, cat_map
@@ -723,6 +793,350 @@ def delete_stock_item(stock_item_id: int) -> None:
         session.delete(stock_item)
         session.flush()
 
-        if prod is not None and was_in_stock:
-            prod.stock_quantity = max(0, prod.stock_quantity - 1)
+        if prod is not None:
+            if was_in_stock:
+                prod.stock_quantity = max(0, prod.stock_quantity - 1)
+            if getattr(prod, "is_phone_unit", False):
+                remaining_imeis = session.scalar(
+                    select(func.count(StockItem.id)).where(StockItem.product_id == prod.id)
+                )
+                if not remaining_imeis:
+                    prod.stock_quantity = 0
+                    prod.is_active = False
             session.flush()
+
+
+def _format_phone_spec(
+    memory: str | None = None,
+    color: str | None = None,
+    battery_health: str | None = None,
+    cosmetic_condition: str | None = None,
+) -> str | None:
+    parts: list[str] = []
+    if memory and memory.strip():
+        parts.append(memory.strip())
+    if color and color.strip():
+        parts.append(color.strip())
+    if battery_health and battery_health.strip():
+        bh = battery_health.strip()
+        if not bh.lower().startswith("bat"):
+            bh = f"Bat: {bh}"
+        parts.append(bh)
+    if cosmetic_condition and cosmetic_condition.strip():
+        parts.append(cosmetic_condition.strip())
+    return " • ".join(parts) if parts else None
+
+
+def list_distinct_phone_models() -> list[str]:
+    """Возвращает уникальные названия моделей телефонов для автодополнения в окне IMEI."""
+    with SessionLocal() as session:
+        rows = session.scalars(
+            select(Product.name)
+            .where(
+                Product.is_phone_unit.is_(True)
+                | Product.id.in_(select(StockItem.product_id))
+            )
+            .distinct()
+        ).all()
+    return sorted({(n or "").strip() for n in rows if (n or "").strip()}, key=str.lower)
+
+
+def register_standalone_phone(
+    model_name: str,
+    imei1: str,
+    memory: str | None = None,
+    color: str | None = None,
+    imei2: str | None = None,
+    serial_number: str | None = None,
+    condition: str = "new",
+    battery_health: str | None = None,
+    cosmetic_condition: str | None = None,
+    unit_cost: Decimal | float | str | None = Decimal("0.00"),
+    cost_currency: str = "USD",
+    cost_exchange_rate: Decimal | float | str = Decimal("19.5000"),
+    acquisition_source: str | None = None,
+    notes: str | None = None,
+    supplier_name: str | None = None,
+    create_purchase_record: bool = False,
+    paid_amount: Decimal | float | str | None = None,
+) -> tuple[Product, StockItem]:
+    """Регистрирует самостоятельный телефон по IMEI в постоянной категории Telefon Täze / Telefon B/U."""
+    from app.services.purchase_service import create_purchase
+
+    clean_model = (model_name or "").strip()
+    clean_memory = (memory or "").strip() or None
+    clean_color = (color or "").strip() or None
+    clean_imei1 = (imei1 or "").strip()
+    clean_imei2 = (imei2 or "").strip() or None
+    clean_sn = (serial_number or "").strip() or None
+    clean_cond = "used" if str(condition).lower() in ("used", "b/u", "б/у") else "new"
+    clean_battery = (battery_health or "").strip() or None if clean_cond == "used" else None
+    clean_cosmetic = (cosmetic_condition or "").strip() or None if clean_cond == "used" else None
+    clean_source = (acquisition_source or "").strip() or None
+    clean_notes = (notes or "").strip() or None
+    clean_supplier = (supplier_name or "").strip() or None
+
+    if not clean_model:
+        raise ValueError("Telefon modeliniň adyny giriziň.")
+    if not clean_imei1:
+        raise ValueError("Hökmany IMEI 1 giriziň.")
+    if clean_imei2 and clean_imei1 == clean_imei2:
+        raise ValueError("IMEI 1 we IMEI 2 birmeňzeş bolup bilmez.")
+
+    cost_dec = Decimal(str(unit_cost)) if unit_cost is not None and str(unit_cost).strip() != "" else Decimal("0.00")
+    if cost_dec < 0:
+        raise ValueError("Öz bahasy otrisatel bolup bilmez.")
+    curr = (cost_currency or "USD").strip().upper()
+    if curr not in ("USD", "TMT"):
+        curr = "USD"
+    rate_dec = Decimal(str(cost_exchange_rate)) if cost_exchange_rate else Decimal("19.5000")
+    if rate_dec <= 0:
+        raise ValueError("Kurs noldan uly bolmaly.")
+
+    spec_summary = _format_phone_spec(
+        memory=clean_memory,
+        color=clean_color,
+        battery_health=clean_battery,
+        cosmetic_condition=clean_cosmetic,
+    )
+
+    with SessionLocal() as session, session.begin():
+        existing = session.execute(
+            select(StockItem, Product.name)
+            .join(Product, StockItem.product_id == Product.id)
+            .where(
+                (StockItem.imei1 == clean_imei1)
+                | (StockItem.imei2 == clean_imei1)
+                | (
+                    (StockItem.imei1 == clean_imei2) | (StockItem.imei2 == clean_imei2)
+                    if clean_imei2
+                    else False
+                )
+            )
+        ).first()
+        if existing is not None:
+            ex_item, ex_prod_name = existing
+            status_lbl = "Skladda bar" if ex_item.status == "in_stock" else "Satyldy"
+            raise ValueError(
+                f"IMEI {clean_imei1} enjam eýýäm bazada hasaba alnan:\n"
+                f"Model: {ex_prod_name} (ID #{ex_item.id}, status: {status_lbl})."
+            )
+
+        cat_ids = ensure_system_phone_categories(session)
+        cat_id = cat_ids["used"] if clean_cond == "used" else cat_ids["new"]
+
+        sku = f"PHN-{uuid4().hex[:8].upper()}"
+        product = Product(
+            category_id=cat_id,
+            sku=sku,
+            barcode=None,
+            name=clean_model,
+            brand=None,
+            model=clean_memory,
+            specification=spec_summary,
+            stock_quantity=0 if create_purchase_record else 1,
+            min_stock_quantity=0,
+            is_active=True,
+            is_phone_unit=True,
+        )
+        session.add(product)
+        session.flush()
+        product_id = product.id
+
+        if not create_purchase_record:
+            stock_item = StockItem(
+                product_id=product_id,
+                imei1=clean_imei1,
+                imei2=clean_imei2,
+                serial_number=clean_sn,
+                condition=clean_cond,
+                status="in_stock",
+                unit_cost=cost_dec,
+                cost_currency=curr,
+                cost_exchange_rate=rate_dec,
+                acquisition_source=clean_source or ("direct_buyout" if clean_cond == "used" else "initial_stock"),
+                memory=clean_memory,
+                color=clean_color,
+                battery_health=clean_battery,
+                cosmetic_condition=clean_cosmetic,
+                notes=clean_notes,
+                created_at=datetime.now(),
+            )
+            session.add(stock_item)
+            session.flush()
+            session.refresh(product)
+            session.refresh(stock_item)
+            return product, stock_item
+
+    # Если оформляется как закупка (например, из очереди приёмки или закупки)
+    payments = []
+    if paid_amount is not None and Decimal(str(paid_amount)) > 0:
+        payments.append({
+            "currency": curr,
+            "amount": Decimal(str(paid_amount)),
+            "exchange_rate": rate_dec,
+        })
+
+    create_purchase(
+        items=[
+            {
+                "product_id": product_id,
+                "quantity": 1,
+                "unit_cost": cost_dec,
+                "imeis": [
+                    {
+                        "imei1": clean_imei1,
+                        "imei2": clean_imei2,
+                        "serial_number": clean_sn,
+                        "condition": clean_cond,
+                    }
+                ],
+            }
+        ],
+        currency=curr,
+        exchange_rate=rate_dec,
+        payments=payments,
+        note=clean_notes or f"Telefon kabul ediş: {clean_model}",
+        supplier_name=clean_supplier,
+    )
+
+    with SessionLocal() as session, session.begin():
+        prod = session.get(Product, product_id)
+        st = session.scalar(
+            select(StockItem).where(
+                StockItem.product_id == product_id,
+                StockItem.imei1 == clean_imei1,
+            )
+        )
+        if st is not None:
+            st.memory = clean_memory
+            st.color = clean_color
+            st.battery_health = clean_battery
+            st.cosmetic_condition = clean_cosmetic
+            st.acquisition_source = clean_source or ("supplier" if clean_supplier else "initial_stock")
+            st.notes = clean_notes
+            session.flush()
+            session.refresh(st)
+        if prod is not None:
+            session.refresh(prod)
+        return prod, st
+
+
+def update_standalone_phone(
+    stock_item_id: int,
+    model_name: str,
+    imei1: str,
+    memory: str | None = None,
+    color: str | None = None,
+    imei2: str | None = None,
+    serial_number: str | None = None,
+    condition: str = "new",
+    status: str = "in_stock",
+    battery_health: str | None = None,
+    cosmetic_condition: str | None = None,
+    unit_cost: Decimal | float | str | None = Decimal("0.00"),
+    cost_currency: str = "USD",
+    cost_exchange_rate: Decimal | float | str = Decimal("19.5000"),
+    acquisition_source: str | None = None,
+    notes: str | None = None,
+) -> StockItem:
+    """Обновляет самостоятельный телефон (StockItem + его 1-к-1 Product и авто-категорию)."""
+    clean_model = (model_name or "").strip()
+    clean_memory = (memory or "").strip() or None
+    clean_color = (color or "").strip() or None
+    clean_imei1 = (imei1 or "").strip()
+    clean_imei2 = (imei2 or "").strip() or None
+    clean_sn = (serial_number or "").strip() or None
+    clean_cond = "used" if str(condition).lower() in ("used", "b/u", "б/у") else "new"
+    clean_status = (status or "in_stock").strip().lower()
+    if clean_status not in ("in_stock", "sold", "written_off"):
+        raise ValueError("Rugsat berlen statuslar: in_stock, sold, written_off.")
+    clean_battery = (battery_health or "").strip() or None if clean_cond == "used" else None
+    clean_cosmetic = (cosmetic_condition or "").strip() or None if clean_cond == "used" else None
+    clean_source = (acquisition_source or "").strip() or None
+    clean_notes = (notes or "").strip() or None
+
+    if not clean_model:
+        raise ValueError("Telefon modeliniň adyny giriziň.")
+    if not clean_imei1:
+        raise ValueError("Hökmany IMEI 1 giriziň.")
+    if clean_imei2 and clean_imei1 == clean_imei2:
+        raise ValueError("IMEI 1 we IMEI 2 birmeňzeş bolup bilmez.")
+
+    cost_dec = Decimal(str(unit_cost)) if unit_cost is not None else Decimal("0.00")
+    if cost_dec < 0:
+        raise ValueError("Öz bahasy otrisatel bolup bilmez.")
+    rate_dec = Decimal(str(cost_exchange_rate)) if cost_exchange_rate else Decimal("19.5000")
+    if rate_dec <= 0:
+        raise ValueError("Kurs noldan uly bolmaly.")
+
+    spec_summary = _format_phone_spec(
+        memory=clean_memory,
+        color=clean_color,
+        battery_health=clean_battery,
+        cosmetic_condition=clean_cosmetic,
+    )
+
+    with SessionLocal() as session, session.begin():
+        stock_item = session.get(StockItem, int(stock_item_id))
+        if stock_item is None:
+            raise ValueError("Enjam (StockItem) tapylmady.")
+
+        existing = session.execute(
+            select(StockItem, Product.name)
+            .join(Product, StockItem.product_id == Product.id)
+            .where(
+                StockItem.id != stock_item.id,
+                (StockItem.imei1 == clean_imei1)
+                | (StockItem.imei2 == clean_imei1)
+                | (
+                    (StockItem.imei1 == clean_imei2) | (StockItem.imei2 == clean_imei2)
+                    if clean_imei2
+                    else False
+                ),
+            )
+        ).first()
+        if existing is not None:
+            ex_item, ex_prod_name = existing
+            raise ValueError(
+                f"IMEI {clean_imei1} (ýa-da IMEI 2) eýýäm başga enjamda bar: "
+                f"{ex_prod_name} (ID #{ex_item.id})."
+            )
+
+        prod = session.get(Product, stock_item.product_id)
+        stock_item.imei1 = clean_imei1
+        stock_item.imei2 = clean_imei2
+        stock_item.serial_number = clean_sn
+        stock_item.condition = clean_cond
+        stock_item.status = clean_status
+        stock_item.memory = clean_memory
+        stock_item.color = clean_color
+        stock_item.battery_health = clean_battery
+        stock_item.cosmetic_condition = clean_cosmetic
+        stock_item.unit_cost = cost_dec
+        stock_item.cost_currency = (cost_currency or "USD").strip().upper()
+        stock_item.cost_exchange_rate = rate_dec
+        stock_item.acquisition_source = clean_source
+        stock_item.notes = clean_notes
+
+        if prod is not None and getattr(prod, "is_phone_unit", False):
+            cat_ids = ensure_system_phone_categories(session)
+            prod.category_id = cat_ids["used"] if clean_cond == "used" else cat_ids["new"]
+            prod.name = clean_model
+            prod.model = clean_memory
+            prod.specification = spec_summary
+            prod.stock_quantity = 1 if clean_status == "in_stock" else 0
+        elif prod is not None:
+            in_stock_cnt = len(
+                session.scalars(
+                    select(StockItem).where(
+                        StockItem.product_id == prod.id,
+                        StockItem.status == "in_stock",
+                    )
+                ).all()
+            )
+            prod.stock_quantity = max(in_stock_cnt, 0)
+
+        session.flush()
+        session.refresh(stock_item)
+        return stock_item

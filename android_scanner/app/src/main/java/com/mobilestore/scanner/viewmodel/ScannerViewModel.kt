@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.mobilestore.scanner.MobileStoreApp
-import com.mobilestore.scanner.data.ReceivingDraftImei
 import com.mobilestore.scanner.data.ReceivingDraftMeta
 import com.mobilestore.scanner.data.ServerConfig
 import com.mobilestore.scanner.network.AccessoryOcrMatchResponse
@@ -13,12 +12,12 @@ import com.mobilestore.scanner.network.CatalogProductItem
 import com.mobilestore.scanner.network.CategoryItem
 import com.mobilestore.scanner.network.CategoryListData
 import com.mobilestore.scanner.network.ConnectionState
-import com.mobilestore.scanner.network.ImeiCheckResultData
+import com.mobilestore.scanner.network.IncomingQueueCounts
+import com.mobilestore.scanner.network.IncomingQueuedData
 import com.mobilestore.scanner.network.LocalWifiStatus
 import com.mobilestore.scanner.network.ProductCardData
 import com.mobilestore.scanner.network.ProductDetailsData
 import com.mobilestore.scanner.network.ScanMultipleData
-import com.mobilestore.scanner.scanner.LuhnValidator
 import com.mobilestore.scanner.scanner.ScanBundle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -26,7 +25,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -39,6 +37,7 @@ import java.util.UUID
 data class BannerMessage(
     val text: String,
     val isError: Boolean = false,
+    val isWarning: Boolean = false,
 )
 
 data class PendingReceivingDevice(
@@ -47,6 +46,16 @@ data class PendingReceivingDevice(
     val serialNumber: String = "",
     val productBarcode: String? = null,
     val source: String = "multi",
+    val requestId: String = UUID.randomUUID().toString(),
+)
+
+data class SessionQueuedEntry(
+    val queueId: Int,
+    val itemKind: String, // "phone_imei" | "known" | "unknown"
+    val title: String,
+    val detail: String,
+    val quantity: Int,
+    val merged: Boolean,
 )
 
 class ScannerViewModel(application: Application) : AndroidViewModel(application) {
@@ -104,12 +113,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     // Sticky request_id для идемпотентности при повторной отправке одной карточки
     private var currentSaleRequestId: String = UUID.randomUUID().toString()
 
-    // --- Экран 2: Приёмка (Room-черновик) ---
+    // --- Экран 2: Приёмка -> Буферная очередь ПК (Incoming Queue) ---
     val receivingMeta: StateFlow<ReceivingDraftMeta?> = draftDao.observeMeta()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-
-    val receivingImeis: StateFlow<List<ReceivingDraftImei>> = draftDao.observeImeis()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _pendingReceivingDevice = MutableStateFlow<PendingReceivingDevice?>(null)
     val pendingReceivingDevice: StateFlow<PendingReceivingDevice?> = _pendingReceivingDevice.asStateFlow()
@@ -117,7 +123,16 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     private val _isReceivingBusy = MutableStateFlow(false)
     val isReceivingBusy: StateFlow<Boolean> = _isReceivingBusy.asStateFlow()
 
-    // --- Экран 3: Каталог ---
+    private val _incomingQueueCounts = MutableStateFlow(IncomingQueueCounts())
+    val incomingQueueCounts: StateFlow<IncomingQueueCounts> = _incomingQueueCounts.asStateFlow()
+
+    private val _lastQueuedStatus = MutableStateFlow<String?>(null)
+    val lastQueuedStatus: StateFlow<String?> = _lastQueuedStatus.asStateFlow()
+
+    private val _sessionQueuedEntries = MutableStateFlow<List<SessionQueuedEntry>>(emptyList())
+    val sessionQueuedEntries: StateFlow<List<SessionQueuedEntry>> = _sessionQueuedEntries.asStateFlow()
+
+    // --- Read-only каталог (для выбора существующего товара в режиме «Sany bilen») ---
     private val _catalogProducts = MutableStateFlow<List<CatalogProductItem>>(emptyList())
     val catalogProducts: StateFlow<List<CatalogProductItem>> = _catalogProducts.asStateFlow()
 
@@ -127,7 +142,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     private val _isCatalogLoading = MutableStateFlow(false)
     val isCatalogLoading: StateFlow<Boolean> = _isCatalogLoading.asStateFlow()
 
-    // --- Экран 4: Категории ---
     private val _categories = MutableStateFlow<List<CategoryItem>>(emptyList())
     val categories: StateFlow<List<CategoryItem>> = _categories.asStateFlow()
 
@@ -155,8 +169,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         _banner.value = null
     }
 
-    private fun showMessage(text: String, isError: Boolean = false) {
-        _banner.value = BannerMessage(text = text, isError = isError)
+    private fun showMessage(text: String, isError: Boolean = false, isWarning: Boolean = false) {
+        _banner.value = BannerMessage(text = text, isError = isError, isWarning = isWarning)
         if (isError) feedback.onError() else feedback.onConfirmSuccess()
     }
 
@@ -375,23 +389,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun selectAccessoryForReceiving(card: ProductCardData) {
-        val raw = _receivingOcrResult.value?.rawText?.trim().orEmpty()
-        _receivingOcrResult.value = null
-        _receivingOcrCategoryFilter.value = null
-        updateReceivingMeta(
-            productId = card.productId,
-            productName = card.name,
-            useImeiMode = false,
-            unitCost = card.unitCost.takeIf { it != "0.00" },
-            currency = card.costCurrency.takeIf { it == "USD" || it == "TMT" },
-        )
-        if (raw.isNotBlank()) {
-            confirmOcrAlias(card.productId, raw)
-        }
-        showMessage("«${card.name}» kabul ediş üçin saýlandy", isError = false)
-    }
-
     fun dismissReceivingOcr() {
         _receivingOcrResult.value = null
         _receivingOcrCategoryFilter.value = null
@@ -480,7 +477,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    // ==================== ЭКРАН 2: ПРИЁМКА ТОВАРОВ (ROOM-ЧЕРНОВИК) ====================
+    // ==================== ЭКРАН 2: ПРИЁМКА -> БУФЕРНАЯ ОЧЕРЕДЬ ПК ====================
 
     private suspend fun ensureDraftMetaExists(): ReceivingDraftMeta {
         val existing = draftDao.getMeta()
@@ -524,123 +521,19 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun onReceivingBundleDetected(bundle: ScanBundle) {
-        if (_pendingReceivingDevice.value != null || _isReceivingBusy.value) return
-        feedback.onScanSuccess()
-
-        // Если распознан ТОЛЬКО товарный штрихкод (аксессуар, без IMEI и S/N) —
-        // добавляем/увеличиваем количество сразу БЕЗ контрольного окна!
-        if (bundle.isOnlyProductBarcode) {
-            handleAccessoryBarcodeInReceiving(bundle.productBarcode.orEmpty())
-            return
-        }
-
-        // Если распознаны поля телефона (IMEI 1 / IMEI 2 / S/N) —
-        // открываем контрольную карточку с предзаполненными полями и кнопкой «Добавить»
-        if (bundle.hasDeviceIdentity) {
-            _pendingReceivingDevice.value = PendingReceivingDevice(
-                imei1 = bundle.imei1.orEmpty(),
-                imei2 = bundle.imei2.orEmpty(),
-                serialNumber = bundle.serialNumber.orEmpty(),
-                productBarcode = bundle.productBarcode,
-                source = bundle.source,
-            )
-            return
-        }
-
-        // Резервный вариант (например, одиночный 14–16-значный неточный код)
-        val fallback = bundle.allCodes.firstOrNull { it.filter(Char::isDigit).length >= 8 }
-        if (!fallback.isNullOrBlank()) {
-            _pendingReceivingDevice.value = PendingReceivingDevice(
-                imei1 = fallback,
-                productBarcode = bundle.productBarcode,
-                source = bundle.source,
-            )
-        }
-    }
-
-    private fun handleAccessoryBarcodeInReceiving(barcode: String) {
-        val clean = barcode.trim()
-        if (clean.isEmpty()) return
-
+    fun clearReceivingSelectedProduct() {
         viewModelScope.launch {
-            val meta = ensureDraftMetaExists()
-
-            // Если товар уже выбран и включён количественный режим — мгновенно +1 шт. без окон
-            if (meta.productId != null && !meta.useImeiMode) {
-                val nextQty = meta.nonImeiQuantity + 1
-                draftDao.upsertMeta(meta.copy(nonImeiQuantity = nextQty))
-                showMessage("+1 sany (${meta.productName}, kod $clean) • Jemi: $nextQty sany", isError = false)
-                return@launch
-            }
-
-            // Пытаемся автоматически найти товар по штрихкоду на ПК
-            if (ws.state.value is ConnectionState.Connected) {
-                _isReceivingBusy.value = true
-                val resp = ws.sendCommand(
-                    type = "scan_code",
-                    payload = buildJsonObject {
-                        put("code", clean)
-                        put("barcode", clean)
-                        put("source", "barcode")
-                        put("mode", "receive")
-                    },
-                )
-                _isReceivingBusy.value = false
-
-                if (resp.ok && resp.type == "product_card" && resp.data != null) {
-                    val card = runCatching {
-                        ws.json.decodeFromJsonElement<ProductCardData>(resp.data)
-                    }.getOrNull()
-                    if (card != null) {
-                        val sameProduct = meta.productId == card.productId && !meta.useImeiMode
-                        val nextQty = if (sameProduct) meta.nonImeiQuantity + 1 else 1
-                        draftDao.upsertMeta(
-                            meta.copy(
-                                productId = card.productId,
-                                productName = card.name,
-                                useImeiMode = false,
-                                nonImeiQuantity = nextQty,
-                                unitCost = meta.unitCost.ifBlank { card.unitCost },
-                                currency = if (meta.unitCost.isBlank()) card.costCurrency else meta.currency,
-                            )
-                        )
-                        showMessage("Ştrihkod: ${card.name} ($nextQty sany)", isError = false)
-                        return@launch
-                    }
-                }
-            }
-
-            // Если товар уже выбран вручную, просто переключаем в количественный режим и добавляем +1
-            if (meta.productId != null) {
-                val nextQty = if (meta.useImeiMode) 1 else meta.nonImeiQuantity + 1
-                draftDao.upsertMeta(meta.copy(useImeiMode = false, nonImeiQuantity = nextQty))
-                showMessage("Aksessuar (${meta.productName}): $nextQty sany (kod $clean)", isError = false)
-            } else {
-                showMessage("$clean ştrihkody katalogda tapylmady. Haryt saýlaň ýa-da dörediň.", isError = true)
-            }
+            val cur = ensureDraftMetaExists()
+            draftDao.upsertMeta(cur.copy(productId = null, productName = "", nonImeiQuantity = 1))
         }
     }
 
-    fun confirmPendingReceivingDevice(
-        imei1: String,
-        imei2: String,
-        serialNumber: String,
-        condition: String = "new",
-    ) {
-        val clean1 = imei1.trim()
-        if (clean1.isEmpty()) {
-            showMessage("Enjamyň IMEI 1 belgisini giriziň", isError = true)
-            return
-        }
-        _pendingReceivingDevice.value = null
-        _scanCooldownTrigger.value += 1
-        addReceivingDevice(
-            rawImei1 = clean1,
-            rawImei2 = imei2.trim().ifBlank { null },
-            rawSerial = serialNumber.trim().uppercase().ifBlank { null },
-            condition = condition,
-        )
+    fun clearSessionQueuedEntries() {
+        _sessionQueuedEntries.value = emptyList()
+    }
+
+    fun openManualPhoneDialog() {
+        _pendingReceivingDevice.value = PendingReceivingDevice(source = "manual")
     }
 
     fun dismissPendingReceivingDevice() {
@@ -648,203 +541,369 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         _scanCooldownTrigger.value += 1
     }
 
-    fun addReceivingImei(rawImei: String, condition: String = "new") {
-        addReceivingDevice(rawImei1 = rawImei, rawImei2 = null, rawSerial = null, condition = condition)
+    fun onReceivingBundleDetected(bundle: ScanBundle) {
+        if (_pendingReceivingDevice.value != null || _isReceivingBusy.value) return
+        feedback.onScanSuccess()
+
+        val useImeiMode = receivingMeta.value?.useImeiMode ?: true
+
+        if (useImeiMode) {
+            // Режим 1: IMEI bilen (Telefon) -> открываем короткое подтверждение и отправляем в PK nobaty
+            if (bundle.hasDeviceIdentity) {
+                _pendingReceivingDevice.value = PendingReceivingDevice(
+                    imei1 = bundle.imei1.orEmpty(),
+                    imei2 = bundle.imei2.orEmpty(),
+                    serialNumber = bundle.serialNumber.orEmpty(),
+                    productBarcode = bundle.productBarcode,
+                    source = bundle.source,
+                )
+                return
+            }
+            val fallbackImei = bundle.allCodes.firstOrNull { it.filter(Char::isDigit).length >= 14 }
+            if (!fallbackImei.isNullOrBlank()) {
+                _pendingReceivingDevice.value = PendingReceivingDevice(
+                    imei1 = fallbackImei,
+                    productBarcode = bundle.productBarcode,
+                    source = bundle.source,
+                )
+                return
+            }
+            if (bundle.isOnlyProductBarcode) {
+                _scanCooldownTrigger.value += 1
+                showMessage(
+                    "Telefon rejiminde IMEI skan ediň (aksessuar üçin «Sany bilen» geçiň)",
+                    isError = false,
+                    isWarning = true,
+                )
+            }
+            return
+        }
+
+        // Режим 2: Sany bilen (Haryt / Aksessuar) -> сразу отправляем штрихкод в PK nobaty (+1)
+        val scannedCode = (bundle.productBarcode ?: bundle.primaryCode).trim()
+        if (scannedCode.isNotEmpty()) {
+            queueBarcodeQuantityToPc(barcode = scannedCode, quantity = 1)
+        }
     }
 
-    fun addReceivingDevice(
-        rawImei1: String,
-        rawImei2: String? = null,
-        rawSerial: String? = null,
-        condition: String = "new",
+    private fun handleIncomingQueuedSuccess(
+        data: IncomingQueuedData,
+        fallbackDetail: String,
     ) {
-        val clean1 = rawImei1.trim()
-        val clean2 = rawImei2?.trim()?.ifBlank { null }
-        val cleanSn = rawSerial?.trim()?.ifBlank { null }
-        if (clean1.isEmpty()) return
+        _incomingQueueCounts.value = data.counts
+        _lastQueuedStatus.value = data.message.ifBlank { fallbackDetail }
+
+        val entry = SessionQueuedEntry(
+            queueId = data.queueId,
+            itemKind = data.itemKind,
+            title = data.productName.ifBlank { fallbackDetail },
+            detail = data.message.ifBlank { fallbackDetail },
+            quantity = data.quantity,
+            merged = data.merged,
+        )
+        _sessionQueuedEntries.value = (listOf(entry) + _sessionQueuedEntries.value).take(30)
+
+        val isUnknown = data.itemKind == "unknown"
+        val bannerText = when {
+            data.message.isNotBlank() -> data.message
+            data.itemKind == "phone_imei" -> "Telefon PK nobatyna goşuldy"
+            isUnknown -> "Näbelli harytlar nobatyna goşuldy (${data.quantity} sany)"
+            else -> "Belli harytlar nobatyna goşuldy (${data.quantity} sany)"
+        }
+        showMessage(bannerText, isError = false, isWarning = isUnknown)
+    }
+
+    fun queuePhoneToPc(
+        imei1: String,
+        imei2: String = "",
+        serialNumber: String = "",
+        condition: String = "new",
+        modelHint: String = "",
+        unitCost: String = "",
+        currency: String = "USD",
+        supplierName: String? = null,
+        productBarcode: String? = null,
+        requestId: String = UUID.randomUUID().toString(),
+        onSuccess: () -> Unit = {},
+    ) {
+        val clean1 = imei1.trim()
+        val clean2 = imei2.trim().ifBlank { null }
+        val cleanSn = serialNumber.trim().uppercase().ifBlank { null }
+        val cleanHint = modelHint.trim().ifBlank { null }
+        val cleanCost = unitCost.trim().replace(",", ".").ifBlank { null }
+
+        if (clean1.isEmpty()) {
+            showMessage("Enjamyň IMEI 1 belgisini giriziň", isError = true)
+            return
+        }
         if (clean2 != null && clean1 == clean2) {
             showMessage("IMEI 1 we IMEI 2 birmeňzeş bolup bilmez", isError = true)
             return
         }
+        if (cleanCost != null) {
+            val parsedCost = cleanCost.toDoubleOrNull()
+            if (parsedCost == null || parsedCost < 0.0) {
+                showMessage("Alyş bahasy nädogry", isError = true)
+                return
+            }
+        }
 
         viewModelScope.launch {
-            val existing = draftDao.getImeis()
-            if (existing.any { it.imei1 == clean1 || it.imei2 == clean1 }) {
-                showMessage("IMEI $clean1 şu kabul edişde eýýäm bar", isError = true)
-                return@launch
-            }
-            if (clean2 != null && existing.any { it.imei1 == clean2 || it.imei2 == clean2 }) {
-                showMessage("IMEI 2 ($clean2) şu kabul edişde eýýäm bar", isError = true)
-                return@launch
-            }
-
-            val localLuhn = LuhnValidator.isValidImei(clean1)
-            var serverVerified = false
-
-            if (ws.state.value is ConnectionState.Connected) {
-                _isReceivingBusy.value = true
-                val resp = ws.sendCommand(
-                    type = "check_imei",
-                    payload = buildJsonObject {
-                        put("imei1", clean1)
-                        if (clean2 != null) put("imei2", clean2)
-                    },
-                )
-                _isReceivingBusy.value = false
-
-                if (resp.ok && resp.data != null) {
-                    val check = runCatching {
-                        ws.json.decodeFromJsonElement<ImeiCheckResultData>(resp.data)
-                    }.getOrNull()
-                    if (check != null && !check.canReceive) {
-                        showMessage(check.message.ifBlank { "IMEI $clean1 bazada eýýäm bar" }, isError = true)
-                        return@launch
-                    }
-                    serverVerified = true
-                }
-            }
-
-            // Переводим мета-черновик в IMEI-режим, если ранее был количественный
             val meta = ensureDraftMetaExists()
-            if (!meta.useImeiMode) {
-                draftDao.upsertMeta(meta.copy(useImeiMode = true))
-            }
-
-            draftDao.insertImei(
-                ReceivingDraftImei(
-                    imei1 = clean1,
-                    imei2 = clean2,
-                    serialNumber = cleanSn,
-                    condition = condition,
-                    luhnValid = localLuhn,
-                    serverVerified = serverVerified,
-                )
-            )
-            val extras = buildList {
-                if (clean2 != null) add("IMEI2")
-                if (cleanSn != null) add("S/N")
-            }
-            val extraSuffix = if (extras.isNotEmpty()) " (+ ${extras.joinToString(", ")})" else ""
-            val warn = if (!localLuhn) " — Luhn barlag sanlaryny barlaň!" else ""
-            showMessage("IMEI $clean1 goşuldy$extraSuffix$warn", isError = false)
-        }
-    }
-
-    fun removeReceivingImei(imei1: String) {
-        viewModelScope.launch {
-            draftDao.deleteImei(imei1)
-        }
-    }
-
-    fun clearReceivingDraft() {
-        viewModelScope.launch {
-            draftDao.clearImeis()
-            draftDao.clearMeta()
-            ensureDraftMetaExists()
-        }
-    }
-
-    fun submitReceivingDraft(
-        supplierName: String? = null,
-        unitCost: String? = null,
-        currency: String? = null,
-        exchangeRate: String? = null,
-        nonImeiQuantity: Int? = null,
-        onSuccess: () -> Unit = {},
-    ) {
-        viewModelScope.launch {
-            var meta = ensureDraftMetaExists()
-            meta = meta.copy(
-                supplierName = supplierName ?: meta.supplierName,
-                unitCost = unitCost ?: meta.unitCost,
-                currency = currency ?: meta.currency,
-                exchangeRate = exchangeRate ?: meta.exchangeRate,
-                nonImeiQuantity = nonImeiQuantity ?: meta.nonImeiQuantity,
-            )
-            draftDao.upsertMeta(meta)
-            val imeis = draftDao.getImeis()
-
-            if (meta.productId == null) {
-                showMessage("Kabul ediş üçin haryt saýlaň", isError = true)
-                return@launch
-            }
-            val costNum = meta.unitCost.trim().replace(",", ".").toDoubleOrNull()
-            if (costNum == null || costNum < 0.0) {
-                showMessage("Dogry alyş bahasyny giriziň", isError = true)
-                return@launch
-            }
-            val qty = if (meta.useImeiMode) imeis.size else meta.nonImeiQuantity
-            if (qty <= 0) {
-                showMessage(
-                    if (meta.useImeiMode) "Iň bolmanda bir IMEI skan ediň" else "0-dan uly san giriziň",
-                    isError = true,
-                )
-                return@launch
-            }
+            val effCurrency = if (currency.equals("TMT", ignoreCase = true)) "TMT" else "USD"
+            val effSupplier = (supplierName ?: meta.supplierName).trim().ifBlank { null }
 
             _isReceivingBusy.value = true
-            val imeiArray: JsonArray = if (meta.useImeiMode) {
-                buildJsonArray {
-                    imeis.forEach { entry ->
-                        add(
-                            buildJsonObject {
-                                put("imei1", entry.imei1)
-                                if (!entry.imei2.isNullOrBlank()) put("imei2", entry.imei2)
-                                if (!entry.serialNumber.isNullOrBlank()) put("serial_number", entry.serialNumber)
-                                put("condition", entry.condition)
-                            }
-                        )
-                    }
-                }
-            } else {
-                buildJsonArray {}
-            }
-
-            val payload = buildJsonObject {
-                put("supplier_name", meta.supplierName.trim())
-                put("currency", meta.currency)
-                put("exchange_rate", meta.exchangeRate.trim().ifBlank { "19.5000" })
-                put("note", meta.note.trim().ifBlank { "Android skaner arkaly kabul ediş" })
-                put(
-                    "items",
-                    buildJsonArray {
-                        add(
-                            buildJsonObject {
-                                put("product_id", meta.productId)
-                                put("quantity", qty)
-                                put("unit_cost", meta.unitCost.trim().replace(",", "."))
-                                put("imeis", imeiArray)
-                            }
-                        )
-                    }
-                )
-            }
-
-            val resp = ws.sendCommand(
-                type = "receive_purchase",
-                requestId = meta.requestId,
-                payload = payload,
-                timeoutMs = 15_000L,
+            val resp = ws.queueIncomingItem(
+                mode = "imei",
+                barcode = productBarcode,
+                imei1 = clean1,
+                imei2 = clean2,
+                serialNumber = cleanSn,
+                condition = condition,
+                modelHint = cleanHint,
+                quantity = 1,
+                unitCost = cleanCost,
+                currency = effCurrency,
+                supplierName = effSupplier,
+                requestId = requestId,
             )
             _isReceivingBusy.value = false
 
-            if (resp.ok) {
-                val msg = resp.data?.jsonObject?.get("message")?.jsonPrimitive?.content
-                    ?: "Kabul ediş üstünlikli ýerine ýetirildi"
-                // Очищаем Room-черновик ТОЛЬКО после подтверждения сервера
-                draftDao.clearImeis()
-                draftDao.clearMeta()
-                ensureDraftMetaExists()
-                showMessage(msg, isError = false)
-                loadCatalog()
+            if (resp.ok && resp.data != null) {
+                val parsed = runCatching {
+                    ws.json.decodeFromJsonElement<IncomingQueuedData>(resp.data)
+                }.getOrDefault(
+                    IncomingQueuedData(
+                        itemKind = "phone_imei",
+                        productName = cleanHint ?: "IMEI $clean1",
+                        message = "Telefon (IMEI $clean1) PK nobatyna goşuldy",
+                    )
+                )
+                // Сохраняем валюту по умолчанию для следующих сканов
+                if (meta.currency != effCurrency) {
+                    draftDao.upsertMeta(meta.copy(currency = effCurrency))
+                }
+                _pendingReceivingDevice.value = null
+                _scanCooldownTrigger.value += 1
+                handleIncomingQueuedSuccess(parsed, "IMEI $clean1")
                 onSuccess()
             } else {
-                showMessage(resp.error?.message ?: "Kabul ediş ýalňyşlygy. Garalama telefonda saklandy.", isError = true)
+                showMessage(resp.error?.message ?: "Telefony PK nobatyna iberip bolmady", isError = true)
             }
         }
     }
 
-    // ==================== ЭКРАН 3: КАТАЛОГ ТОВАРОВ ====================
+    fun queueBarcodeQuantityToPc(
+        barcode: String,
+        quantity: Int = 1,
+        unitCost: String? = null,
+        currency: String? = null,
+        supplierName: String? = null,
+        onSuccess: () -> Unit = {},
+    ) {
+        val clean = barcode.trim()
+        if (clean.isEmpty()) {
+            showMessage("Ştrihkody giriziň", isError = true)
+            return
+        }
+        val safeQty = quantity.coerceAtLeast(1)
+
+        viewModelScope.launch {
+            val meta = ensureDraftMetaExists()
+            val effCurrency = (currency ?: meta.currency).ifBlank { "USD" }
+            val effSupplier = (supplierName ?: meta.supplierName).trim().ifBlank { null }
+
+            _isReceivingBusy.value = true
+            val resp = ws.queueIncomingItem(
+                mode = "quantity",
+                productId = null,
+                barcode = clean,
+                quantity = safeQty,
+                unitCost = unitCost,
+                currency = effCurrency,
+                supplierName = effSupplier,
+            )
+            _isReceivingBusy.value = false
+
+            if (resp.ok && resp.data != null) {
+                val parsed = runCatching {
+                    ws.json.decodeFromJsonElement<IncomingQueuedData>(resp.data)
+                }.getOrDefault(
+                    IncomingQueuedData(
+                        itemKind = "unknown",
+                        quantity = safeQty,
+                        productName = clean,
+                        message = "«$clean» PK nobatyna goşuldy ($safeQty sany)",
+                    )
+                )
+                _scanCooldownTrigger.value += 1
+                handleIncomingQueuedSuccess(parsed, clean)
+                onSuccess()
+            } else {
+                _scanCooldownTrigger.value += 1
+                showMessage(resp.error?.message ?: "Ştrihkody PK nobatyna iberip bolmady", isError = true)
+            }
+        }
+    }
+
+    fun queueQuantityProductToPc(
+        productId: Int?,
+        productName: String,
+        quantity: Int,
+        unitCost: String? = null,
+        currency: String = "USD",
+        supplierName: String? = null,
+        onSuccess: () -> Unit = {},
+    ) {
+        if (productId == null) {
+            showMessage("Haryt saýlaň ýa-da kameradan ştrihkod skan ediň", isError = true)
+            return
+        }
+        if (quantity <= 0) {
+            showMessage("Sany 0-dan uly bolmaly", isError = true)
+            return
+        }
+        val cleanCost = unitCost?.trim()?.replace(",", ".")?.ifBlank { null }
+        if (cleanCost != null) {
+            val parsedCost = cleanCost.toDoubleOrNull()
+            if (parsedCost == null || parsedCost < 0.0) {
+                showMessage("Alyş bahasy nädogry", isError = true)
+                return
+            }
+        }
+
+        viewModelScope.launch {
+            val meta = ensureDraftMetaExists()
+            val effCurrency = if (currency.equals("TMT", ignoreCase = true)) "TMT" else "USD"
+            val effSupplier = supplierName?.trim()?.ifBlank { null }
+            draftDao.upsertMeta(
+                meta.copy(
+                    currency = effCurrency,
+                    supplierName = effSupplier.orEmpty(),
+                    unitCost = cleanCost.orEmpty(),
+                    nonImeiQuantity = quantity,
+                )
+            )
+
+            _isReceivingBusy.value = true
+            val resp = ws.queueIncomingItem(
+                mode = "quantity",
+                productId = productId,
+                quantity = quantity,
+                unitCost = cleanCost,
+                currency = effCurrency,
+                supplierName = effSupplier,
+            )
+            _isReceivingBusy.value = false
+
+            if (resp.ok && resp.data != null) {
+                val parsed = runCatching {
+                    ws.json.decodeFromJsonElement<IncomingQueuedData>(resp.data)
+                }.getOrDefault(
+                    IncomingQueuedData(
+                        itemKind = "known",
+                        quantity = quantity,
+                        productName = productName,
+                        message = "«$productName» belli harytlar nobatyna goşuldy ($quantity sany)",
+                    )
+                )
+                draftDao.upsertMeta(meta.copy(currency = effCurrency, supplierName = effSupplier.orEmpty(), nonImeiQuantity = 1))
+                _scanCooldownTrigger.value += 1
+                handleIncomingQueuedSuccess(parsed, productName)
+                onSuccess()
+            } else {
+                showMessage(resp.error?.message ?: "Harydy PK nobatyna iberip bolmady", isError = true)
+            }
+        }
+    }
+
+    fun queueOcrMatchedProductToPc(card: ProductCardData, rawText: String) {
+        val cleanRaw = rawText.trim().ifBlank { null }
+        viewModelScope.launch {
+            val meta = ensureDraftMetaExists()
+            val effCurrency = meta.currency.ifBlank { "USD" }
+            val effSupplier = meta.supplierName.trim().ifBlank { null }
+
+            _isReceivingBusy.value = true
+            val resp = ws.queueIncomingItem(
+                mode = "quantity",
+                productId = card.productId,
+                ocrRawText = cleanRaw,
+                quantity = 1,
+                currency = effCurrency,
+                supplierName = effSupplier,
+            )
+            _isReceivingBusy.value = false
+
+            if (resp.ok && resp.data != null) {
+                val parsed = runCatching {
+                    ws.json.decodeFromJsonElement<IncomingQueuedData>(resp.data)
+                }.getOrDefault(
+                    IncomingQueuedData(
+                        itemKind = "known",
+                        quantity = 1,
+                        productName = card.name,
+                        message = "«${card.name}» belli harytlar nobatyna goşuldy",
+                    )
+                )
+                _receivingOcrResult.value = null
+                _receivingOcrCategoryFilter.value = null
+                _scanCooldownTrigger.value += 1
+                handleIncomingQueuedSuccess(parsed, card.name)
+            } else {
+                showMessage(resp.error?.message ?: "OCR harydyny PK nobatyna iberip bolmady", isError = true)
+            }
+        }
+    }
+
+    fun queueOcrUnknownToPc(rawText: String, modelHint: String = "") {
+        val cleanRaw = rawText.trim()
+        val cleanHint = modelHint.trim().ifBlank { cleanRaw.take(60) }
+        if (cleanRaw.isEmpty() && cleanHint.isEmpty()) {
+            showMessage("Guty teksti boş", isError = true)
+            return
+        }
+        viewModelScope.launch {
+            val meta = ensureDraftMetaExists()
+            val effCurrency = meta.currency.ifBlank { "USD" }
+            val effSupplier = meta.supplierName.trim().ifBlank { null }
+
+            _isReceivingBusy.value = true
+            val resp = ws.queueIncomingItem(
+                mode = "quantity",
+                productId = null,
+                barcode = null,
+                modelHint = cleanHint,
+                ocrRawText = cleanRaw.ifBlank { cleanHint },
+                quantity = 1,
+                currency = effCurrency,
+                supplierName = effSupplier,
+            )
+            _isReceivingBusy.value = false
+
+            if (resp.ok && resp.data != null) {
+                val parsed = runCatching {
+                    ws.json.decodeFromJsonElement<IncomingQueuedData>(resp.data)
+                }.getOrDefault(
+                    IncomingQueuedData(
+                        itemKind = "unknown",
+                        quantity = 1,
+                        productName = cleanHint,
+                        message = "«$cleanHint» näbelli harytlar nobatyna goşuldy",
+                    )
+                )
+                _receivingOcrResult.value = null
+                _receivingOcrCategoryFilter.value = null
+                _scanCooldownTrigger.value += 1
+                handleIncomingQueuedSuccess(parsed, cleanHint)
+            } else {
+                showMessage(resp.error?.message ?: "Näbelli harydy PK nobatyna iberip bolmady", isError = true)
+            }
+        }
+    }
+
+    // ==================== КАТАЛОГ (READ-ONLY ДЛЯ ВЫБОРА В «SANY BILEN») ====================
 
     fun loadCatalog(query: String = "", categoryId: Int? = null) {
         viewModelScope.launch {
@@ -939,8 +998,6 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             }
         }
     }
-
-    // ==================== ЭКРАН 4: КАТЕГОРИИ ====================
 
     fun loadCategories() {
         viewModelScope.launch {

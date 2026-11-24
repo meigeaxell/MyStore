@@ -5,6 +5,7 @@ from app.models.category import Category
 from app.models.device_exchange import DeviceExchange
 from app.models.exchange_rate import ExchangeRate
 from app.models.expense import Expense
+from app.models.incoming_queue_item import IncomingQueueItem
 from app.models.product import Product
 from app.models.product_ocr_alias import ProductOcrAlias
 from app.models.purchase import Purchase
@@ -26,6 +27,7 @@ __all__ = [
     "DeviceExchange",
     "ExchangeRate",
     "Expense",
+    "IncomingQueueItem",
     "Product",
     "ProductOcrAlias",
     "Purchase",
