@@ -26,6 +26,18 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "mobile_server_enabled": "1",
     "mobile_server_port": "8765",
     "mobile_server_token": "",
+    "stock_group_mode": "name",  # name | brand | category | none
+    "product_remember_fields": json.dumps({
+        "category": True,
+        "brand": True,
+        "model": True,
+        "reference": True,
+        "cost": True,
+        "min_stock": True,
+        "name": False,
+        "barcode": False,
+    }),
+    "last_product_draft": "{}",
 }
 
 
@@ -174,3 +186,60 @@ class SettingsService:
         except ValueError:
             pass
         return 8765
+
+    @staticmethod
+    def get_stock_group_mode() -> str:
+        """Режим группировки товаров на складе: 'name' | 'brand' | 'category' | 'none'."""
+        mode = SettingsService.get("stock_group_mode", "name").strip().lower()
+        return mode if mode in ("name", "brand", "category", "none") else "name"
+
+    @staticmethod
+    def set_stock_group_mode(mode: str) -> None:
+        clean = mode if mode in ("name", "brand", "category", "none") else "name"
+        SettingsService.set_many({"stock_group_mode": clean})
+
+    @staticmethod
+    def get_product_remember_fields() -> dict[str, bool]:
+        """Возвращает карту полей, которые автоматически запоминаются при добавлении товара."""
+        defaults = {
+            "category": True,
+            "brand": True,
+            "model": True,
+            "reference": True,
+            "cost": True,
+            "min_stock": True,
+            "name": False,
+            "barcode": False,
+        }
+        raw = SettingsService.get("product_remember_fields", "")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    for key in defaults:
+                        if key in parsed:
+                            defaults[key] = bool(parsed[key])
+            except ValueError:
+                pass
+        return defaults
+
+    @staticmethod
+    def set_product_remember_fields(fields: dict[str, bool]) -> None:
+        current = SettingsService.get_product_remember_fields()
+        for k in current:
+            if k in fields:
+                current[k] = bool(fields[k])
+        SettingsService.set_many({"product_remember_fields": json.dumps(current)})
+
+    @staticmethod
+    def get_last_product_draft() -> dict:
+        raw = SettingsService.get("last_product_draft", "{}")
+        try:
+            data = json.loads(raw) if raw else {}
+            return data if isinstance(data, dict) else {}
+        except ValueError:
+            return {}
+
+    @staticmethod
+    def save_last_product_draft(draft: dict) -> None:
+        SettingsService.set_many({"last_product_draft": json.dumps(draft, ensure_ascii=False)})

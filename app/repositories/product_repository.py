@@ -1,12 +1,15 @@
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import func, select
 
 from app.database.engine import SessionLocal
 from app.models.category import Category
 from app.models.product import Product
+from app.models.purchase import Purchase
+from app.models.purchase_item import PurchaseItem
 from app.models.stock_item import StockItem
+from app.services.settings_service import SettingsService
 
 
 def get_low_stock_products():
@@ -158,6 +161,29 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
         ).all()
         cat_map = {c.id: c.name for c in categories}
 
+        # Пакетно подгружаем последние закупочные цены (чтобы не делать N+1 запросов)
+        latest_purchase_cost: dict[int, tuple[Decimal, str]] = {}
+        pi_rows = session.execute(
+            select(PurchaseItem.product_id, PurchaseItem.unit_cost, Purchase.currency)
+            .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+            .where(Purchase.status == "active")
+            .order_by(Purchase.purchase_date.desc(), PurchaseItem.id.desc())
+        ).all()
+        for pid, u_cost, p_curr in pi_rows:
+            if pid not in latest_purchase_cost and u_cost is not None:
+                latest_purchase_cost[pid] = (Decimal(str(u_cost)), str(p_curr or "USD").upper())
+
+        # Пакетно читаем сохранённые базовые себестоимости из настроек
+        import json as _json
+
+        raw_default_costs = SettingsService.get("product_default_costs", "{}")
+        try:
+            default_costs_map = _json.loads(raw_default_costs) if raw_default_costs else {}
+            if not isinstance(default_costs_map, dict):
+                default_costs_map = {}
+        except ValueError:
+            default_costs_map = {}
+
         products = []
         now = datetime.now()
         for product, category_name in rows:
@@ -174,6 +200,28 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
                 for i in p_items
             ).lower()
 
+            unit_cost = Decimal("0.00")
+            cost_currency = ""
+            # Приоритет: 1) последний in_stock IMEI с ценой, 2) последняя закупка, 3) базовая цена из карточки
+            priced_imei = next((i for i in reversed(in_stock_items) if i.unit_cost is not None and Decimal(str(i.unit_cost)) > 0), None)
+            if priced_imei is not None:
+                unit_cost = Decimal(str(priced_imei.unit_cost))
+                cost_currency = (priced_imei.cost_currency or "USD").strip().upper()
+            elif product.id in latest_purchase_cost:
+                unit_cost, cost_currency = latest_purchase_cost[product.id]
+            else:
+                dc_entry = default_costs_map.get(str(product.id))
+                if isinstance(dc_entry, dict) and "unit_cost" in dc_entry:
+                    import contextlib
+
+                    with contextlib.suppress(InvalidOperation, ValueError, TypeError):
+                        c_val = Decimal(str(dc_entry["unit_cost"]))
+                        if c_val > 0:
+                            unit_cost = c_val
+                            cost_currency = str(dc_entry.get("currency", "USD")).strip().upper()
+
+            cost_display = f"{unit_cost:,.2f} {cost_currency}" if unit_cost > 0 and cost_currency else "—"
+
             products.append({
                 "id": product.id,
                 "sku": product.sku,
@@ -184,6 +232,10 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
                 "brand": product.brand or "",
                 "model": product.model or "",
                 "specification": product.specification or "",
+                "reference": product.specification or "",
+                "unit_cost": unit_cost,
+                "cost_currency": cost_currency,
+                "cost_display": cost_display,
                 "quantity": product.stock_quantity,
                 "minimum": product.min_stock_quantity,
                 "new_devices": new_cnt,
@@ -196,6 +248,17 @@ def list_products_inventory(include_archived: bool = False) -> tuple[list[dict],
             })
 
         return products, cat_map
+
+
+def list_distinct_brands_and_models() -> tuple[list[str], list[str]]:
+    """Возвращает списки уникальных брендов и моделей каталога для автоподсказок."""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(Product.brand, Product.model).where(Product.is_active.is_(True))
+        ).all()
+    brands = sorted({(b or "").strip() for b, _m in rows if (b or "").strip()}, key=str.lower)
+    models = sorted({(m or "").strip() for _b, m in rows if (m or "").strip()}, key=str.lower)
+    return brands, models
 
 
 def find_product_by_barcode(code: str) -> Product | None:
@@ -304,6 +367,9 @@ def save_product(
             )
             session.add(product)
             session.flush()
+            from app.services.accessory_matcher import sync_product_glossary
+
+            sync_product_glossary(session, product)
             session.refresh(product)
             return product
 
@@ -333,6 +399,9 @@ def save_product(
         product.stock_quantity = stock_quantity
         product.min_stock_quantity = min_stock_quantity
         session.flush()
+        from app.services.accessory_matcher import sync_product_glossary
+
+        sync_product_glossary(session, product)
         session.refresh(product)
         return product
 

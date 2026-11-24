@@ -191,26 +191,30 @@ def show_toast(
 
 
 def style_combo(combo: QComboBox) -> QComboBox:
-    """Настраивает всплывающий список QComboBox без тёмных рамок/углов и с чистой светлой палитрой."""
+    """Настраивает всплывающий список QComboBox со строго непрозрачным белым фоном без наезда строк."""
     view = QListView(combo)
-    view.setSpacing(1)
+    view.setUniformItemSizes(True)
+    view.setSpacing(0)
     view.setFrameShape(QFrame.Shape.NoFrame)
+    view.setAutoFillBackground(True)
     combo.setView(view)
+
     container = view.window()
-    container.setWindowFlags(
-        Qt.WindowType.Popup
-        | Qt.WindowType.FramelessWindowHint
-        | Qt.WindowType.NoDropShadowWindowHint
+    container.setAutoFillBackground(True)
+    container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    container.setStyleSheet(
+        f"background-color: {theme.WHITE}; border: 1px solid #D0D5DD;"
     )
-    container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-    container.setStyleSheet("background: transparent; border: none;")
+
     pal = view.palette()
     pal.setColor(QPalette.ColorRole.Window, QColor(theme.WHITE))
     pal.setColor(QPalette.ColorRole.Base, QColor(theme.WHITE))
+    pal.setColor(QPalette.ColorRole.AlternateBase, QColor(theme.WHITE))
     pal.setColor(QPalette.ColorRole.Text, QColor(theme.TEXT))
     pal.setColor(QPalette.ColorRole.WindowText, QColor(theme.TEXT))
     pal.setColor(QPalette.ColorRole.Highlight, QColor(theme.ACCENT_SOFT))
     pal.setColor(QPalette.ColorRole.HighlightedText, QColor(theme.NAVY))
+    container.setPalette(pal)
     view.setPalette(pal)
     return combo
 

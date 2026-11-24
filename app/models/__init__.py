@@ -1,3 +1,4 @@
+from app.models.brand_glossary import BrandGlossary
 from app.models.cash_movement import CashMovement
 from app.models.cash_register import CashRegister, CashTransaction
 from app.models.category import Category
@@ -17,6 +18,7 @@ from app.models.settings import Setting
 from app.models.stock_item import StockItem
 
 __all__ = [
+    "BrandGlossary",
     "CashMovement",
     "CashRegister",
     "CashTransaction",

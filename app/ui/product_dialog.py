@@ -1,5 +1,7 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
@@ -20,6 +22,7 @@ from app.repositories.product_repository import (
     deactivate_product,
     get_product_with_devices,
     list_categories,
+    list_distinct_brands_and_models,
     restore_product,
     save_product,
 )
@@ -54,11 +57,14 @@ class ProductDialog(QDialog):
 
         self._build_ui()
         self._load_categories()
+        self._setup_completers()
 
         if self.product_id is not None:
             self._load_product()
-        elif self.initial_barcode:
-            self.barcode_input.setText(self.initial_barcode)
+        else:
+            self._apply_remembered_draft()
+            if self.initial_barcode:
+                self.barcode_input.setText(self.initial_barcode)
 
         self.name_input.setFocus()
 
@@ -85,7 +91,7 @@ class ProductDialog(QDialog):
         form.setSpacing(10)
 
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Mysal: iPhone 16 Pro 256GB ýa-da Çehol Silicone Case")
+        self.name_input.setPlaceholderText("Mysal: 14 Pro Max ýa-da Note 15 Pro Plus")
         form.addRow("Harydyň ady *", self.name_input)
 
         cat_row = QHBoxLayout()
@@ -100,11 +106,15 @@ class ProductDialog(QDialog):
         form.addRow("Kategoriýa *", cat_row)
 
         self.brand_input = QLineEdit()
-        self.brand_input.setPlaceholderText("Mysal: Apple, Samsung, Xiaomi (hökmany däl)")
+        self.brand_input.setPlaceholderText(
+            "Harydyň / aksessuaryň brendi (mysal: Blueo, Hoco, Remax, Apple)"
+        )
         form.addRow("Brend", self.brand_input)
 
         self.model_input = QLineEdit()
-        self.model_input.setPlaceholderText("Mysal: A3102 / S928B (hökmany däl)")
+        self.model_input.setPlaceholderText(
+            "Enjam modeli / seriýasy (mysal: iPhone, Samsung, Xiaomi)"
+        )
         form.addRow("Model", self.model_input)
 
         self.barcode_input = QLineEdit()
@@ -112,8 +122,10 @@ class ProductDialog(QDialog):
         form.addRow("Ştrihkod (Barcode)", self.barcode_input)
 
         self.specification_input = QLineEdit()
-        self.specification_input.setPlaceholderText("Reňk, ýat, aýratynlyklar (hökmany däl)")
-        form.addRow("Aýratynlyklar", self.specification_input)
+        self.specification_input.setPlaceholderText(
+            "Gutynyň üstündäki aýratyn sözler/kodlar (vergul bilen): X88, Anti-Dust, 9D..."
+        )
+        form.addRow("Referens (OCR sözler)", self.specification_input)
 
         self.stock_spin = QSpinBox()
         self.stock_spin.setRange(0, 1000000)
@@ -149,6 +161,13 @@ class ProductDialog(QDialog):
         self.deactivate_button.clicked.connect(self._toggle_archive_product)
         self.deactivate_button.hide()
         footer.addWidget(self.deactivate_button)
+
+        self.clear_btn = make_button("↺ Arassala")
+        self.clear_btn.setToolTip("Öňki doldurylan öýjükleri arassalamak")
+        self.clear_btn.clicked.connect(self._clear_fields)
+        if self.product_id is not None:
+            self.clear_btn.hide()
+        footer.addWidget(self.clear_btn)
         footer.addStretch()
 
         cancel_btn = make_button("Ýatyr")
@@ -160,6 +179,77 @@ class ProductDialog(QDialog):
         root.addLayout(footer)
 
         configure_dialog_buttons(self, save_btn, cancel_btn)
+
+    def _setup_completers(self) -> None:
+        try:
+            brands, models = list_distinct_brands_and_models()
+        except SQLAlchemyError:
+            brands, models = [], []
+
+        brand_completer = QCompleter(brands, self)
+        brand_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        brand_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.brand_input.setCompleter(brand_completer)
+
+        model_completer = QCompleter(models, self)
+        model_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        model_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.model_input.setCompleter(model_completer)
+
+    def _apply_remembered_draft(self) -> None:
+        remember = SettingsService.get_product_remember_fields()
+        draft = SettingsService.get_last_product_draft()
+        if not draft:
+            return
+
+        if remember.get("category") and draft.get("category_id") is not None:
+            idx = self.category_input.findData(draft.get("category_id"))
+            if idx >= 0:
+                self.category_input.setCurrentIndex(idx)
+
+        if remember.get("brand") and draft.get("brand"):
+            self.brand_input.setText(str(draft["brand"]))
+
+        if remember.get("model") and draft.get("model"):
+            self.model_input.setText(str(draft["model"]))
+
+        if remember.get("reference") and draft.get("reference"):
+            self.specification_input.setText(str(draft["reference"]))
+
+        if remember.get("cost"):
+            raw_cost = draft.get("cost")
+            if raw_cost is not None:
+                try:
+                    self.cost_spin.setValue(max(0.0, float(raw_cost)))
+                except (ValueError, TypeError):
+                    pass
+            raw_curr = str(draft.get("cost_currency") or "").strip().upper()
+            if raw_curr in ("USD", "TMT"):
+                self.cost_curr_combo.setCurrentText(raw_curr)
+
+        if remember.get("min_stock") and draft.get("min_stock") is not None:
+            try:
+                self.min_stock_spin.setValue(max(0, int(draft["min_stock"])))
+            except (ValueError, TypeError):
+                pass
+
+        if remember.get("name") and draft.get("name"):
+            self.name_input.setText(str(draft["name"]))
+
+        if remember.get("barcode") and not self.initial_barcode and draft.get("barcode"):
+            self.barcode_input.setText(str(draft["barcode"]))
+
+    def _clear_fields(self) -> None:
+        self.name_input.clear()
+        self.brand_input.clear()
+        self.model_input.clear()
+        self.barcode_input.clear()
+        self.specification_input.clear()
+        self.stock_spin.setValue(0)
+        self.cost_spin.setValue(0.0)
+        self.cost_curr_combo.setCurrentText("USD")
+        self.min_stock_spin.setValue(SettingsService.get_default_min_stock())
+        self.name_input.setFocus()
 
     def _load_categories(self) -> None:
         self.category_input.clear()
@@ -261,8 +351,20 @@ class ProductDialog(QDialog):
                     self.cost_spin.value(),
                     self.cost_curr_combo.currentText(),
                 )
+            if self.product_id is None:
+                SettingsService.save_last_product_draft({
+                    "category_id": self.category_input.currentData(),
+                    "brand": self.brand_input.text().strip(),
+                    "model": self.model_input.text().strip(),
+                    "reference": self.specification_input.text().strip(),
+                    "cost": float(self.cost_spin.value()),
+                    "cost_currency": self.cost_curr_combo.currentText(),
+                    "min_stock": int(self.min_stock_spin.value()),
+                    "name": self.name_input.text().strip(),
+                    "barcode": self.barcode_input.text().strip(),
+                })
             msg = (
-                f"«{product.name}» ({product.sku}) harydy üstünlikli goşuldy."
+                f"«{product.name}» harydy üstünlikli goşuldy."
                 if self.product_id is None
                 else f"«{product.name}» harydynyň üýtgeşmeleri ýatda saklandy."
             )

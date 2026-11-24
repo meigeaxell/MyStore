@@ -3,11 +3,13 @@ package com.mobilestore.scanner.scanner
 import android.view.ViewGroup
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -34,10 +36,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -50,6 +58,7 @@ import com.mobilestore.scanner.ui.theme.TealAccent
 import kotlinx.coroutines.delay
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 @Composable
 fun CameraPreviewView(
@@ -74,15 +83,23 @@ fun CameraPreviewView(
 
     var torchEnabled by remember { mutableStateOf(false) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
+    var previewViewRef by remember { mutableStateOf<PreviewView?>(null) }
+    var previewSize by remember { mutableStateOf(IntSize.Zero) }
     var cooldownUntilMs by remember { mutableLongStateOf(0L) }
     var remainingMs by remember { mutableLongStateOf(0L) }
     var burstLabel by remember { mutableStateOf<String?>(null) }
+    var focusRingPoint by remember { mutableStateOf<Offset?>(null) }
+
+    val currentPreviewSize by rememberUpdatedState(previewSize)
 
     val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
     val analyzer = remember {
         BarcodeAndOcrAnalyzer(
             isPaused = { currentPaused },
             enableOcr = { currentOcr },
+            previewSizeProvider = { currentPreviewSize.width to currentPreviewSize.height },
+            boxWidthFraction = BarcodeAndOcrAnalyzer.SCAN_BOX_WIDTH_FRACTION,
+            boxHeightFraction = BarcodeAndOcrAnalyzer.SCAN_BOX_HEIGHT_FRACTION,
             burstWindowMs = burstWindowMs,
             cooldownMsProvider = { currentCooldownMs },
             onCooldownStarted = { until ->
@@ -121,6 +138,13 @@ fun CameraPreviewView(
         }
     }
 
+    LaunchedEffect(focusRingPoint) {
+        if (focusRingPoint != null) {
+            delay(750L)
+            focusRingPoint = null
+        }
+    }
+
     LaunchedEffect(cooldownUntilMs) {
         while (true) {
             val left = cooldownUntilMs - System.currentTimeMillis()
@@ -142,7 +166,26 @@ fun CameraPreviewView(
 
     val isInCooldown = remainingMs > 0L
 
-    Box(modifier = modifier) {
+    Box(
+        modifier = modifier
+            .onSizeChanged { previewSize = it }
+            .pointerInput(Unit) {
+                detectTapGestures { offset ->
+                    val cam = boundCamera ?: return@detectTapGestures
+                    val pv = previewViewRef ?: return@detectTapGestures
+                    focusRingPoint = offset
+                    val factory = pv.meteringPointFactory
+                    val point = factory.createPoint(offset.x, offset.y)
+                    val action = FocusMeteringAction.Builder(
+                        point,
+                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+                    )
+                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                        .build()
+                    runCatching { cam.cameraControl.startFocusAndMetering(action) }
+                }
+            },
+    ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
@@ -153,6 +196,7 @@ fun CameraPreviewView(
                     )
                     scaleType = PreviewView.ScaleType.FILL_CENTER
                 }
+                previewViewRef = previewView
 
                 val providerFuture = ProcessCameraProvider.getInstance(ctx)
                 providerFuture.addListener({
@@ -169,12 +213,30 @@ fun CameraPreviewView(
                             }
 
                         cameraProvider.unbindAll()
-                        boundCamera = cameraProvider.bindToLifecycle(
+                        val cam = cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
                             preview,
                             analysis,
                         )
+                        boundCamera = cam
+
+                        // Автофокус по центру зелёной рамки при запуске
+                        previewView.post {
+                            if (previewView.width > 0 && previewView.height > 0) {
+                                val pt = previewView.meteringPointFactory.createPoint(
+                                    previewView.width / 2f,
+                                    previewView.height / 2f,
+                                )
+                                val focusAction = FocusMeteringAction.Builder(
+                                    pt,
+                                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+                                )
+                                    .setAutoCancelDuration(4, TimeUnit.SECONDS)
+                                    .build()
+                                runCatching { cam.cameraControl.startFocusAndMetering(focusAction) }
+                            }
+                        }
                         onCameraStatusChanged("Işjeň")
                     } catch (e: Exception) {
                         onCameraStatusChanged("Ýalňyşlyk: ${e.message}")
@@ -185,24 +247,51 @@ fun CameraPreviewView(
             },
         )
 
-        // Рамка наведения: зелёная — готов, бирюзовая — сбор наклейки, оранжевая — пауза
+        // Полупрозрачная маска за пределами зелёной рамки + точное окно сканирования
         val frameColor = when {
             isPaused || isInCooldown -> AccentOrange
             burstLabel != null -> TealAccent
             else -> GreenSuccess
         }
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val boxW = size.width * 0.82f
-            val boxH = size.height * 0.38f
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen),
+        ) {
+            val boxW = size.width * BarcodeAndOcrAnalyzer.SCAN_BOX_WIDTH_FRACTION
+            val boxH = size.height * BarcodeAndOcrAnalyzer.SCAN_BOX_HEIGHT_FRACTION
             val left = (size.width - boxW) / 2f
             val top = (size.height - boxH) / 2f
+            val radius = CornerRadius(24f, 24f)
+
+            // Затемнение снаружи рамки, чтобы пользователь видел точную активную зону
+            drawRect(color = Color.Black.copy(alpha = 0.48f))
+            drawRoundRect(
+                color = Color.Transparent,
+                topLeft = Offset(left, top),
+                size = Size(boxW, boxH),
+                cornerRadius = radius,
+                blendMode = BlendMode.Clear,
+            )
+
+            // Основная рамка
             drawRoundRect(
                 color = frameColor,
                 topLeft = Offset(left, top),
                 size = Size(boxW, boxH),
-                cornerRadius = CornerRadius(24f, 24f),
+                cornerRadius = radius,
                 style = Stroke(width = 6f),
             )
+
+            // Кольцо фокуса при касании экрана
+            focusRingPoint?.let { pt ->
+                drawCircle(
+                    color = AccentOrange.copy(alpha = 0.9f),
+                    radius = 34f,
+                    center = pt,
+                    style = Stroke(width = 4f),
+                )
+            }
         }
 
         // Индикатор сбора наклейки или паузы между сканированиями

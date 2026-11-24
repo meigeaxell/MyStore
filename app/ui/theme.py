@@ -62,8 +62,7 @@ QTreeView {{
 }}
 
 QTreeView::item {{
-    padding: 5px 6px;
-    color: {TEXT};
+    padding: 5px 8px;
 }}
 
 QTreeView::item:hover {{
@@ -285,24 +284,24 @@ QDateTimeEdit::down-arrow:on {{
 QComboBox QAbstractItemView {{
     background-color: {WHITE};
     color: {TEXT};
-    border: 1px solid #D0D5DD;
-    border-radius: 8px;
-    padding: 4px;
+    border: none;
+    padding: 2px;
     outline: none;
-    selection-background-color: {ACCENT_BG};
-    selection-color: {TEXT};
+    selection-background-color: {ACCENT_SOFT};
+    selection-color: {NAVY};
 }}
 
 QComboBox QAbstractItemView::item {{
-    min-height: 28px;
-    padding: 5px 10px;
+    min-height: 30px;
+    padding: 6px 10px;
     border: none;
-    border-radius: 6px;
+    background-color: {WHITE};
+    color: {TEXT};
 }}
 
 QComboBox QAbstractItemView::item:hover {{
     background-color: {ACCENT_BG};
-    color: {TEXT};
+    color: {NAVY};
 }}
 
 QComboBox QAbstractItemView::item:selected {{

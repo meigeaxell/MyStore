@@ -1,4 +1,6 @@
 """Единые визуальные диалоги выбора товаров и складских позиций (Фаза VII)."""
+from decimal import Decimal
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -18,12 +20,15 @@ from app.models.category import Category
 from app.models.product import Product
 from app.models.stock_item import StockItem
 from app.repositories.product_repository import list_products_inventory
+from app.services.sales_service import SalesService
+from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.product_dialog import ProductDialog
 from app.ui.widgets import (
     configure_dialog_buttons,
     configure_table,
     make_button,
+    money_str,
     show_toast,
     style_combo,
 )
@@ -40,7 +45,7 @@ class CatalogProductSelectorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumSize(780, 520)
+        self.setMinimumSize(860, 520)
         self.setStyleSheet(theme.STYLE)
 
         self.products: list[dict] = []
@@ -66,7 +71,9 @@ class CatalogProductSelectorDialog(QDialog):
         filters.setSpacing(10)
 
         self.search_input = QLineEdit(initial_query)
-        self.search_input.setPlaceholderText("Ady, brend, model ýa-da SKU boýunça gözleg...")
+        self.search_input.setPlaceholderText(
+            "Ady, kategoriýa, brend, model, referens ýa-da ştrihkod boýunça gözleg..."
+        )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(38)
         self.search_input.textChanged.connect(self._apply_filter)
@@ -83,14 +90,14 @@ class CatalogProductSelectorDialog(QDialog):
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels([
-            "SKU",
             "Harydyň ady",
             "Kategoriýa",
             "Brend / Model",
+            "Öz bahasy",
             "Skladda",
             "Enjamlar (IMEI)",
         ])
-        configure_table(self.table, stretch_col=1, row_height=42)
+        configure_table(self.table, stretch_col=0, row_height=42)
         self.table.cellDoubleClicked.connect(lambda _r, _c: self._confirm_selection())
         for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             sc = QShortcut(QKeySequence(key), self.table)
@@ -131,16 +138,23 @@ class CatalogProductSelectorDialog(QDialog):
         self._apply_filter()
 
     def _apply_filter(self, *_args) -> None:
-        q = self.search_input.text().strip().lower()
+        words = [w for w in self.search_input.text().strip().lower().split() if w]
         cat_id = self.category_combo.currentData()
         self.filtered = []
 
         for p in self.products:
             if cat_id is not None and p["category_id"] != cat_id:
                 continue
-            if q:
-                hay = f"{p['sku']} {p.get('barcode', '')} {p['name']} {p['brand']} {p['model']} {p['category']}".lower()
-                if q not in hay:
+            if words:
+                hay = " ".join([
+                    p["name"],
+                    p["category"],
+                    p["brand"],
+                    p["model"],
+                    p.get("reference", ""),
+                    p.get("barcode", ""),
+                ]).lower()
+                if not all(w in hay for w in words):
                     continue
             self.filtered.append(p)
 
@@ -154,16 +168,16 @@ class CatalogProductSelectorDialog(QDialog):
                 else "Sanly"
             )
             vals = [
-                p["sku"],
                 p["name"],
                 p["category"],
                 bm,
+                p.get("cost_display", "—"),
                 f"{p['quantity']} sany",
                 imei_txt,
             ]
             for c, v in enumerate(vals):
                 cell = QTableWidgetItem(v)
-                if c in (0, 4, 5):
+                if c in (3, 4, 5):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table.setItem(r, c, cell)
 
@@ -200,7 +214,7 @@ class InventorySelectorDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setMinimumSize(840, 540)
+        self.setMinimumSize(920, 540)
         self.setStyleSheet(theme.STYLE)
 
         self.exclude_stock_item_id = exclude_stock_item_id
@@ -220,7 +234,9 @@ class InventorySelectorDialog(QDialog):
         filters.setSpacing(10)
 
         self.search_input = QLineEdit(initial_query)
-        self.search_input.setPlaceholderText("Ady, brend, model, SKU ýa-da IMEI boýunça gözleg...")
+        self.search_input.setPlaceholderText(
+            "Ady, kategoriýa, brend, model, referens, ştrihkod ýa-da IMEI boýunça gözleg..."
+        )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(38)
         self.search_input.textChanged.connect(self._apply_filter)
@@ -247,11 +263,11 @@ class InventorySelectorDialog(QDialog):
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels([
-            "Haryt / Model",
+            "Haryt",
             "Kategoriýa",
-            "SKU",
-            "IMEI / Seriýa №",
-            "Görnüş / Ýagdaýy",
+            "Brend / Model",
+            "Öz bahasy",
+            "IMEI / Görnüş",
             "Elýeterli",
         ])
         configure_table(self.table, stretch_col=0, row_height=42)
@@ -282,6 +298,9 @@ class InventorySelectorDialog(QDialog):
 
     def _load_inventory(self) -> None:
         self.all_entries = []
+        default_curr = SettingsService.get("default_currency", "TMT")
+        default_rate = SettingsService.get_default_exchange_rate()
+
         with SessionLocal() as session:
             categories = session.scalars(
                 select(Category).where(Category.is_active.is_(True)).order_by(Category.name.asc())
@@ -317,14 +336,30 @@ class InventorySelectorDialog(QDialog):
                     continue
                 imei_count_by_prod[prod.id] = imei_count_by_prod.get(prod.id, 0) + 1
                 is_new = st.condition == "new"
+                if st.unit_cost is not None and Decimal(str(st.unit_cost)) > 0:
+                    cost_display = (
+                        f"{money_str(st.unit_cost)} {(st.cost_currency or default_curr).strip().upper()}"
+                    )
+                else:
+                    u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                        session=session,
+                        product_id=prod.id,
+                        stock_item=st,
+                        fallback_currency=default_curr,
+                        fallback_rate=default_rate,
+                    )
+                    cost_display = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
+
                 self.all_entries.append({
                     "product_id": prod.id,
                     "product_name": prod.name,
                     "brand": prod.brand or "",
                     "model": prod.model or "",
+                    "reference": prod.specification or "",
+                    "barcode": prod.barcode or "",
                     "category_id": prod.category_id,
                     "category": cat_map.get(prod.category_id, "—"),
-                    "sku": prod.sku,
+                    "cost_display": cost_display,
                     "stock_item_id": st.id,
                     "imei": st.imei1,
                     "imei2": st.imei2 or "",
@@ -339,14 +374,24 @@ class InventorySelectorDialog(QDialog):
             for prod in products:
                 non_imei_qty = prod.stock_quantity - imei_count_by_prod.get(prod.id, 0)
                 if non_imei_qty > 0:
+                    u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                        session=session,
+                        product_id=prod.id,
+                        stock_item=None,
+                        fallback_currency=default_curr,
+                        fallback_rate=default_rate,
+                    )
+                    cost_display = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
                     self.all_entries.append({
                         "product_id": prod.id,
                         "product_name": prod.name,
                         "brand": prod.brand or "",
                         "model": prod.model or "",
+                        "reference": prod.specification or "",
+                        "barcode": prod.barcode or "",
                         "category_id": prod.category_id,
                         "category": cat_map.get(prod.category_id, "—"),
-                        "sku": prod.sku,
+                        "cost_display": cost_display,
                         "stock_item_id": None,
                         "imei": None,
                         "imei2": "",
@@ -361,7 +406,7 @@ class InventorySelectorDialog(QDialog):
         self._apply_filter()
 
     def _apply_filter(self, *_args) -> None:
-        q = self.search_input.text().strip().lower()
+        words = [w for w in self.search_input.text().strip().lower().split() if w]
         cat_id = self.category_combo.currentData()
         type_code = self.type_combo.currentData()
 
@@ -371,38 +416,43 @@ class InventorySelectorDialog(QDialog):
                 continue
             if type_code != "all" and entry["type_code"] != type_code:
                 continue
-            if q:
+            if words:
                 hay = " ".join([
                     entry["product_name"],
+                    entry["category"],
                     entry["brand"],
                     entry["model"],
-                    entry["category"],
-                    entry["sku"],
+                    entry["reference"],
+                    entry["barcode"],
                     entry["imei"] or "",
                     entry["imei2"],
                     entry["serial_number"],
                 ]).lower()
-                if q not in hay:
+                if not all(w in hay for w in words):
                     continue
             self.filtered.append(entry)
 
         self.table.setRowCount(len(self.filtered))
         self.count_label.setText(f"Elýeterli setirler: {len(self.filtered)}")
         for r, entry in enumerate(self.filtered):
-            imei_col = entry["imei"] or "IMEI-siz"
-            if entry["serial_number"]:
-                imei_col += f" (S/N: {entry['serial_number']})"
+            bm = " / ".join(filter(None, [entry["brand"], entry["model"]])) or "—"
+            if entry["imei"]:
+                imei_type_col = f"{entry['imei']} ({entry['type_label']})"
+                if entry["serial_number"]:
+                    imei_type_col += f" • S/N: {entry['serial_number']}"
+            else:
+                imei_type_col = entry["type_label"]
             vals = [
                 entry["product_name"],
                 entry["category"],
-                entry["sku"],
-                imei_col,
-                entry["type_label"],
+                bm,
+                entry["cost_display"],
+                imei_type_col,
                 entry["avail_label"],
             ]
             for c, v in enumerate(vals):
                 cell = QTableWidgetItem(v)
-                if c in (2, 3, 4, 5):
+                if c in (3, 4, 5):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 4:
                     color = (

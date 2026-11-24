@@ -21,11 +21,13 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.put
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.net.InetAddress
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -54,6 +56,7 @@ sealed interface ConnectionState {
  */
 class MobileStoreWsClient(
     private val settings: ConnectionSettings,
+    private val wifiManager: LocalWifiNetworkManager? = null,
 ) {
     val json = Json {
         ignoreUnknownKeys = true
@@ -63,7 +66,7 @@ class MobileStoreWsClient(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private val okHttp = OkHttpClient.Builder()
+    private val baseOkHttp = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)
@@ -85,6 +88,22 @@ class MobileStoreWsClient(
     private var reconnectJob: Job? = null
     private var heartbeatJob: Job? = null
     private var reconnectAttempts = 0
+
+    init {
+        // Как только появляется Wi-Fi (или хаб подключён), мгновенно переподключаемся к ПК без задержки!
+        wifiManager?.setOnWifiChangedListener {
+            if (shouldStayConnected && _state.value !is ConnectionState.Connected) {
+                reconnectAttempts = 0
+                reconnectJob?.cancel()
+                scope.launch {
+                    delay(250L)
+                    if (shouldStayConnected && _state.value !is ConnectionState.Connected) {
+                        openSocket()
+                    }
+                }
+            }
+        }
+    }
 
     fun connect(config: ServerConfig = settings.load()) {
         activeConfig = config
@@ -125,7 +144,23 @@ class MobileStoreWsClient(
             return
         }
 
-        webSocket = okHttp.newWebSocket(request, object : WebSocketListener() {
+        // Привязываем сокет строго к Wi-Fi (если он активен), чтобы работать параллельно с 4G!
+        val wifiNet = wifiManager?.getActiveWifiNetwork()
+        val client = if (wifiNet != null) {
+            baseOkHttp.newBuilder()
+                .socketFactory(wifiNet.socketFactory)
+                .dns(object : Dns {
+                    override fun lookup(hostname: String): List<InetAddress> {
+                        return runCatching { wifiNet.getAllByName(hostname).toList() }
+                            .getOrElse { Dns.SYSTEM.lookup(hostname) }
+                    }
+                })
+                .build()
+        } else {
+            baseOkHttp
+        }
+
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(ws: WebSocket, response: Response) {
                 reconnectAttempts = 0
                 scope.launch {

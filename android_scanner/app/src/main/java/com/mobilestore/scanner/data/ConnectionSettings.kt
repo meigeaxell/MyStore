@@ -11,6 +11,9 @@ data class ServerConfig(
     val deviceId: String,
     val deviceName: String,
     val scanCooldownMs: Long = DEFAULT_SCAN_COOLDOWN_MS,
+    val wifiSsid: String = "",
+    val wifiPassword: String = "",
+    val autoConnectWifiHub: Boolean = false,
 ) {
     val wsUrl: String
         get() {
@@ -89,6 +92,9 @@ class ConnectionSettings(context: Context) {
             deviceId = devId,
             deviceName = prefs.getString(KEY_DEVICE_NAME, defaultName) ?: defaultName,
             scanCooldownMs = cooldown,
+            wifiSsid = prefs.getString(KEY_WIFI_SSID, "") ?: "",
+            wifiPassword = prefs.getString(KEY_WIFI_PASSWORD, "") ?: "",
+            autoConnectWifiHub = prefs.getBoolean(KEY_AUTO_CONNECT_HUB, false),
         )
     }
 
@@ -100,6 +106,15 @@ class ConnectionSettings(context: Context) {
             .putInt(KEY_PORT, cleanPort)
             .putString(KEY_TOKEN, pinToken.trim())
             .putString(KEY_DEVICE_NAME, deviceName.trim().ifBlank { current.deviceName })
+            .apply()
+        return load()
+    }
+
+    fun saveWifiHub(ssid: String, password: String, autoConnect: Boolean): ServerConfig {
+        prefs.edit()
+            .putString(KEY_WIFI_SSID, ssid.trim())
+            .putString(KEY_WIFI_PASSWORD, password)
+            .putBoolean(KEY_AUTO_CONNECT_HUB, autoConnect)
             .apply()
         return load()
     }
@@ -117,5 +132,8 @@ class ConnectionSettings(context: Context) {
         private const val KEY_DEVICE_ID = "device_id"
         private const val KEY_DEVICE_NAME = "device_name"
         private const val KEY_SCAN_COOLDOWN_MS = "scan_cooldown_ms"
+        private const val KEY_WIFI_SSID = "wifi_hub_ssid"
+        private const val KEY_WIFI_PASSWORD = "wifi_hub_password"
+        private const val KEY_AUTO_CONNECT_HUB = "wifi_hub_auto_connect"
     }
 }

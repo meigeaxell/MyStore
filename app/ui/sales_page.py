@@ -1,9 +1,10 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QDate, QPoint, Qt, QTimer
+from PySide6.QtCore import QDate, QEvent, QPoint, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QDateEdit,
@@ -29,6 +30,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.engine import SessionLocal
+from app.models.category import Category
 from app.models.product import Product
 from app.models.sale import Sale
 from app.models.sale_item import SaleItem
@@ -502,10 +504,50 @@ class SalesPage(QWidget):
         self.auto_full_payment: bool = True
         self._updating_table: bool = False
         self.last_created_sale_id: int | None = None
+        self._window_filter_installed: bool = False
 
         self._build_ui()
         self._setup_shortcuts()
         self.refresh_data()
+
+    def hideEvent(self, event) -> None:
+        self._hide_live_search_popup()
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._window_filter_installed:
+            win = self.window()
+            if win is not None and win is not self:
+                win.installEventFilter(self)
+                self._window_filter_installed = True
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is getattr(self, "search_input", None):
+            if event.type() == QEvent.Type.FocusOut:
+                QTimer.singleShot(140, self._check_hide_live_search_popup)
+            elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._hide_live_search_popup()
+        elif obj is self.window() and event.type() in (
+            QEvent.Type.WindowDeactivate,
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+        ):
+            self._hide_live_search_popup()
+        return super().eventFilter(obj, event)
+
+    def _check_hide_live_search_popup(self) -> None:
+        if not hasattr(self, "live_search_popup") or not self.live_search_popup.isVisible():
+            return
+        fw = QApplication.focusWidget()
+        if (
+            fw is self.search_input
+            or fw is self.live_search_popup
+            or (fw is not None and self.live_search_popup.isAncestorOf(fw))
+        ):
+            return
+        if not self.isVisible() or not self.search_input.hasFocus():
+            self._hide_live_search_popup()
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence("F2"), self, activated=lambda: self._open_inventory_selector(""))
@@ -558,6 +600,7 @@ class SalesPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_pos_tab(), "Täze satyş")
         self.tabs.addTab(self._create_history_tab(), "Çekler taryhy")
+        self.tabs.currentChanged.connect(lambda _idx: self._hide_live_search_popup())
         root.addWidget(self.tabs, 1)
 
     def _create_pos_tab(self) -> QWidget:
@@ -574,12 +617,13 @@ class SalesPage(QWidget):
         search_row.setSpacing(8)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
-            "Ştrihkod, IMEI, SKU, at boýunça janly gözleg (F3)..."
+            "Harydyň ady, kategoriýa, brend, model, referens, ştrihkod ýa-da IMEI (F3)..."
         )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(40)
         self.search_input.returnPressed.connect(self._add_product_by_search)
         self.search_input.textChanged.connect(self._schedule_live_search)
+        self.search_input.installEventFilter(self)
 
         self._live_search_timer = QTimer(self)
         self._live_search_timer.setSingleShot(True)
@@ -1049,6 +1093,8 @@ class SalesPage(QWidget):
             self.search_input.clear()
 
     def _hide_live_search_popup(self) -> None:
+        if hasattr(self, "_live_search_timer") and self._live_search_timer is not None:
+            self._live_search_timer.stop()
         if hasattr(self, "live_search_popup") and self.live_search_popup is not None:
             self.live_search_popup.hide()
 
@@ -1058,62 +1104,142 @@ class SalesPage(QWidget):
             return
         self._live_search_timer.start(160)
 
+    @staticmethod
+    def _translate_ru_to_en(text: str) -> str:
+        ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
+        en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
+        ru_layout_up = "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё"
+        en_layout_up = "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~"
+        trans_map = {ord(r): ord(e) for r, e in zip(ru_layout, en_layout)}
+        trans_map.update({ord(r): ord(e) for r, e in zip(ru_layout_up, en_layout_up)})
+        return text.translate(trans_map)
+
+    @staticmethod
+    def _matches_multiword(hay: str, words: list[str], words_en: list[str]) -> bool:
+        return all(w in hay or w_en in hay for w, w_en in zip(words, words_en))
+
     def _run_live_search(self) -> None:
+        if not self.isVisible() or self.tabs.currentIndex() != 0 or not self.search_input.hasFocus():
+            self._hide_live_search_popup()
+            return
         text = self.search_input.text().strip()
         if len(text) < 2:
             self._hide_live_search_popup()
             return
 
-        ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
-        en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
-        trans_map = {ord(r): ord(e) for r, e in zip(ru_layout, en_layout)}
-        trans_map.update({ord(r.upper()): ord(e.upper()) for r, e in zip(ru_layout, en_layout)})
-        text_en = text.translate(trans_map)
+        text_en = self._translate_ru_to_en(text)
+        words = [w for w in text.lower().split() if w]
+        words_en = [w for w in text_en.lower().split() if w]
+        if not words:
+            self._hide_live_search_popup()
+            return
+
+        fallback_curr = self.currency_combo.currentText()
+        fallback_rate = Decimal(f"{self.rate_spin.value():.4f}")
 
         self.live_search_popup.clear()
         with SessionLocal() as session:
-            imeis = session.execute(
-                select(StockItem, Product)
+            imei_rows = session.execute(
+                select(StockItem, Product, Category.name)
                 .join(Product, StockItem.product_id == Product.id)
+                .outerjoin(Category, Product.category_id == Category.id)
                 .where(
                     StockItem.status == "in_stock",
                     Product.is_active.is_(True),
                     Product.stock_quantity > 0,
-                    (StockItem.imei1.ilike(f"%{text}%"))
-                    | (StockItem.imei1.ilike(f"%{text_en}%"))
-                    | (StockItem.imei2.ilike(f"%{text}%"))
-                    | (StockItem.serial_number.ilike(f"%{text}%")),
                 )
-                .limit(6)
+                .order_by(StockItem.id.desc())
             ).all()
-            for st, prod in imeis:
+
+            latest_stock_by_prod: dict[int, StockItem] = {}
+            for st, _prod, _cat in imei_rows:
+                if st.product_id not in latest_stock_by_prod and st.unit_cost is not None:
+                    latest_stock_by_prod[st.product_id] = st
+
+            imei_added = 0
+            for st, prod, cat_name in imei_rows:
+                hay = " ".join(
+                    filter(
+                        None,
+                        [
+                            prod.name,
+                            cat_name,
+                            prod.brand,
+                            prod.model,
+                            prod.specification,
+                            prod.barcode,
+                            st.imei1,
+                            st.imei2,
+                            st.serial_number,
+                        ],
+                    )
+                ).lower()
+                if not self._matches_multiword(hay, words, words_en):
+                    continue
+                cat_label = cat_name or "—"
+                bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
                 cond = "Täze" if st.condition == "new" else "B/U"
-                item = QListWidgetItem(f"📱 {prod.name} • IMEI: {st.imei1} ({cond})")
+                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=prod.id,
+                    stock_item=st,
+                    fallback_currency=fallback_curr,
+                    fallback_rate=fallback_rate,
+                )
+                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
+                item = QListWidgetItem(
+                    f"📱 {prod.name}  •  {cat_label}  •  {bm}  •  IMEI: {st.imei1} ({cond})  •  Öz bahasy: {cost_str}"
+                )
                 item.setData(Qt.ItemDataRole.UserRole, {"product_id": prod.id, "imei": st.imei1})
                 self.live_search_popup.addItem(item)
+                imei_added += 1
+                if imei_added >= 6:
+                    break
 
-            prods = session.scalars(
-                select(Product)
+            prod_rows = session.execute(
+                select(Product, Category.name)
+                .outerjoin(Category, Product.category_id == Category.id)
                 .where(
                     Product.is_active.is_(True),
                     Product.stock_quantity > 0,
-                    (Product.name.ilike(f"%{text}%"))
-                    | (Product.name.ilike(f"%{text_en}%"))
-                    | (Product.sku.ilike(f"%{text}%"))
-                    | (Product.sku.ilike(f"%{text_en}%"))
-                    | (Product.barcode.ilike(f"%{text}%"))
-                    | (Product.barcode.ilike(f"%{text_en}%"))
-                    | (Product.brand.ilike(f"%{text}%"))
-                    | (Product.model.ilike(f"%{text}%")),
                 )
                 .order_by(Product.name.asc())
-                .limit(8)
             ).all()
-            for p in prods:
-                bc = f" • {p.barcode}" if p.barcode else ""
-                item = QListWidgetItem(f"📦 {p.name} ({p.sku}{bc}) — Bar: {p.stock_quantity} sany")
+            prod_added = 0
+            for p, cat_name in prod_rows:
+                hay = " ".join(
+                    filter(
+                        None,
+                        [
+                            p.name,
+                            cat_name,
+                            p.brand,
+                            p.model,
+                            p.specification,
+                            p.barcode,
+                        ],
+                    )
+                ).lower()
+                if not self._matches_multiword(hay, words, words_en):
+                    continue
+                cat_label = cat_name or "—"
+                bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
+                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=p.id,
+                    stock_item=latest_stock_by_prod.get(p.id),
+                    fallback_currency=fallback_curr,
+                    fallback_rate=fallback_rate,
+                )
+                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
+                item = QListWidgetItem(
+                    f"📦 {p.name}  •  {cat_label}  •  {bm}  •  Öz bahasy: {cost_str}  •  Bar: {p.stock_quantity}"
+                )
                 item.setData(Qt.ItemDataRole.UserRole, {"product_id": p.id, "imei": None})
                 self.live_search_popup.addItem(item)
+                prod_added += 1
+                if prod_added >= 8:
+                    break
 
         if self.live_search_popup.count() == 0:
             self._hide_live_search_popup()
@@ -1121,7 +1247,7 @@ class SalesPage(QWidget):
 
         pos = self.search_input.mapToGlobal(QPoint(0, self.search_input.height() + 2))
         self.live_search_popup.move(pos)
-        self.live_search_popup.setFixedWidth(max(440, self.search_input.width()))
+        self.live_search_popup.setFixedWidth(max(580, self.search_input.width()))
         h = min(300, self.live_search_popup.count() * 34 + 12)
         self.live_search_popup.setFixedHeight(h)
         self.live_search_popup.show()
@@ -1163,17 +1289,9 @@ class SalesPage(QWidget):
             self._open_inventory_selector("")
             return
 
-        ru_layout = "йцукенгшщзхъфывапролджэячсмитьбю.ё"
-        en_layout = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"
-        ru_layout_up = "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё"
-        en_layout_up = "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>~"
-
-        trans_map = {}
-        for r, e in zip(ru_layout, en_layout):
-            trans_map[ord(r)] = ord(e)
-        for r, e in zip(ru_layout_up, en_layout_up):
-            trans_map[ord(r)] = ord(e)
-        text_en = text.translate(trans_map)
+        text_en = self._translate_ru_to_en(text)
+        words = [w for w in text.lower().split() if w]
+        words_en = [w for w in text_en.lower().split() if w]
 
         with SessionLocal() as session:
             # 1. Точный или частичный поиск по IMEI (включая последние 4+ цифр)
@@ -1227,21 +1345,37 @@ class SalesPage(QWidget):
                 self.search_input.clear()
                 return
 
-            # 3. Поиск по SKU, штрихкоду или названию
-            matches = session.scalars(
-                select(Product)
+            # 3. Многословный поиск по названию, категории, бренду, модели, референсу и штрихкоду (без SKU)
+            prod_rows = session.execute(
+                select(Product, Category.name)
+                .outerjoin(Category, Product.category_id == Category.id)
                 .where(
                     Product.is_active.is_(True),
                     Product.stock_quantity > 0,
-                    (Product.sku.ilike(f"%{text}%"))
-                    | (Product.sku.ilike(f"%{text_en}%"))
-                    | (Product.barcode.ilike(f"%{text}%"))
-                    | (Product.barcode.ilike(f"%{text_en}%"))
-                    | (Product.name.ilike(f"%{text}%"))
-                    | (Product.name.ilike(f"%{text_en}%")),
                 )
                 .order_by(Product.name.asc())
             ).all()
+            matches = [
+                p
+                for p, cat_name in prod_rows
+                if self._matches_multiword(
+                    " ".join(
+                        filter(
+                            None,
+                            [
+                                p.name,
+                                cat_name,
+                                p.brand,
+                                p.model,
+                                p.specification,
+                                p.barcode,
+                            ],
+                        )
+                    ).lower(),
+                    words,
+                    words_en,
+                )
+            ]
 
             if len(matches) == 1:
                 prod = matches[0]

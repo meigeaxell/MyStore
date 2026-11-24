@@ -9,12 +9,14 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -79,10 +81,17 @@ class SettingsPage(QWidget):
         root.addWidget(self.tabs, 1)
 
     def _create_general_settings_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
         widget = QWidget()
-        layout = QHBoxLayout(widget)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(18)
+        root = QVBoxLayout(widget)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(16)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(18)
 
         store_card = Card()
         sl = store_card.body
@@ -143,16 +152,72 @@ class SettingsPage(QWidget):
         a_form.addRow("Esasy az galyndy çägi (sany):", self.min_stock_spin)
         a_form.addRow("Sene görkeziş formaty:", self.date_format_combo)
         al.addLayout(a_form)
-
         al.addStretch()
+
+        top_row.addWidget(store_card, 1)
+        top_row.addWidget(acc_card, 1)
+        root.addLayout(top_row)
+
+        # Sklad we haryt goşmak sazlamalary
+        stock_card = Card()
+        stl = stock_card.body
+        stock_title = QLabel("Sklad we haryt goşmak sazlamalary")
+        stock_title.setObjectName("cardTitle")
+        stl.addWidget(stock_title)
+
+        st_form = QFormLayout()
+        st_form.setSpacing(12)
+
+        self.stock_group_combo = style_combo(QComboBox())
+        self.stock_group_combo.setMinimumHeight(36)
+        self.stock_group_combo.addItem(
+            "Ady boýunça (mysal: Note 15 Pro Plus → Çehol, Udarnyk…)", "name"
+        )
+        self.stock_group_combo.addItem("Brend boýunça", "brand")
+        self.stock_group_combo.addItem("Kategoriýa boýunça", "category")
+        self.stock_group_combo.addItem("Toparlamazdan (adaty sanaw)", "none")
+        st_form.addRow("Skladda harytlary toparlamak:", self.stock_group_combo)
+        stl.addLayout(st_form)
+
+        remember_title = QLabel("«+ Haryt goş» açylanda öňki girizilenleri ýatda sakla:")
+        remember_title.setStyleSheet(f"font-weight: 600; color: {theme.NAVY}; padding-top: 4px;")
+        stl.addWidget(remember_title)
+
+        remember_grid = QGridLayout()
+        remember_grid.setHorizontalSpacing(22)
+        remember_grid.setVerticalSpacing(10)
+
+        remember_defs = [
+            ("category", "Kategoriýa", 0, 0),
+            ("brand", "Brend", 0, 1),
+            ("model", "Model", 0, 2),
+            ("reference", "Referens (OCR)", 0, 3),
+            ("cost", "Öz bahasy we walýuta", 1, 0),
+            ("min_stock", "Iň az galyndy", 1, 1),
+            ("name", "Harydyň ady", 1, 2),
+            ("barcode", "Ştrihkod", 1, 3),
+        ]
+        self.remember_checkboxes: dict[str, QCheckBox] = {}
+        for key, label, r, c in remember_defs:
+            chk = QCheckBox(label)
+            self.remember_checkboxes[key] = chk
+            remember_grid.addWidget(chk, r, c)
+
+        stl.addLayout(remember_grid)
+        root.addWidget(stock_card)
+
+        save_row = QHBoxLayout()
+        save_row.addStretch()
         save_btn = make_button("💾  Sazlamalary ýatda sakla", "primary")
         save_btn.setMinimumHeight(42)
+        save_btn.setMinimumWidth(240)
         save_btn.clicked.connect(self._save_general_settings)
-        al.addWidget(save_btn)
+        save_row.addWidget(save_btn)
+        root.addLayout(save_row)
+        root.addStretch()
 
-        layout.addWidget(store_card, 1)
-        layout.addWidget(acc_card, 1)
-        return widget
+        scroll.setWidget(widget)
+        return scroll
 
     def _create_backup_tab(self) -> QWidget:
         widget = QWidget()
@@ -392,8 +457,9 @@ class SettingsPage(QWidget):
 
         return widget
 
-    def refresh_data(self) -> None:
-        cfg = SettingsService.get_all()
+    def _load_general_settings(self, cfg: dict[str, str] | None = None) -> None:
+        if cfg is None:
+            cfg = SettingsService.get_all()
 
         self.store_name_input.setText(cfg.get("store_name", ""))
         self.store_phone_input.setText(cfg.get("store_phone", ""))
@@ -407,6 +473,18 @@ class SettingsPage(QWidget):
         df_idx = self.date_format_combo.findData(cfg.get("date_format", "%d.%m.%Y %H:%M"))
         if df_idx >= 0:
             self.date_format_combo.setCurrentIndex(df_idx)
+
+        grp_idx = self.stock_group_combo.findData(SettingsService.get_stock_group_mode())
+        if grp_idx >= 0:
+            self.stock_group_combo.setCurrentIndex(grp_idx)
+
+        remember = SettingsService.get_product_remember_fields()
+        for key, chk in self.remember_checkboxes.items():
+            chk.setChecked(bool(remember.get(key, False)))
+
+    def refresh_data(self) -> None:
+        cfg = SettingsService.get_all()
+        self._load_general_settings(cfg)
 
         self.backup_dir_input.setText(cfg.get("backup_directory", ""))
         self.auto_backup_chk.setChecked(cfg.get("auto_backup_enabled", "1") == "1")
@@ -586,6 +664,10 @@ class SettingsPage(QWidget):
         }
         try:
             SettingsService.set_many(values)
+            SettingsService.set_stock_group_mode(self.stock_group_combo.currentData() or "name")
+            SettingsService.set_product_remember_fields({
+                key: chk.isChecked() for key, chk in self.remember_checkboxes.items()
+            })
             self.refresh_data()
             show_toast(self, "Dükan we hasap sazlamalary üstünlikli ýatda saklandy.", kind="success")
         except SQLAlchemyError as e:

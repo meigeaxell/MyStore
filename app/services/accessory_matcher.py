@@ -22,6 +22,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.brand_glossary import BrandGlossary
 from app.models.category import Category
 from app.models.product import Product
 from app.models.product_ocr_alias import ProductOcrAlias
@@ -885,13 +886,162 @@ def record_ocr_alias(
     return alias
 
 
+def _split_reference_terms(raw_ref: str | None) -> list[str]:
+    """Разбивает поле Referens (через запятую, точку с запятой, слэш или перенос строки) на нормализованные фразы."""
+    if not raw_ref:
+        return []
+    parts = re.split(r"[,;\n/|]+", raw_ref)
+    terms: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        norm = normalize_ocr_text(part)
+        if len(norm) >= 2 and norm not in seen:
+            seen.add(norm)
+            terms.append(norm)
+    return terms
+
+
+def sync_product_glossary(session: Session, product: Product) -> BrandGlossary | None:
+    """Создаёт или обновляет запись в таблице brand_glossaries при сохранении товара на складе."""
+    existing = session.scalar(
+        select(BrandGlossary).where(BrandGlossary.product_id == product.id)
+    )
+    if not product.is_active:
+        if existing is not None:
+            session.delete(existing)
+            session.flush()
+        return None
+
+    cat = session.get(Category, product.category_id)
+    cat_name = (cat.name if cat else "").strip()
+    brand_disp = (product.brand or "").strip()
+    brand_key = normalize_ocr_text(brand_disp) if brand_disp else ""
+    name_txt = (product.name or "").strip()
+    model_txt = (product.model or "").strip()
+    ref_txt = (product.specification or "").strip()
+
+    if existing is not None:
+        existing.brand_key = brand_key
+        existing.brand_display = brand_disp
+        existing.product_name = name_txt[:150]
+        existing.model_text = model_txt[:100]
+        existing.reference_text = ref_txt[:255]
+        existing.category_name = cat_name[:120]
+        existing.updated_at = datetime.now()
+        session.flush()
+        return existing
+
+    entry = BrandGlossary(
+        product_id=product.id,
+        brand_key=brand_key,
+        brand_display=brand_disp[:100],
+        product_name=name_txt[:150],
+        model_text=model_txt[:100],
+        reference_text=ref_txt[:255],
+        category_name=cat_name[:120],
+    )
+    session.add(entry)
+    session.flush()
+    return entry
+
+
+def ensure_brand_glossaries_synced(
+    session: Session,
+    active_products: list[Product],
+    cat_map: dict[int, str],
+) -> dict[int, BrandGlossary]:
+    """Гарантирует, что все активные товары проиндексированы в brand_glossaries."""
+    existing_rows = session.scalars(select(BrandGlossary)).all()
+    by_pid = {row.product_id: row for row in existing_rows}
+    changed = False
+    for prod in active_products:
+        cat_name = cat_map.get(prod.category_id, "")
+        brand_disp = (prod.brand or "").strip()
+        brand_key = normalize_ocr_text(brand_disp) if brand_disp else ""
+        ref_txt = (prod.specification or "").strip()
+        model_txt = (prod.model or "").strip()
+        cur = by_pid.get(prod.id)
+        if cur is None:
+            cur = BrandGlossary(
+                product_id=prod.id,
+                brand_key=brand_key,
+                brand_display=brand_disp[:100],
+                product_name=(prod.name or "").strip()[:150],
+                model_text=model_txt[:100],
+                reference_text=ref_txt[:255],
+                category_name=cat_name[:120],
+            )
+            session.add(cur)
+            by_pid[prod.id] = cur
+            changed = True
+        elif (
+            cur.brand_key != brand_key
+            or cur.product_name != (prod.name or "").strip()[:150]
+            or cur.model_text != model_txt[:100]
+            or cur.reference_text != ref_txt[:255]
+            or cur.category_name != cat_name[:120]
+        ):
+            cur.brand_key = brand_key
+            cur.brand_display = brand_disp[:100]
+            cur.product_name = (prod.name or "").strip()[:150]
+            cur.model_text = model_txt[:100]
+            cur.reference_text = ref_txt[:255]
+            cur.category_name = cat_name[:120]
+            cur.updated_at = datetime.now()
+            changed = True
+    if changed:
+        session.flush()
+    return by_pid
+
+
+def _score_reference_match(
+    query_norm: str,
+    query_tokens: set[str],
+    ref_terms: list[str],
+) -> tuple[float, list[str]]:
+    """Оценивает совпадение уникальных слов/кодов поля Referens в OCR-тексте."""
+    if not ref_terms or not query_norm:
+        return 0.0, []
+    padded = f" {query_norm} "
+    matched: list[str] = []
+    pts = 0.0
+    for term in ref_terms:
+        if f" {term} " in padded or (len(term) >= 4 and term in query_norm):
+            matched.append(term)
+            pts += 32.0 if len(term) >= 4 else 22.0
+            continue
+        term_toks = [t for t in term.split() if len(t) >= 2]
+        if term_toks:
+            hit_cnt = 0
+            for tt in term_toks:
+                if tt in query_tokens or (
+                    len(tt) >= 5
+                    and any(_levenshtein(tt, qt) <= 1 for qt in query_tokens if abs(len(qt) - len(tt)) <= 1)
+                ):
+                    hit_cnt += 1
+            if hit_cnt == len(term_toks):
+                matched.append(term)
+                pts += 28.0
+            elif hit_cnt > 0:
+                matched.append(term)
+                pts += 14.0 * (hit_cnt / len(term_toks))
+    return min(58.0, pts), matched
+
+
 def match_accessory_text(
     session: Session,
     raw_text: str,
     category_id: int | None = None,
     limit: int = 6,
 ) -> dict[str, Any]:
-    """Ищет Топ-N подходящих товаров в базе по OCR-тексту с коробки аксессуара."""
+    """Ищет Топ-N подходящих товаров в базе по OCR-тексту с коробки аксессуара.
+
+    Двухуровневая воронка BrandGlossary + Referens:
+    1. Определяет бренд по глоссарию склада (по названию бренда ИЛИ уникальному слову из Referens).
+    2. Сужает поиск строго на товары этого бренда (5–10× быстрее и без помех от чужих брендов).
+    3. Внутри бренда ранжирует по: Referens (+58) -> Название/Модель (+45) -> Линейка/Модель (+22) -> Категория (+22) -> Алиасы (+42).
+    4. Если бренд не распознался или не дал совпадений — умный фолбэк по всему глоссарию.
+    """
     categories = session.scalars(
         select(Category).where(Category.is_active.is_(True)).order_by(Category.name)
     ).all()
@@ -901,6 +1051,7 @@ def match_accessory_text(
         select(Product).where(Product.is_active.is_(True)).order_by(Product.name)
     ).all()
 
+    glossary_by_pid = ensure_brand_glossaries_synced(session, all_active_products, cat_map)
     catalog_brands = sorted({(p.brand or "").strip() for p in all_active_products if (p.brand or "").strip()})
     parsed = parse_box_ocr(raw_text, catalog_brands=catalog_brands)
     draft = build_draft_suggestion(parsed, categories)
@@ -934,109 +1085,189 @@ def match_accessory_text(
     query_ngrams = _char_ngrams(parsed.normalized_text, 3)
     query_tokens = set(parsed.tokens)
 
+    # Шаг 1: Определяем целевой бренд через глоссарий склада (имя бренда ИЛИ уникальный Referens этого бренда)
+    detected_brand_key = normalize_ocr_text(parsed.brand) if parsed.brand else ""
+    brands_in_glossary = {
+        g.brand_key: g.brand_display
+        for g in glossary_by_pid.values()
+        if g.brand_key
+    }
+
+    if detected_brand_key and detected_brand_key not in brands_in_glossary:
+        detected_brand_key = ""
+
+    # Если бренд не прочитался с логотипа, пробуем определить его по уникальному слову Referens!
+    if not detected_brand_key:
+        ref_brand_hits: dict[str, float] = {}
+        for prod in all_active_products:
+            g = glossary_by_pid.get(prod.id)
+            if not g or not g.brand_key or not g.reference_text:
+                continue
+            r_pts, _ = _score_reference_match(
+                parsed.normalized_text,
+                query_tokens,
+                _split_reference_terms(g.reference_text),
+            )
+            if r_pts >= 22.0:
+                ref_brand_hits[g.brand_key] = max(ref_brand_hits.get(g.brand_key, 0.0), r_pts)
+        if len(ref_brand_hits) == 1:
+            detected_brand_key = next(iter(ref_brand_hits))
+            if not parsed.brand:
+                parsed.brand = brands_in_glossary.get(detected_brand_key, "")
+
+    def _score_candidates(candidates: list[Product]) -> list[tuple[float, Product, str]]:
+        out: list[tuple[float, Product, str]] = []
+        for prod in candidates:
+            if category_id is not None and prod.category_id != category_id:
+                continue
+
+            g = glossary_by_pid.get(prod.id)
+            cat_name = cat_map.get(prod.category_id, "")
+            ref_raw = g.reference_text if g else (prod.specification or "")
+            ref_terms = _split_reference_terms(ref_raw)
+
+            prod_blob = " ".join(
+                part
+                for part in (cat_name, prod.brand or "", prod.name or "", prod.model or "", ref_raw)
+                if part
+            )
+            prod_norm = normalize_ocr_text(prod_blob)
+            _prod_model_disp, prod_model_key, prod_family = _extract_device_model(prod_norm)
+            prod_type, _ = _detect_accessory_type(prod_norm)
+
+            score = 0.0
+            reasons: list[str] = []
+
+            # 1. Референс (уникальные слова/коды с коробки) — высший приоритет для бренда!
+            ref_pts, ref_matched = _score_reference_match(
+                parsed.normalized_text,
+                query_tokens,
+                ref_terms,
+            )
+            if ref_pts > 0:
+                score += ref_pts
+                reasons.append(f"Referens: {', '.join(ref_matched[:2])}")
+
+            # 2. Выученные алиасы (если коробка уже сканировалась раньше)
+            best_alias_sim = 0.0
+            best_alias_hits = 0
+            for al in aliases_by_product.get(prod.id, ()):
+                if al.normalized_text == parsed.normalized_text:
+                    best_alias_sim = 1.0
+                    best_alias_hits = max(best_alias_hits, al.hits or 1)
+                    break
+                sim = _cosine_similarity(query_ngrams, _char_ngrams(al.normalized_text, 3))
+                if sim > best_alias_sim:
+                    best_alias_sim = sim
+                    best_alias_hits = al.hits or 1
+
+            has_strong_alias = best_alias_sim >= 0.90
+            if best_alias_sim >= 0.98:
+                alias_pts = 62.0 if len(exact_alias_products) <= 1 else 40.0
+                score += alias_pts + min(8.0, best_alias_hits * 1.5)
+                reasons.append("Ýatda saklanan guty")
+            elif best_alias_sim >= 0.65:
+                score += 36.0 * best_alias_sim
+                reasons.append("Meňzeş guty")
+
+            # 3. Совпадение названия/модели устройства (например «14 Pro Max» / «Note 15 Pro Plus»)
+            name_norm = normalize_ocr_text(prod.name or "")
+            if name_norm and (
+                f" {name_norm} " in f" {parsed.normalized_text} "
+                or (len(name_norm) >= 4 and name_norm in parsed.normalized_text)
+            ):
+                score += 42.0
+                reasons.append(f"Ady: {prod.name}")
+            elif parsed.device_model_key:
+                if prod_model_key == parsed.device_model_key:
+                    score += 42.0
+                    reasons.append(f"Model: {parsed.device_model}")
+                elif prod_model_key and not has_strong_alias and ref_pts < 28.0:
+                    if parsed.device_family and prod_family == parsed.device_family:
+                        score -= 22.0
+                    else:
+                        score -= 35.0
+
+            # 4. Совпадение поля Model (например «iPhone», «Samsung», «Xiaomi»)
+            model_norm = normalize_ocr_text(prod.model or "")
+            if model_norm and (
+                model_norm in query_tokens
+                or f" {model_norm} " in f" {parsed.normalized_text} "
+                or (parsed.device_family and parsed.device_family in model_norm)
+            ):
+                score += 18.0
+                if not any(r.startswith("Model:") for r in reasons):
+                    reasons.append(f"Model: {prod.model}")
+
+            # 5. Бренд аксессуара (из глоссария)
+            prod_brand_key = g.brand_key if g else normalize_ocr_text(prod.brand or "")
+            if detected_brand_key:
+                if prod_brand_key == detected_brand_key:
+                    score += 26.0
+                    reasons.append(f"Brend: {prod.brand}")
+                elif prod_brand_key:
+                    score -= 18.0
+            elif parsed.brand:
+                b_low = parsed.brand.lower()
+                if (prod.brand or "").strip().lower() == b_low or b_low in prod_norm.split():
+                    score += 24.0
+                    reasons.append(f"Brend: {parsed.brand}")
+
+            # 6. Категория / тип аксессуара (Çehol, Udarnyk, Kabel...)
+            if parsed.accessory_type:
+                if prod_type == parsed.accessory_type:
+                    score += 22.0
+                    reasons.append(parsed.accessory_type_label)
+                elif prod_type and not has_strong_alias and ref_pts < 28.0:
+                    score -= 28.0
+
+            # 7. Фичи и n-gram сходство
+            if parsed.features:
+                matched_feats = [f for f in parsed.features if f.lower() in prod_norm]
+                if matched_feats:
+                    score += min(14.0, len(matched_feats) * 5.0)
+
+            ngram_sim = _cosine_similarity(query_ngrams, _char_ngrams(prod_norm, 3))
+            score += 18.0 * ngram_sim
+
+            prod_tokens = set(prod_norm.split())
+            if query_tokens and prod_tokens:
+                overlap = len(query_tokens & prod_tokens)
+                if overlap > 0:
+                    score += min(14.0, overlap * 4.0)
+
+            if score < 14.0:
+                continue
+
+            if prod.stock_quantity > 0:
+                score += 4.0
+
+            detail = " • ".join(reasons[:3]) if reasons else "Tekst meňzeşligi"
+            out.append((score, prod, detail))
+        return out
+
+    # Шаг 2: Быстрый поиск строго внутри глоссария найденного бренда
+    scored: list[tuple[float, Product, str]] = []
+    seen_pids: set[int] = set()
+    if detected_brand_key:
+        brand_candidates = [
+            p for p in all_active_products
+            if (glossary_by_pid.get(p.id) and glossary_by_pid[p.id].brand_key == detected_brand_key)
+        ]
+        scored = _score_candidates(brand_candidates)
+        seen_pids = {p.id for _s, p, _d in scored}
+
+    # Шаг 3: Если бренд не найден или кандидатов меньше limit — мягко дополняем фолбэком
+    if not scored:
+        scored = _score_candidates(all_active_products)
+    elif len(scored) < limit:
+        other_candidates = [p for p in all_active_products if p.id not in seen_pids]
+        extra = _score_candidates(other_candidates)
+        # Альтернативы других брендов никогда не перебивают точное совпадение по бренду
+        scored.extend(extra)
+
     default_curr = SettingsService.get("default_currency", "TMT")
     default_rate = SettingsService.get_default_exchange_rate()
-
-    scored: list[tuple[float, Product, str]] = []
-
-    for prod in all_active_products:
-        if category_id is not None and prod.category_id != category_id:
-            continue
-
-        cat_name = cat_map.get(prod.category_id, "")
-        prod_blob = " ".join(
-            part for part in (cat_name, prod.brand or "", prod.name or "", prod.model or "", prod.specification or "") if part
-        )
-        prod_norm = normalize_ocr_text(prod_blob)
-        _prod_model_disp, prod_model_key, prod_family = _extract_device_model(prod_norm)
-        prod_type, _ = _detect_accessory_type(prod_norm)
-
-        score = 0.0
-        reasons: list[str] = []
-
-        # 1. Выученные алиасы (самый сильный сигнал при совпадении коробки)
-        best_alias_sim = 0.0
-        best_alias_hits = 0
-        for al in aliases_by_product.get(prod.id, ()):
-            if al.normalized_text == parsed.normalized_text:
-                best_alias_sim = 1.0
-                best_alias_hits = max(best_alias_hits, al.hits or 1)
-                break
-            sim = _cosine_similarity(query_ngrams, _char_ngrams(al.normalized_text, 3))
-            if sim > best_alias_sim:
-                best_alias_sim = sim
-                best_alias_hits = al.hits or 1
-
-        has_strong_alias = best_alias_sim >= 0.90
-        if best_alias_sim >= 0.98:
-            # Если точно такой же алиас привязан к нескольким товарам — снижаем вес, чтобы показать все варианты
-            alias_pts = 72.0 if len(exact_alias_products) <= 1 else 46.0
-            score += alias_pts + min(8.0, best_alias_hits * 1.5)
-            reasons.append("Ýatda saklanan guty")
-        elif best_alias_sim >= 0.65:
-            score += 42.0 * best_alias_sim
-            reasons.append("Meňzeş guty")
-
-        # 2. Совпадение модели устройства (критично отличать 16 Pro от 16 Pro Max!)
-        if parsed.device_model_key:
-            if prod_model_key == parsed.device_model_key:
-                score += 42.0
-                reasons.append(f"Model: {parsed.device_model}")
-            elif prod_model_key and not has_strong_alias:
-                if parsed.device_family and prod_family == parsed.device_family:
-                    # Та же линейка, но другая модель/размер (например 16 Pro vs 16 Pro Max) — штраф
-                    score -= 22.0
-                else:
-                    # Совсем другая марка телефона (iPhone vs Samsung) — сильный штраф
-                    score -= 35.0
-
-        # 3. Тип аксессуара (ударник vs чехол vs кабель vs зарядка)
-        if parsed.accessory_type:
-            if prod_type == parsed.accessory_type:
-                score += 24.0
-                reasons.append(parsed.accessory_type_label)
-            elif prod_type and not has_strong_alias:
-                # Явный конфликт (на коробке 9D стекло, а карточка — чехол)
-                score -= 30.0
-
-        # 4. Бренд аксессуара (Blueo vs Remax vs Baseus...)
-        prod_brand_low = (prod.brand or "").strip().lower()
-        if parsed.brand:
-            b_low = parsed.brand.lower()
-            if prod_brand_low == b_low or b_low in prod_norm.split():
-                score += 24.0
-                reasons.append(f"Brend: {parsed.brand}")
-            elif prod_brand_low and prod_brand_low not in {"apple", "samsung", "xiaomi"}:
-                # На коробке явно указан другой бренд аксессуара
-                score -= 10.0
-
-        # 5. Совпадение фич/спецификации (20W, MagSafe, 9D, Privacy, 1m...)
-        if parsed.features:
-            matched_feats = [f for f in parsed.features if f.lower() in prod_norm]
-            if matched_feats:
-                score += min(16.0, len(matched_feats) * 6.0)
-                reasons.append(", ".join(matched_feats[:2]))
-
-        # 6. Символьное n-gram сходство + пересечение токенов (ловит OCR-опечатки и нестандартные названия)
-        ngram_sim = _cosine_similarity(query_ngrams, _char_ngrams(prod_norm, 3))
-        score += 22.0 * ngram_sim
-
-        prod_tokens = set(prod_norm.split())
-        if query_tokens and prod_tokens:
-            overlap = len(query_tokens & prod_tokens)
-            if overlap > 0:
-                score += min(14.0, overlap * 4.0)
-
-        # Минимальный порог релевантности
-        if score < 12.0:
-            continue
-
-        # Небольшой приоритет товарам, которые реально есть в наличии
-        if prod.stock_quantity > 0:
-            score += 4.0
-
-        detail = " • ".join(reasons[:3]) if reasons else "Tekst meňzeşligi"
-        scored.append((score, prod, detail))
 
     scored.sort(key=lambda item: (item[0], item[1].stock_quantity > 0, item[1].stock_quantity), reverse=True)
 

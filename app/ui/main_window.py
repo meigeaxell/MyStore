@@ -1,7 +1,8 @@
 
-from PySide6.QtCore import QPoint, QSettings, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSettings, QSize, Qt, QTimer
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
@@ -19,11 +20,13 @@ from sqlalchemy import select
 
 from app.config import APP_VERSION, BUNDLE_ROOT
 from app.database.engine import SessionLocal
+from app.models.category import Category
 from app.models.product import Product
 from app.models.sale import Sale
 from app.models.stock_item import StockItem
 from app.services.backup_service import BackupService
 from app.services.mobile_ws_server import MobileWebSocketServer
+from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.dashboard_page import DashboardPage
@@ -35,7 +38,7 @@ from app.ui.reports_page import ReportsPage
 from app.ui.sales_page import SalesPage
 from app.ui.settings_page import SettingsPage
 from app.ui.stock_page import StockPage
-from app.ui.widgets import make_button, show_toast
+from app.ui.widgets import make_button, money_str, show_toast
 
 NAV = [
     ("Harytlar", [
@@ -148,11 +151,54 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:
+        self._hide_top_search_popup()
+        if self.sales_page is not None:
+            self.sales_page._hide_live_search_popup()
         self.mobile_server.stop()
         qs = QSettings("MobileStore", "MobileStore")
         qs.setValue("main_window/geometry", self.saveGeometry())
         qs.setValue("main_window/last_page_index", self.pages.currentIndex())
         super().closeEvent(event)
+
+    def changeEvent(self, event) -> None:
+        if event.type() == QEvent.Type.WindowDeactivate:
+            self._hide_top_search_popup()
+            if getattr(self, "sales_page", None) is not None:
+                self.sales_page._hide_live_search_popup()
+        super().changeEvent(event)
+
+    def moveEvent(self, event) -> None:
+        self._hide_top_search_popup()
+        if getattr(self, "sales_page", None) is not None:
+            self.sales_page._hide_live_search_popup()
+        super().moveEvent(event)
+
+    def resizeEvent(self, event) -> None:
+        self._hide_top_search_popup()
+        if getattr(self, "sales_page", None) is not None:
+            self.sales_page._hide_live_search_popup()
+        super().resizeEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is getattr(self, "top_search", None):
+            if event.type() == QEvent.Type.FocusOut:
+                QTimer.singleShot(140, self._check_hide_top_search_popup)
+            elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self._hide_top_search_popup()
+        return super().eventFilter(obj, event)
+
+    def _check_hide_top_search_popup(self) -> None:
+        if not hasattr(self, "top_search_popup") or not self.top_search_popup.isVisible():
+            return
+        fw = QApplication.focusWidget()
+        if (
+            fw is self.top_search
+            or fw is self.top_search_popup
+            or (fw is not None and self.top_search_popup.isAncestorOf(fw))
+        ):
+            return
+        if not self.isActiveWindow() or not self.top_search.hasFocus():
+            self._hide_top_search_popup()
 
     def _register_pages(self) -> None:
         for index, button in enumerate(self.nav_buttons):
@@ -240,6 +286,9 @@ class MainWindow(QMainWindow):
         )
 
     def _switch_page(self, index: int) -> None:
+        self._hide_top_search_popup()
+        if self.sales_page is not None:
+            self.sales_page._hide_live_search_popup()
         self.pages.setCurrentIndex(index)
         if 0 <= index < len(self.nav_buttons):
             self.nav_buttons[index].setChecked(True)
@@ -296,6 +345,8 @@ class MainWindow(QMainWindow):
         self._open_quick_search(q)
 
     def _hide_top_search_popup(self) -> None:
+        if hasattr(self, "_top_search_timer") and self._top_search_timer is not None:
+            self._top_search_timer.stop()
         if hasattr(self, "top_search_popup") and self.top_search_popup is not None:
             self.top_search_popup.hide()
 
@@ -306,67 +357,141 @@ class MainWindow(QMainWindow):
         self._top_search_timer.start(180)
 
     def _run_top_live_search(self) -> None:
+        if not self.isActiveWindow() or not self.top_search.hasFocus():
+            self._hide_top_search_popup()
+            return
         q = self.top_search.text().strip()
         if len(q) < 2:
             self._hide_top_search_popup()
             return
+        words = [w for w in q.lower().split() if w]
+        if not words:
+            self._hide_top_search_popup()
+            return
+
+        default_curr = SettingsService.get("default_currency", "TMT")
+        default_rate = SettingsService.get_default_exchange_rate()
 
         self.top_search_popup.clear()
         with SessionLocal() as session:
-            prods = session.scalars(
-                select(Product)
-                .where(
-                    Product.is_active.is_(True),
-                    (Product.name.ilike(f"%{q}%"))
-                    | (Product.sku.ilike(f"%{q}%"))
-                    | (Product.barcode.ilike(f"%{q}%"))
-                    | (Product.brand.ilike(f"%{q}%"))
-                    | (Product.model.ilike(f"%{q}%")),
-                )
-                .order_by(Product.stock_quantity.desc(), Product.name.asc())
-                .limit(6)
+            in_stock_rows = session.scalars(
+                select(StockItem)
+                .where(StockItem.status == "in_stock")
+                .order_by(StockItem.id.desc())
             ).all()
-            for p in prods:
-                bc = f" • {p.barcode}" if p.barcode else ""
-                item = QListWidgetItem(f"📦 {p.name} ({p.sku}{bc}) — Skladda: {p.stock_quantity} sany")
+            latest_stock_by_prod: dict[int, StockItem] = {}
+            for st in in_stock_rows:
+                if st.product_id not in latest_stock_by_prod and st.unit_cost is not None:
+                    latest_stock_by_prod[st.product_id] = st
+
+            prod_rows = session.execute(
+                select(Product, Category.name)
+                .outerjoin(Category, Product.category_id == Category.id)
+                .where(Product.is_active.is_(True))
+                .order_by(Product.stock_quantity.desc(), Product.name.asc())
+            ).all()
+            prod_added = 0
+            for p, cat_name in prod_rows:
+                hay = " ".join(
+                    filter(
+                        None,
+                        [
+                            p.name,
+                            cat_name,
+                            p.brand,
+                            p.model,
+                            p.specification,
+                            p.barcode,
+                        ],
+                    )
+                ).lower()
+                if not all(w in hay for w in words):
+                    continue
+                cat_label = cat_name or "—"
+                bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
+                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=p.id,
+                    stock_item=latest_stock_by_prod.get(p.id),
+                    fallback_currency=default_curr,
+                    fallback_rate=default_rate,
+                )
+                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
+                item = QListWidgetItem(
+                    f"📦 {p.name}  •  {cat_label}  •  {bm}  •  Öz bahasy: {cost_str}  •  Skladda: {p.stock_quantity}"
+                )
                 item.setData(Qt.ItemDataRole.UserRole, {"kind": "product", "product_id": p.id, "imei": None})
                 self.top_search_popup.addItem(item)
+                prod_added += 1
+                if prod_added >= 6:
+                    break
 
-            imeis = session.execute(
-                select(StockItem, Product)
+            imei_rows = session.execute(
+                select(StockItem, Product, Category.name)
                 .join(Product, StockItem.product_id == Product.id)
-                .where(
-                    (StockItem.imei1.ilike(f"%{q}%"))
-                    | (StockItem.imei2.ilike(f"%{q}%"))
-                    | (StockItem.serial_number.ilike(f"%{q}%"))
-                )
+                .outerjoin(Category, Product.category_id == Category.id)
                 .order_by(StockItem.id.desc())
-                .limit(5)
             ).all()
-            for st, prod in imeis:
+            imei_added = 0
+            for st, prod, cat_name in imei_rows:
+                hay = " ".join(
+                    filter(
+                        None,
+                        [
+                            prod.name,
+                            cat_name,
+                            prod.brand,
+                            prod.model,
+                            prod.specification,
+                            prod.barcode,
+                            st.imei1,
+                            st.imei2,
+                            st.serial_number,
+                        ],
+                    )
+                ).lower()
+                if not all(w in hay for w in words):
+                    continue
+                cat_label = cat_name or "—"
+                bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
+                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
+                    session=session,
+                    product_id=prod.id,
+                    stock_item=st,
+                    fallback_currency=default_curr,
+                    fallback_rate=default_rate,
+                )
+                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
                 st_lbl = "Bar" if st.status == "in_stock" else "Satyldy"
-                item = QListWidgetItem(f"📱 {prod.name} • IMEI: {st.imei1} [{st_lbl}]")
+                item = QListWidgetItem(
+                    f"📱 {prod.name}  •  {cat_label}  •  {bm}  •  IMEI: {st.imei1} [{st_lbl}]  •  Öz bahasy: {cost_str}"
+                )
                 item.setData(
                     Qt.ItemDataRole.UserRole,
                     {"kind": "imei", "product_id": prod.id, "imei": st.imei1, "in_stock": st.status == "in_stock"},
                 )
                 self.top_search_popup.addItem(item)
+                imei_added += 1
+                if imei_added >= 5:
+                    break
 
-            sales = session.scalars(
-                select(Sale)
-                .where(
-                    (Sale.receipt_number.ilike(f"%{q}%"))
-                    | (Sale.customer_name.ilike(f"%{q}%"))
-                    | (Sale.customer_phone.ilike(f"%{q}%"))
-                )
-                .order_by(Sale.sale_date.desc())
-                .limit(4)
-            ).all()
+            sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc())).all()
+            sale_added = 0
             for s in sales:
+                hay = " ".join(
+                    filter(None, [s.receipt_number, s.customer_name, s.customer_phone])
+                ).lower()
+                if not all(w in hay for w in words):
+                    continue
                 cust = s.customer_name or "Bölek müşderi"
-                item = QListWidgetItem(f"🧾 Çek {s.receipt_number} • {cust} • {s.total_amount} {s.currency}")
+                item = QListWidgetItem(
+                    f"🧾 Çek {s.receipt_number} • {cust} • {money_str(s.total_amount)} {s.currency}"
+                )
                 item.setData(Qt.ItemDataRole.UserRole, {"kind": "sale", "sale_id": s.id})
                 self.top_search_popup.addItem(item)
+                sale_added += 1
+                if sale_added >= 4:
+                    break
 
         if self.top_search_popup.count() == 0:
             self._hide_top_search_popup()
@@ -374,7 +499,7 @@ class MainWindow(QMainWindow):
 
         pos = self.top_search.mapToGlobal(QPoint(0, self.top_search.height() + 2))
         self.top_search_popup.move(pos)
-        self.top_search_popup.setFixedWidth(max(440, self.top_search.width()))
+        self.top_search_popup.setFixedWidth(max(580, self.top_search.width()))
         h = min(320, self.top_search_popup.count() * 34 + 12)
         self.top_search_popup.setFixedHeight(h)
         self.top_search_popup.show()
@@ -418,9 +543,12 @@ class MainWindow(QMainWindow):
         self.top_search = QLineEdit()
         self.top_search.setObjectName("search")
         self.top_search.setClearButtonEnabled(True)
-        self.top_search.setPlaceholderText("Harytlar, ştrihkod, IMEI, müşderiler, çekler (Ctrl+K)…")
+        self.top_search.setPlaceholderText(
+            "Harytlar, kategoriýa, brend, model, ştrihkod, IMEI, müşderiler (Ctrl+K)…"
+        )
         self.top_search.returnPressed.connect(self._on_global_search)
         self.top_search.textChanged.connect(self._schedule_top_live_search)
+        self.top_search.installEventFilter(self)
         row.addWidget(self.top_search)
 
         self._top_search_timer = QTimer(self)

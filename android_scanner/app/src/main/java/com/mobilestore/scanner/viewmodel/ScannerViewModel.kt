@@ -14,6 +14,7 @@ import com.mobilestore.scanner.network.CategoryItem
 import com.mobilestore.scanner.network.CategoryListData
 import com.mobilestore.scanner.network.ConnectionState
 import com.mobilestore.scanner.network.ImeiCheckResultData
+import com.mobilestore.scanner.network.LocalWifiStatus
 import com.mobilestore.scanner.network.ProductCardData
 import com.mobilestore.scanner.network.ProductDetailsData
 import com.mobilestore.scanner.network.ScanMultipleData
@@ -55,6 +56,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     private val feedback = app.feedback
 
     val connectionState: StateFlow<ConnectionState> = ws.state
+    val wifiStatus: StateFlow<LocalWifiStatus> = app.wifiManager.status
 
     private val _serverConfig = MutableStateFlow(app.settings.load())
     val serverConfig: StateFlow<ServerConfig> = _serverConfig.asStateFlow()
@@ -133,8 +135,12 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
     val isCategoriesLoading: StateFlow<Boolean> = _isCategoriesLoading.asStateFlow()
 
     init {
-        if (_serverConfig.value.isConfigured) {
-            ws.connect(_serverConfig.value)
+        val cfg = _serverConfig.value
+        if (cfg.autoConnectWifiHub && cfg.wifiSsid.isNotBlank() && !app.wifiManager.status.value.hasWifiNetwork) {
+            app.wifiManager.connectToWifiHub(cfg.wifiSsid, cfg.wifiPassword)
+        }
+        if (cfg.isConfigured) {
+            ws.connect(cfg)
         }
         viewModelScope.launch {
             ensureDraftMetaExists()
@@ -160,6 +166,23 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         val updated = app.settings.save(host, port, pin, deviceName)
         _serverConfig.value = updated
         ws.connect(updated)
+    }
+
+    fun saveWifiHub(ssid: String, password: String, autoConnect: Boolean) {
+        _serverConfig.value = app.settings.saveWifiHub(ssid, password, autoConnect)
+    }
+
+    fun connectToWifiHub(ssid: String, password: String, autoConnect: Boolean) {
+        val updated = app.settings.saveWifiHub(ssid, password, autoConnect)
+        _serverConfig.value = updated
+        val (ok, msg) = app.wifiManager.connectToWifiHub(updated.wifiSsid, updated.wifiPassword)
+        if (!ok) {
+            showMessage(msg, isError = true)
+        }
+    }
+
+    fun releaseWifiHub() {
+        app.wifiManager.releaseDedicatedHub()
     }
 
     fun updateScanCooldown(cooldownMs: Long) {

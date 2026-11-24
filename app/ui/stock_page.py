@@ -1,20 +1,24 @@
 from datetime import datetime
 from decimal import Decimal
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor, QFont, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -60,6 +64,12 @@ STOCK_ITEM_STATUSES = [
     ("Satyldy (sold)", "sold"),
     ("Hasapdan çykaryldy (written_off)", "written_off"),
 ]
+
+ROLE_ITEM_TYPE = Qt.ItemDataRole.UserRole
+ROLE_PRODUCT_ID = Qt.ItemDataRole.UserRole + 1
+ROLE_PRODUCT_NAME = Qt.ItemDataRole.UserRole + 2
+ROLE_IS_ACTIVE = Qt.ItemDataRole.UserRole + 3
+ROLE_TOTAL_DEVICES = Qt.ItemDataRole.UserRole + 4
 
 
 class EditStockItemDialog(QDialog):
@@ -160,7 +170,8 @@ class EditStockItemDialog(QDialog):
         self.product_combo.clear()
         for p in products:
             suffix = " [ARHIW]" if not p.get("is_active", True) else ""
-            self.product_combo.addItem(f"{p['name']} ({p['sku']}){suffix}", p["id"])
+            cat_part = f" ({p['category']})" if p.get("category") else ""
+            self.product_combo.addItem(f"{p['name']}{cat_part}{suffix}", p["id"])
 
         with SessionLocal() as session:
             st = session.get(StockItem, self.stock_item_id)
@@ -665,7 +676,7 @@ class StockPage(QWidget):
         title_col.addWidget(subtitle)
         header.addLayout(title_col, 1)
 
-        self.count_label = QLabel("Harytlar: 0")
+        self.count_label = QLabel("Jemi: 0")
         self.count_label.setObjectName("mutedText")
         header.addWidget(self.count_label)
 
@@ -673,13 +684,17 @@ class StockPage(QWidget):
         cat_btn.clicked.connect(self._open_category_management)
         header.addWidget(cat_btn)
 
-        used_btn = make_button("+ Enjam goş (IMEI / B/U)")
+        used_btn = make_button("+ Enjam (IMEI)")
         used_btn.clicked.connect(lambda: self._open_device_intake(default_condition="used"))
         header.addWidget(used_btn)
 
-        add_prod_btn = make_button("+ Haryt goş", "primary")
+        add_prod_btn = make_button("+ Haryt goş (Ctrl+N)", "primary")
         add_prod_btn.clicked.connect(self._open_add_product)
         header.addWidget(add_prod_btn)
+
+        self.add_product_shortcut = QShortcut(QKeySequence("Ctrl+N"), self)
+        self.add_product_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.add_product_shortcut.activated.connect(self._open_add_product)
 
         refresh_btn = make_button("↻ Täzele")
         refresh_btn.clicked.connect(self._load_data)
@@ -722,20 +737,20 @@ class StockPage(QWidget):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText(
-            "Ady, brend, model, SKU, ştrihkod ýa-da enjamyň IMEI-si boýunça gözleg..."
+            "Ady, kategoriýa, brend, model, referens, ştrihkod ýa-da IMEI boýunça gözleg..."
         )
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(40)
         self.search_input.textChanged.connect(self._filter_products)
 
         self.category_filter = style_combo(QComboBox())
-        self.category_filter.setMinimumWidth(190)
+        self.category_filter.setMinimumWidth(175)
         self.category_filter.setMinimumHeight(40)
         self.category_filter.addItem("Ähli kategoriýalar", None)
         self.category_filter.currentIndexChanged.connect(self._filter_products)
 
         self.status_filter = style_combo(QComboBox())
-        self.status_filter.setMinimumWidth(205)
+        self.status_filter.setMinimumWidth(190)
         self.status_filter.setMinimumHeight(40)
         self.status_filter.addItem("Ähli işjeň harytlar", "all")
         self.status_filter.addItem("Skladda bar", "in_stock")
@@ -746,32 +761,60 @@ class StockPage(QWidget):
         self.status_filter.addItem("📦 Arhiwdäki harytlar", "archived")
         self.status_filter.currentIndexChanged.connect(self._filter_products)
 
+        self.group_combo = style_combo(QComboBox())
+        self.group_combo.setMinimumWidth(205)
+        self.group_combo.setMinimumHeight(40)
+        self.group_combo.addItem("Topar: Ady boýunça", "name")
+        self.group_combo.addItem("Topar: Brend boýunça", "brand")
+        self.group_combo.addItem("Topar: Kategoriýa boýunça", "category")
+        self.group_combo.addItem("Toparlama: Öçük", "none")
+        self._sync_group_combo()
+        self.group_combo.currentIndexChanged.connect(self._on_group_mode_changed)
+
         filters.addWidget(self.search_input, 1)
         filters.addWidget(self.category_filter)
         filters.addWidget(self.status_filter)
+        filters.addWidget(self.group_combo)
         layout.addLayout(filters)
 
-        # Harytlar we galyndylar tablisasy
-        self.table = QTableWidget(0, 8)
-        self.table.setHorizontalHeaderLabels([
-            "SKU",
+        # Harytlar we galyndylar agajy (toparlanan ýa-da adaty sanaw)
+        self.tree = QTreeWidget()
+        self.table = self.tree
+        self.tree.setColumnCount(7)
+        self.tree.setHeaderLabels([
             "Harydyň ady",
             "Kategoriýa",
             "Brend / Model",
+            "Öz bahasy",
             "Skladda",
             "IMEI (Täze / B/U)",
-            "Iň az galyndy",
             "Status",
         ])
-        configure_table(self.table, stretch_col=1, row_height=48)
-        self.table.cellDoubleClicked.connect(self._on_row_double_clicked)
-        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            sc = QShortcut(QKeySequence(key), self.table)
-            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
-            sc.activated.connect(self._open_selected_imei_dialog)
-        layout.addWidget(self.table, 1)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(False)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setAllColumnsShowFocus(True)
+        self.tree.setExpandsOnDoubleClick(False)
+        self.tree.setIndentation(22)
 
-        # Tablisanyň aşagyndaky amallar paneli
+        hdr = self.tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col, width in ((1, 125), (2, 145), (3, 105), (4, 85), (5, 130), (6, 100)):
+            hdr.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            self.tree.setColumnWidth(col, width)
+
+        self.tree.itemDoubleClicked.connect(self._on_item_double_clicked)
+        for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            sc = QShortcut(QKeySequence(key), self.tree)
+            sc.setContext(Qt.ShortcutContext.WidgetShortcut)
+            sc.activated.connect(self._on_item_activated)
+        layout.addWidget(self.tree, 1)
+
+        # Sanawyň aşagyndaky amallar paneli
         actions_bar = QHBoxLayout()
         actions_bar.setSpacing(10)
 
@@ -792,12 +835,28 @@ class StockPage(QWidget):
         actions_bar.addWidget(history_btn)
 
         actions_bar.addStretch()
-        hint = QLabel("Enjamlaryny (IMEI) we taryhyny açmak üçin harydy iki gezek ýa-da Enter basyň.")
+        hint = QLabel(
+            "Iki gezek / Enter: IMEI enjamda — enjamlar karty, sanly harytda — harydy üýtgetmek."
+        )
         hint.setObjectName("mutedText")
         actions_bar.addWidget(hint)
         layout.addLayout(actions_bar)
 
+    def _sync_group_combo(self) -> None:
+        mode = SettingsService.get_stock_group_mode()
+        self.group_combo.blockSignals(True)
+        idx = self.group_combo.findData(mode)
+        if idx >= 0:
+            self.group_combo.setCurrentIndex(idx)
+        self.group_combo.blockSignals(False)
+
+    def _on_group_mode_changed(self) -> None:
+        mode = self.group_combo.currentData() or "name"
+        SettingsService.set_stock_group_mode(mode)
+        self._filter_products()
+
     def _load_data(self) -> None:
+        self._sync_group_combo()
         self.products, self.categories = list_products_inventory(include_archived=True)
         self._update_statistics()
         self._update_category_filter()
@@ -834,6 +893,7 @@ class StockPage(QWidget):
 
     def _filter_products(self, *_args) -> None:
         search = self.search_input.text().strip().lower()
+        tokens = search.split() if search else []
         category_id = self.category_filter.currentData()
         status_mode = self.status_filter.currentData()
 
@@ -861,86 +921,195 @@ class StockPage(QWidget):
             if status_mode == "out_of_stock" and p["quantity"] != 0:
                 continue
 
-            if search:
+            if tokens:
                 searchable = " ".join([
-                    p["sku"],
-                    p.get("barcode", ""),
                     p["name"],
+                    p["category"],
                     p["brand"],
                     p["model"],
-                    p["category"],
+                    p.get("reference", ""),
+                    p.get("barcode", ""),
                     p["imei_search_blob"],
                 ]).lower()
-                if search not in searchable:
+                if not all(tok in searchable for tok in tokens):
                     continue
 
             filtered.append(p)
 
-        self._show_products(filtered)
+        self._show_products(filtered, has_search=bool(tokens))
 
-    def _show_products(self, products: list[dict]) -> None:
-        self.table.setRowCount(len(products))
-        self.count_label.setText(f"Görkezilen harytlar: {len(products)}")
+    def _make_product_tree_item(self, p: dict) -> QTreeWidgetItem:
+        brand_model = " / ".join(filter(None, [p["brand"], p["model"]])) or "—"
+        if p["total_devices"] > 0:
+            imei_summary = f"Täze: {p['new_devices']} • B/U: {p['used_devices']}"
+        else:
+            imei_summary = "San boýunça hasap"
 
-        for row, p in enumerate(products):
-            brand_model = " / ".join(filter(None, [p["brand"], p["model"]])) or "—"
-            if p["total_devices"] > 0:
-                imei_summary = f"Täze: {p['new_devices']} • B/U: {p['used_devices']}"
-            else:
-                imei_summary = "San boýunça hasap"
+        if not p.get("is_active", True):
+            status = "Arhiw"
+            color = theme.MUTED
+        elif p["quantity"] == 0:
+            status = "Skladda ýok"
+            color = theme.RED
+        elif p["minimum"] > 0 and p["quantity"] <= p["minimum"]:
+            status = "Az galyndy"
+            color = theme.ACCENT
+        else:
+            status = "Bar"
+            color = theme.GREEN
 
-            values = [
-                p["sku"],
-                p["name"],
-                p["category"],
-                brand_model,
-                f"{p['quantity']} sany",
-                imei_summary,
-                str(p["minimum"]),
-            ]
+        item = QTreeWidgetItem([
+            p["name"],
+            p["category"],
+            brand_model,
+            p.get("cost_display", "—"),
+            f"{p['quantity']} sany",
+            imei_summary,
+            status,
+        ])
+        for col in (3, 4, 5, 6):
+            item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
 
-            for col, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if col in (0, 4, 5, 6):
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table.setItem(row, col, item)
+        status_font = QFont(self.tree.font())
+        status_font.setBold(True)
+        item.setFont(6, status_font)
+        item.setForeground(6, QColor(color))
+        item.setSizeHint(0, QSize(0, 42))
 
-            if not p.get("is_active", True):
-                status = "Arhiw"
-                color = theme.MUTED
-            elif p["quantity"] == 0:
-                status = "Skladda ýok"
-                color = theme.RED
-            elif p["minimum"] > 0 and p["quantity"] <= p["minimum"]:
-                status = "Az galyndy"
-                color = theme.ACCENT
-            else:
-                status = "Bar"
-                color = theme.GREEN
+        tooltip_parts = []
+        if p.get("reference"):
+            tooltip_parts.append(f"Referens (OCR): {p['reference']}")
+        if p.get("barcode"):
+            tooltip_parts.append(f"Ştrihkod: {p['barcode']}")
+        if p.get("minimum"):
+            tooltip_parts.append(f"Iň az galyndy: {p['minimum']} sany")
+        if tooltip_parts:
+            tip = "\n".join(tooltip_parts)
+            for col in range(7):
+                item.setToolTip(col, tip)
 
-            status_item = QTableWidgetItem(status)
-            status_item.setForeground(QColor("white"))
-            status_item.setBackground(QColor(color))
-            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 7, status_item)
+        item.setData(0, ROLE_ITEM_TYPE, "product")
+        item.setData(0, ROLE_PRODUCT_ID, p["id"])
+        item.setData(0, ROLE_PRODUCT_NAME, p["name"])
+        item.setData(0, ROLE_IS_ACTIVE, bool(p.get("is_active", True)))
+        item.setData(0, ROLE_TOTAL_DEVICES, int(p.get("total_devices", 0)))
+        return item
 
-            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, p["id"])
-            self.table.item(row, 1).setData(Qt.ItemDataRole.UserRole, p["name"])
-            self.table.item(row, 7).setData(Qt.ItemDataRole.UserRole, p.get("is_active", True))
+    def _show_products(self, products: list[dict], has_search: bool = False) -> None:
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self.tree.clear()
+            group_mode = self.group_combo.currentData() or "name"
 
-    def _selected_product(self) -> tuple[int, str] | None:
-        row = self.table.currentRow()
-        if row < 0:
-            show_toast(self, "Bu amaly ýerine ýetirmek üçin tablisadan haryt saýlaň.", kind="info")
+            if group_mode == "none":
+                self.tree.setRootIsDecorated(False)
+                self.tree.setIndentation(0)
+                for p in products:
+                    self.tree.addTopLevelItem(self._make_product_tree_item(p))
+                self.count_label.setText(f"Jemi: {len(products)}")
+                return
+
+            self.tree.setRootIsDecorated(True)
+            self.tree.setIndentation(22)
+
+            groups: dict[str, tuple[str, list[dict]]] = {}
+            for p in products:
+                if group_mode == "brand":
+                    raw = (p.get("brand") or "").strip()
+                    key = raw.lower() if raw else "\uffff__no_brand__"
+                    display = raw if raw else "Brendsiz"
+                elif group_mode == "category":
+                    raw = (p.get("category") or "").strip()
+                    key = raw.lower() if raw else "\uffff__no_cat__"
+                    display = raw if raw else "Kategoriýasyz"
+                else:
+                    raw = (p.get("name") or "").strip()
+                    key = raw.lower() if raw else "\uffff__unnamed__"
+                    display = raw if raw else "—"
+
+                if key not in groups:
+                    groups[key] = (display, [])
+                groups[key][1].append(p)
+
+            sorted_groups = sorted(groups.items(), key=lambda kv: kv[0])
+
+            group_font = QFont(self.tree.font())
+            group_font.setBold(True)
+            group_bg = QColor("#EEF2F6")
+            group_fg = QColor(theme.NAVY)
+
+            for _key, (label, items) in sorted_groups:
+                total_qty = sum(int(x.get("quantity", 0)) for x in items)
+                total_devs = sum(int(x.get("total_devices", 0)) for x in items)
+                g_new = sum(int(x.get("new_devices", 0)) for x in items)
+                g_used = sum(int(x.get("used_devices", 0)) for x in items)
+
+                if group_mode == "name":
+                    cats = list(dict.fromkeys(x["category"] for x in items if x.get("category")))
+                    if len(cats) > 3:
+                        cats_str = f"{', '.join(cats[:3])} +{len(cats) - 3}"
+                    else:
+                        cats_str = ", ".join(cats)
+                    header_title = f"📁 {label}"
+                    sub_col = f"{len(items)} görnüş"
+                    meta_col = cats_str
+                elif group_mode == "brand":
+                    header_title = f"🏷 {label}"
+                    sub_col = f"{len(items)} haryt"
+                    meta_col = ""
+                else:
+                    header_title = f"📂 {label}"
+                    sub_col = f"{len(items)} haryt"
+                    meta_col = ""
+
+                imei_col = f"Täze: {g_new} • B/U: {g_used}" if total_devs > 0 else ""
+
+                group_item = QTreeWidgetItem([
+                    header_title,
+                    sub_col,
+                    meta_col,
+                    "",
+                    f"{total_qty} sany",
+                    imei_col,
+                    "",
+                ])
+                group_item.setData(0, ROLE_ITEM_TYPE, "group")
+                group_item.setSizeHint(0, QSize(0, 38))
+                for col in range(7):
+                    group_item.setFont(col, group_font)
+                    group_item.setBackground(col, group_bg)
+                    group_item.setForeground(col, group_fg)
+                for col in (4, 5):
+                    group_item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+
+                for prod in items:
+                    group_item.addChild(self._make_product_tree_item(prod))
+
+                self.tree.addTopLevelItem(group_item)
+
+            if has_search or len(sorted_groups) <= 40:
+                self.tree.expandAll()
+
+            self.count_label.setText(f"Jemi: {len(products)} ({len(sorted_groups)} topar)")
+        finally:
+            self.tree.setUpdatesEnabled(True)
+
+    def _selected_product_meta(self, silent: bool = False) -> dict | None:
+        item = self.tree.currentItem()
+        if item is None or item.data(0, ROLE_ITEM_TYPE) != "product":
+            if not silent:
+                show_toast(
+                    self,
+                    "Bu amaly ýerine ýetirmek üçin sanawdan haryt setirini saýlaň.",
+                    kind="info",
+                )
             return None
-        id_item = self.table.item(row, 0)
-        name_item = self.table.item(row, 1)
-        if id_item is None or name_item is None:
-            return None
-        return (
-            id_item.data(Qt.ItemDataRole.UserRole),
-            name_item.data(Qt.ItemDataRole.UserRole) or name_item.text(),
-        )
+        return {
+            "id": item.data(0, ROLE_PRODUCT_ID),
+            "name": item.data(0, ROLE_PRODUCT_NAME) or item.text(0),
+            "is_active": bool(item.data(0, ROLE_IS_ACTIVE)),
+            "total_devices": int(item.data(0, ROLE_TOTAL_DEVICES) or 0),
+        }
 
     def _open_add_product(self) -> None:
         dlg = ProductDialog(self)
@@ -948,22 +1117,20 @@ class StockPage(QWidget):
             self._load_data()
 
     def _edit_selected_product(self) -> None:
-        sel = self._selected_product()
-        if sel is None:
+        meta = self._selected_product_meta()
+        if meta is None:
             return
-        product_id, _name = sel
-        dlg = ProductDialog(self, product_id=product_id)
+        dlg = ProductDialog(self, product_id=meta["id"])
         if dlg.exec():
             self._load_data()
 
     def _toggle_archive_selected_product(self) -> None:
-        sel = self._selected_product()
-        if sel is None:
+        meta = self._selected_product_meta()
+        if meta is None:
             return
-        product_id, prod_name = sel
-        row = self.table.currentRow()
-        status_item = self.table.item(row, 7)
-        is_active = bool(status_item.data(Qt.ItemDataRole.UserRole)) if status_item else True
+        product_id = meta["id"]
+        prod_name = meta["name"]
+        is_active = meta["is_active"]
 
         if not is_active:
             try:
@@ -1001,12 +1168,9 @@ class StockPage(QWidget):
         self._load_data()
 
     def _open_device_intake(self, default_condition: str = "used") -> None:
-        row = self.table.currentRow()
-        prod_id = None
-        prod_name = ""
-        if row >= 0 and self.table.item(row, 0) is not None:
-            prod_id = self.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-            prod_name = self.table.item(row, 1).text()
+        meta = self._selected_product_meta(silent=True)
+        prod_id = meta["id"] if meta is not None else None
+        prod_name = meta["name"] if meta is not None else ""
         dlg = StockItemDialog(
             product_id=prod_id,
             product_name=prod_name,
@@ -1017,31 +1181,47 @@ class StockPage(QWidget):
         self._load_data()
 
     def _open_selected_imei_dialog(self) -> None:
-        sel = self._selected_product()
-        if sel is None:
+        meta = self._selected_product_meta()
+        if meta is None:
             return
-        prod_id, prod_name = sel
-        dlg = StockItemDialog(product_id=prod_id, product_name=prod_name, parent=self)
+        dlg = StockItemDialog(product_id=meta["id"], product_name=meta["name"], parent=self)
         dlg.exec()
         self._load_data()
 
     def _open_selected_product_history(self) -> None:
         from app.ui.reports_page import ProductHistoryDialog
 
-        sel = self._selected_product()
-        if sel is None:
+        meta = self._selected_product_meta()
+        if meta is None:
             return
-        prod_id, prod_name = sel
-        dlg = ProductHistoryDialog(prod_id, prod_name, self)
+        dlg = ProductHistoryDialog(meta["id"], meta["name"], self)
         dlg.exec()
 
-    def _on_row_double_clicked(self, row: int, _col: int) -> None:
-        id_item = self.table.item(row, 0)
-        name_item = self.table.item(row, 1)
-        if id_item is None or name_item is None:
+    def _activate_tree_item(self, item: QTreeWidgetItem | None) -> None:
+        if item is None:
             return
-        prod_id = id_item.data(Qt.ItemDataRole.UserRole)
-        prod_name = name_item.data(Qt.ItemDataRole.UserRole) or name_item.text()
-        dlg = StockItemDialog(product_id=prod_id, product_name=prod_name, parent=self)
-        dlg.exec()
-        self._load_data()
+        item_type = item.data(0, ROLE_ITEM_TYPE)
+        if item_type == "group":
+            item.setExpanded(not item.isExpanded())
+            return
+        if item_type != "product":
+            return
+
+        prod_id = item.data(0, ROLE_PRODUCT_ID)
+        prod_name = item.data(0, ROLE_PRODUCT_NAME) or item.text(0)
+        total_devices = int(item.data(0, ROLE_TOTAL_DEVICES) or 0)
+
+        if total_devices > 0:
+            dlg = StockItemDialog(product_id=prod_id, product_name=prod_name, parent=self)
+            dlg.exec()
+            self._load_data()
+        else:
+            dlg = ProductDialog(self, product_id=prod_id)
+            if dlg.exec():
+                self._load_data()
+
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
+        self._activate_tree_item(item)
+
+    def _on_item_activated(self) -> None:
+        self._activate_tree_item(self.tree.currentItem())

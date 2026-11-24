@@ -1,12 +1,15 @@
 package com.mobilestore.scanner.scanner
 
 import android.annotation.SuppressLint
+import android.graphics.Rect
+import android.graphics.RectF
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.atomic.AtomicBoolean
@@ -65,6 +68,9 @@ data class ScanBundle(
 class BarcodeAndOcrAnalyzer(
     private val isPaused: () -> Boolean,
     private val enableOcr: () -> Boolean,
+    private val previewSizeProvider: () -> Pair<Int, Int> = { 0 to 0 },
+    private val boxWidthFraction: Float = SCAN_BOX_WIDTH_FRACTION,
+    private val boxHeightFraction: Float = SCAN_BOX_HEIGHT_FRACTION,
     private val burstWindowMs: Long = 650L,
     private val cooldownMsProvider: () -> Long,
     private val onCooldownStarted: (cooldownUntilMs: Long) -> Unit,
@@ -72,6 +78,11 @@ class BarcodeAndOcrAnalyzer(
     private val onDetected: (ScanBundle) -> Unit,
     private val onBoxTextCaptured: ((String) -> Unit)? = null,
 ) : ImageAnalysis.Analyzer {
+
+    companion object {
+        const val SCAN_BOX_WIDTH_FRACTION = 0.82f
+        const val SCAN_BOX_HEIGHT_FRACTION = 0.36f
+    }
 
     private val barcodeScanner = BarcodeScanning.getClient(
         BarcodeScannerOptions.Builder()
@@ -166,14 +177,20 @@ class BarcodeAndOcrAnalyzer(
             return
         }
 
-        val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+        val rotation = imageProxy.imageInfo.rotationDegrees
+        val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
+        val roiRect = computeRoiRect(
+            rawWidth = imageProxy.width,
+            rawHeight = imageProxy.height,
+            rotationDegrees = rotation,
+        )
         frameCounter += 1
 
-        // Режим захвата полного текста коробки аксессуара (2 кадра для защиты от бликов)
+        // Режим захвата текста коробки аксессуара строго внутри зелёной рамки (2 кадра для защиты от бликов)
         if (wantsBoxCapture) {
             textRecognizer.process(inputImage)
                 .addOnSuccessListener { visionText ->
-                    val lines = visionText.text
+                    val lines = extractTextInsideRoi(visionText, roiRect)
                         .lines()
                         .map { it.trim() }
                         .filter { it.length >= 2 }
@@ -213,8 +230,9 @@ class BarcodeAndOcrAnalyzer(
 
         barcodeScanner.process(inputImage)
             .addOnSuccessListener { barcodes ->
+                // Строгая фильтрация: принимаем ТОЛЬКО штрихкоды внутри зелёной рамки!
                 val sortedBarcodes = barcodes
-                    .filter { !it.rawValue.isNullOrBlank() }
+                    .filter { !it.rawValue.isNullOrBlank() && isInsideRoi(it.boundingBox, roiRect) }
                     .sortedBy { it.boundingBox?.top ?: Int.MAX_VALUE }
 
                 for (bc in sortedBarcodes) {
@@ -231,7 +249,10 @@ class BarcodeAndOcrAnalyzer(
                 if (shouldRunOcr) {
                     textRecognizer.process(inputImage)
                         .addOnSuccessListener { visionText ->
-                            ingestOcrText(visionText.text, hasActiveBurst = burstStartedAt > 0L)
+                            val roiText = extractTextInsideRoi(visionText, roiRect)
+                            if (roiText.isNotBlank()) {
+                                ingestOcrText(roiText, hasActiveBurst = burstStartedAt > 0L)
+                            }
                             maybeEmitBurst()
                         }
                         .addOnCompleteListener {
@@ -245,6 +266,63 @@ class BarcodeAndOcrAnalyzer(
             .addOnFailureListener {
                 finishFrame(imageProxy)
             }
+    }
+
+    /**
+     * Точно проецирует зелёный прямоугольник на PreviewView (ScaleType.FILL_CENTER)
+     * в координаты повёрнутого InputImage (в пикселях).
+     */
+    private fun computeRoiRect(
+        rawWidth: Int,
+        rawHeight: Int,
+        rotationDegrees: Int,
+    ): RectF {
+        val isSwapped = rotationDegrees == 90 || rotationDegrees == 270
+        val imgW = (if (isSwapped) rawHeight else rawWidth).toFloat()
+        val imgH = (if (isSwapped) rawWidth else rawHeight).toFloat()
+
+        val (viewWInt, viewHInt) = previewSizeProvider()
+        val visibleW: Float
+        val visibleH: Float
+        if (viewWInt > 0 && viewHInt > 0) {
+            val viewW = viewWInt.toFloat()
+            val viewH = viewHInt.toFloat()
+            val scale = max(viewW / imgW, viewH / imgH)
+            visibleW = viewW / scale
+            visibleH = viewH / scale
+        } else {
+            visibleW = imgW
+            visibleH = imgH
+        }
+
+        val cropLeft = (imgW - visibleW) / 2f
+        val cropTop = (imgH - visibleH) / 2f
+
+        val roiW = visibleW * boxWidthFraction
+        val roiH = visibleH * boxHeightFraction
+        val left = cropLeft + (visibleW - roiW) / 2f
+        val top = cropTop + (visibleH - roiH) / 2f
+        return RectF(left, top, left + roiW, top + roiH)
+    }
+
+    private fun isInsideRoi(box: Rect?, roi: RectF): Boolean {
+        if (box == null) return false
+        val cx = box.exactCenterX()
+        val cy = box.exactCenterY()
+        return cx >= roi.left && cx <= roi.right && cy >= roi.top && cy <= roi.bottom
+    }
+
+    private fun extractTextInsideRoi(visionText: Text, roi: RectF): String {
+        val out = mutableListOf<String>()
+        for (block in visionText.textBlocks) {
+            for (line in block.lines) {
+                if (isInsideRoi(line.boundingBox, roi)) {
+                    val t = line.text.trim()
+                    if (t.isNotEmpty()) out.add(t)
+                }
+            }
+        }
+        return out.joinToString("\n")
     }
 
     private fun ingestBarcode(bc: Barcode) {
