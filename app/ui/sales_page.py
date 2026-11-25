@@ -377,28 +377,24 @@ class SaleDetailsDialog(QDialog):
                     self.payments_table.setItem(idx, c, cell)
 
             customer_debt = SalesService.get_customer_debt(session, sale)
-            store_debt = SalesService.get_store_debt_to_customer(session, sale)
             paid_amt = SalesService.get_sale_paid_amount(session, sale)
 
             if sale.status == "cancelled":
-                self.status_label.setText("Status: Ýatyryldy")
+                self.status_label.setText("Status: Ýatyryldy (pul kassadan yzyna gaýtaryldy)")
                 self.status_label.setStyleSheet(
                     "font-weight: 700; color: #737B86; background: #F0F1F3; padding: 8px 12px; border-radius: 8px;"
                 )
-                self.debt_label.setText(
-                    f"Dükanyň müşderä bergisi: {money_str(store_debt)} {sale.currency}"
-                )
-                self.debt_label.setStyleSheet(
-                    f"font-size: 15pt; font-weight: 700; color: {theme.RED if store_debt > 0 else theme.GREEN};"
-                )
+                self.debt_label.setText("")
+                self.debt_label.hide()
                 c_date = sale.cancelled_at.strftime("%d.%m.%Y %H:%M") if sale.cancelled_at else "—"
                 self.cancel_info_label.setText(
                     f"Ýatyrylan senesi: {c_date}   |   Sebäbi: {sale.cancellation_reason or '—'}"
                 )
                 self.pay_debt_section.hide()
                 self.cancel_sale_btn.hide()
-                self.settle_store_debt_section.setVisible(store_debt > Decimal("0.00"))
+                self.settle_store_debt_section.hide()
             else:
+                self.debt_label.show()
                 self.status_label.setText(
                     "Status: Doly tölendi"
                     if customer_debt == Decimal("0.00")
@@ -469,7 +465,7 @@ class SaleDetailsDialog(QDialog):
             self,
             "Ýatyrmagy tassyklamak",
             "Satyş çekini ýatyrmalymy?\n\n"
-            "Harytlar sklada gaýdyp geler. Tölenmedik bergi nollanar.",
+            "Harytlar sklada gaýdyp geler, tölenen pul bolsa kassadan yzyna gaýtarylar.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -480,9 +476,9 @@ class SaleDetailsDialog(QDialog):
                 SalesService.cancel_sale(session, self.sale_id, reason)
                 session.commit()
             self._load_data()
-            show_toast(self, "Satyş üstünlikli ýatyryldy.", kind="success")
+            show_toast(self, "Satyş ýatyryldy we pul kassadan yzyna gaýtaryldy.", kind="success")
         except (ValueError, TypeError, SQLAlchemyError) as e:
-            QMessageBox.warning(self, "Ýalňyşlyk", str(e))
+            QMessageBox.warning(self, "Duýduryş", str(e))
 
 
 class SalesPage(QWidget):
@@ -1020,12 +1016,7 @@ class SalesPage(QWidget):
             for s in sales:
                 date_str = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else "—"
                 if s.status == "cancelled":
-                    store_debt = SalesService.get_store_debt_to_customer(session, s)
-                    status_text = (
-                        f"Ýatyryldy (dükanyň bergisi: {money_str(store_debt)})"
-                        if store_debt > 0
-                        else "Ýatyryldy"
-                    )
+                    status_text = "Ýatyryldy"
                     status_color = theme.RED
                 else:
                     cust_debt = SalesService.get_customer_debt(session, s)
@@ -1928,13 +1919,23 @@ class SalesPage(QWidget):
         reason, ok = QInputDialog.getText(self, "Çeki ýatyrmak", "Ýatyrmagyň sebäbi:")
         if not ok or not reason.strip():
             return
+        confirm = QMessageBox.question(
+            self,
+            "Ýatyrmagy tassyklamak",
+            "Satyş çekini ýatyrmalymy?\n\n"
+            "Harytlar sklada gaýdyp geler, tölenen pul bolsa kassadan yzyna gaýtarylar.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
 
         with SessionLocal() as session:
             try:
                 SalesService.cancel_sale(session, sid, reason)
                 session.commit()
                 self.refresh_data()
-                show_toast(self, "Satyş üstünlikli ýatyryldy.", kind="success")
+                show_toast(self, "Satyş ýatyryldy we pul kassadan yzyna gaýtaryldy.", kind="success")
             except (ValueError, TypeError, KeyError, SQLAlchemyError) as e:
                 session.rollback()
-                QMessageBox.critical(self, "Ýalňyşlyk", str(e))
+                QMessageBox.warning(self, "Duýduryş", str(e))

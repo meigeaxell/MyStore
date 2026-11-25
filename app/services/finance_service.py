@@ -691,7 +691,7 @@ class FinanceService:
                 amount=debt,
                 exchange_rate=rate,
                 cash_register_id=None,
-                payment_type="payment",
+                payment_type="write_off",
                 description=desc[:255],
             )
         )

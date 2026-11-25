@@ -68,9 +68,14 @@ class CashService:
         if transaction_type == "income":
             register.balance = _money(Decimal(str(register.balance)) + delta)
         elif transaction_type in ("expense", "refund"):
-            new_balance = Decimal(str(register.balance)) - delta
+            current_bal = Decimal(str(register.balance))
+            new_balance = current_bal - delta
             if new_balance < 0:
-                raise ValueError("Kassada ýeterlik pul ýok.")
+                raise ValueError(
+                    f"{register.currency} kassasynda ýeterlik pul ýok "
+                    f"(bar: {_money(current_bal)} {register.currency}, "
+                    f"gerek: {delta} {register.currency})."
+                )
             register.balance = _money(new_balance)
 
         tx = CashTransaction(

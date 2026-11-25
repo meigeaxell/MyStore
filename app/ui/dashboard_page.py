@@ -21,12 +21,16 @@ from sqlalchemy import select
 
 from app.database.engine import SessionLocal
 from app.models.device_exchange import DeviceExchange
+from app.models.product import Product
 from app.models.purchase import Purchase
+from app.models.purchase_item import PurchaseItem
 from app.models.sale import Sale
+from app.models.sale_item import SaleItem
 from app.models.stock_item import StockItem
 from app.repositories.product_repository import get_low_stock_products
 from app.services.finance_service import FinanceService
 from app.services.report_service import ReportService
+from app.services.sales_service import _convert_currency
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.widgets import (
@@ -47,12 +51,18 @@ MONTH_NAMES_FULL = [
 WEEKDAY_SHORT = ["Duş", "Siş", "Çar", "Pen", "Ann", "Şen", "Ýek"]
 
 RANGE_CONFIG = {
-    "1G": ("günlük", "Şu günki satyş we alyş dinamikasy (sagat boýunça)"),
-    "1H": ("hepdelik", "7 günlük satyş we alyş dinamikasy"),
-    "1A": ("aýlyk", "Şu aýyň satyş we alyş dinamikasy (gün boýunça)"),
-    "6A": ("6 aýlyk", "6 aýlyk satyş we alyş dinamikasy"),
-    "1Ý": ("ýyllyk", "Ýyllyk satyş we alyş dinamikasy (aý boýunça)"),
+    "1G": ("günlük", "Şu günki dinamika"),
+    "1H": ("hepdelik", "7 günlük dinamika"),
+    "1A": ("aýlyk", "Şu aýyň dinamikasy"),
+    "6A": ("6 aýlyk", "6 aýlyk dinamika"),
+    "1Ý": ("ýyllyk", "Ýyllyk dinamika"),
 }
+
+CHART_ITEM_FILTERS = [
+    ("all", "Ählisi"),
+    ("imei", "IMEI"),
+    ("piece", "Ştuk"),
+]
 
 
 def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
@@ -69,6 +79,7 @@ class DashboardPage(QScrollArea):
         super().__init__()
         self.setWidgetResizable(True)
         self.current_range = "1A"
+        self.chart_item_filter = "all"
         self.low_stock_products = []
         self._build_ui()
         self.refresh_data()
@@ -84,6 +95,12 @@ class DashboardPage(QScrollArea):
     def _set_time_range(self, range_key: str) -> None:
         if range_key in RANGE_CONFIG and range_key != self.current_range:
             self.current_range = range_key
+            self.refresh_data()
+
+    def _set_chart_item_filter(self, filter_key: str) -> None:
+        valid = {k for k, _ in CHART_ITEM_FILTERS}
+        if filter_key in valid and filter_key != self.chart_item_filter:
+            self.chart_item_filter = filter_key
             self.refresh_data()
 
     def refresh_data(self) -> None:
@@ -257,47 +274,151 @@ class DashboardPage(QScrollArea):
 
             pur_usd = Decimal("0.00")
             pur_tmt = Decimal("0.00")
+            active_pur_ids: list[int] = []
+            pur_by_id: dict[int, Purchase] = {}
             for p in purchases_all:
                 if p.status == "active" and p.purchase_date and range_start <= p.purchase_date <= range_end:
                     amt = Decimal(str(p.total_amount))
-                    rate = Decimal(str(p.exchange_rate or 19.5))
                     if p.currency == "USD":
                         pur_usd += amt
                     elif p.currency == "TMT":
                         pur_tmt += amt
+                    active_pur_ids.append(p.id)
+                    pur_by_id[p.id] = p
 
-                    b_idx = matcher(p.purchase_date)
-                    if b_idx is not None:
-                        if p.currency == "USD":
-                            buckets[b_idx]["purchases_usd"] += amt
-                            buckets[b_idx]["purchases_bar"] += float(amt * rate)
-                        else:
-                            buckets[b_idx]["purchases_tmt"] += amt
-                            buckets[b_idx]["purchases_bar"] += float(amt)
-
+            active_sale_ids: list[int] = []
+            sale_by_id: dict[int, Sale] = {}
             for s in sales_all:
                 if s.status != "cancelled" and s.sale_date and range_start <= s.sale_date <= range_end:
-                    b_idx = matcher(s.sale_date)
-                    if b_idx is not None:
-                        amt = Decimal(str(s.total_amount))
-                        rate = Decimal(str(s.exchange_rate or 19.5))
-                        buckets[b_idx]["receipts_count"] += 1
-                        if s.currency == "USD":
-                            buckets[b_idx]["sales_usd"] += amt
-                            buckets[b_idx]["sales_bar"] += float(amt * rate)
-                        else:
-                            buckets[b_idx]["sales_tmt"] += amt
-                            buckets[b_idx]["sales_bar"] += float(amt)
+                    active_sale_ids.append(s.id)
+                    sale_by_id[s.id] = s
 
-            for row in profit_period["rows"]:
-                s_date = row["sale_date"]
-                if s_date and range_start <= s_date <= range_end:
-                    b_idx = matcher(s_date)
-                    if b_idx is not None:
-                        if row["currency"] == "USD":
-                            buckets[b_idx]["profit_usd"] += Decimal(str(row["gross_profit"]))
-                        else:
-                            buckets[b_idx]["profit_tmt"] += Decimal(str(row["gross_profit"]))
+            # Построчный расчёт диаграммы с учётом тумблера: Ählisi / IMEI / Ştuk
+            phone_unit_ids = set(
+                session.scalars(select(Product.id).where(Product.is_phone_unit.is_(True))).all()
+            )
+            chart_mode = self.chart_item_filter
+            chart_pur_usd = Decimal("0.00")
+            chart_pur_tmt = Decimal("0.00")
+            chart_sal_usd = Decimal("0.00")
+            chart_sal_tmt = Decimal("0.00")
+            chart_prof_usd = Decimal("0.00")
+            chart_prof_tmt = Decimal("0.00")
+
+            if active_pur_ids:
+                pur_items = session.scalars(
+                    select(PurchaseItem).where(PurchaseItem.purchase_id.in_(active_pur_ids))
+                ).all()
+                pur_stock_counts: dict[tuple[int, int], int] = {}
+                linked_sts = session.execute(
+                    select(StockItem.purchase_id, StockItem.product_id)
+                    .where(StockItem.purchase_id.in_(active_pur_ids))
+                ).all()
+                for pid_k, prod_k in linked_sts:
+                    if pid_k is not None:
+                        key = (int(pid_k), int(prod_k))
+                        pur_stock_counts[key] = pur_stock_counts.get(key, 0) + 1
+
+                # Отслеживаем остаток IMEI-единиц, если в одной закупке несколько строк с одним product_id
+                remaining_imei_counts = dict(pur_stock_counts)
+                for pi in pur_items:
+                    pur = pur_by_id.get(pi.purchase_id)
+                    if pur is None or pur.purchase_date is None:
+                        continue
+                    b_idx = matcher(pur.purchase_date)
+                    if b_idx is None:
+                        continue
+
+                    qty_total = int(pi.quantity or 0)
+                    if qty_total <= 0:
+                        continue
+                    if pi.product_id in phone_unit_ids:
+                        imei_qty = qty_total
+                    else:
+                        key = (int(pi.purchase_id), int(pi.product_id))
+                        avail_imei = remaining_imei_counts.get(key, 0)
+                        imei_qty = min(qty_total, avail_imei)
+                        if imei_qty > 0:
+                            remaining_imei_counts[key] = avail_imei - imei_qty
+                    piece_qty = max(0, qty_total - imei_qty)
+
+                    if chart_mode == "imei":
+                        eff_qty = imei_qty
+                    elif chart_mode == "piece":
+                        eff_qty = piece_qty
+                    else:
+                        eff_qty = qty_total
+
+                    if eff_qty <= 0:
+                        continue
+
+                    line_amt = (Decimal(str(pi.unit_cost)) * eff_qty).quantize(Decimal("0.01"))
+                    p_rate = Decimal(str(pur.exchange_rate or 19.5))
+                    if pur.currency == "USD":
+                        chart_pur_usd += line_amt
+                        buckets[b_idx]["purchases_usd"] += line_amt
+                        buckets[b_idx]["purchases_bar"] += float(line_amt * p_rate)
+                    else:
+                        chart_pur_tmt += line_amt
+                        buckets[b_idx]["purchases_tmt"] += line_amt
+                        buckets[b_idx]["purchases_bar"] += float(line_amt)
+
+            if active_sale_ids:
+                s_items = session.scalars(
+                    select(SaleItem).where(SaleItem.sale_id.in_(active_sale_ids))
+                ).all()
+                bucket_receipt_sets: list[set[int]] = [set() for _ in buckets]
+                for si in s_items:
+                    sale = sale_by_id.get(si.sale_id)
+                    if sale is None or sale.sale_date is None:
+                        continue
+                    b_idx = matcher(sale.sale_date)
+                    if b_idx is None:
+                        continue
+
+                    is_imei_item = bool(
+                        (si.imei or "").strip()
+                        or si.stock_item_id is not None
+                        or si.product_id in phone_unit_ids
+                    )
+                    if chart_mode == "imei" and not is_imei_item:
+                        continue
+                    if chart_mode == "piece" and is_imei_item:
+                        continue
+
+                    s_rate = Decimal(str(sale.exchange_rate or 19.5))
+                    if s_rate <= 0:
+                        s_rate = Decimal("19.5")
+                    item_curr = (si.currency or sale.currency or "TMT").strip().upper()
+                    sale_curr = (sale.currency or "TMT").strip().upper()
+                    raw_line = (Decimal(str(si.unit_price)) * int(si.quantity or 1)) - Decimal(str(si.discount or 0))
+                    raw_line = max(raw_line, Decimal("0.00"))
+                    rev_in_sale_curr = _convert_currency(raw_line, item_curr, sale_curr, s_rate)
+
+                    cost_curr = (si.cost_currency or sale_curr).strip().upper()
+                    c_rate = Decimal(str(si.cost_exchange_rate or s_rate or 19.5))
+                    if c_rate <= 0:
+                        c_rate = s_rate
+                    raw_cost = Decimal(str(si.unit_cost or 0)) * int(si.quantity or 1)
+                    cost_in_sale_curr = _convert_currency(raw_cost, cost_curr, sale_curr, c_rate)
+                    line_profit = (rev_in_sale_curr - cost_in_sale_curr).quantize(Decimal("0.01"))
+
+                    bucket_receipt_sets[b_idx].add(sale.id)
+                    if sale_curr == "USD":
+                        chart_sal_usd += rev_in_sale_curr
+                        chart_prof_usd += line_profit
+                        buckets[b_idx]["sales_usd"] += rev_in_sale_curr
+                        buckets[b_idx]["profit_usd"] += line_profit
+                        buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr * s_rate)
+                    else:
+                        chart_sal_tmt += rev_in_sale_curr
+                        chart_prof_tmt += line_profit
+                        buckets[b_idx]["sales_tmt"] += rev_in_sale_curr
+                        buckets[b_idx]["profit_tmt"] += line_profit
+                        buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr)
+
+                for idx_b, rset in enumerate(bucket_receipt_sets):
+                    buckets[idx_b]["receipts_count"] = len(rset)
 
             exchanges_in_period = sum(
                 1
@@ -363,6 +484,14 @@ class DashboardPage(QScrollArea):
             "chart_purchases": [b["purchases_bar"] for b in buckets],
             "chart_sales": [b["sales_bar"] for b in buckets],
             "chart_buckets": buckets,
+            "chart_totals": {
+                "pur_usd": chart_pur_usd,
+                "pur_tmt": chart_pur_tmt,
+                "sal_usd": chart_sal_usd,
+                "sal_tmt": chart_sal_tmt,
+                "prof_usd": chart_prof_usd,
+                "prof_tmt": chart_prof_tmt,
+            },
             "recent_ops": recent_ops[:10],
         }
 
@@ -631,10 +760,29 @@ class DashboardPage(QScrollArea):
     def _chart_card(self, stats: dict) -> Card:
         card = Card()
         head = QHBoxLayout()
+        head.setSpacing(6)
         period_label, chart_title = RANGE_CONFIG[self.current_range]
         title = QLabel(chart_title)
         title.setObjectName("cardTitle")
         head.addWidget(title, 1)
+
+        # Тумблер переключения: Ählisi / IMEI / Ştuk
+        type_group = QButtonGroup(card)
+        for key, label in CHART_ITEM_FILTERS:
+            tb = QPushButton(label)
+            tb.setObjectName("chip")
+            tb.setCheckable(True)
+            tb.setAutoDefault(False)
+            tb.setCursor(Qt.CursorShape.PointingHandCursor)
+            tb.setChecked(key == self.chart_item_filter)
+            tb.clicked.connect(lambda _=False, k=key: self._set_chart_item_filter(k))
+            type_group.addButton(tb)
+            head.addWidget(tb)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFixedHeight(20)
+        head.addWidget(sep)
 
         group = QButtonGroup(card)
         for name in ["1G", "1H", "1A", "6A", "1Ý"]:
@@ -649,14 +797,17 @@ class DashboardPage(QScrollArea):
             head.addWidget(b)
         card.body.addLayout(head)
 
-        sm_u = stats["sales_period"]["by_currency"]["USD"]["revenue"]
-        sm_t = stats["sales_period"]["by_currency"]["TMT"]["revenue"]
-        pm_u = stats["pur_period_usd"]
-        pm_t = stats["pur_period_tmt"]
-        pr_u = stats["profit_period"]["USD"]["gross_profit"]
-        pr_t = stats["profit_period"]["TMT"]["gross_profit"]
+        ct = stats["chart_totals"]
+        sm_u = ct["sal_usd"]
+        sm_t = ct["sal_tmt"]
+        pm_u = ct["pur_usd"]
+        pm_t = ct["pur_tmt"]
+        pr_u = ct["prof_usd"]
+        pr_t = ct["prof_tmt"]
+        filter_label = dict(CHART_ITEM_FILTERS).get(self.chart_item_filter, "Ählisi")
 
         legend = QLabel(
+            f"<b>[{filter_label}]</b>&nbsp;&nbsp;"
             f"<span style='color:{theme.ACCENT_SOFT}'>●</span> Alyşlar ({period_label}): "
             f"<b>${pm_u:,.2f} / {pm_t:,.2f} TMT</b>"
             f"&nbsp;&nbsp;&nbsp;<span style='color:{theme.ACCENT}'>●</span> Satyşlar ({period_label}): "

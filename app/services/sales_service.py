@@ -134,18 +134,25 @@ class SalesService:
         return Decimal("0.00"), fallback_currency, fallback_rate
 
     @staticmethod
-    def get_sale_paid_amount(session: Session, sale: Sale) -> Decimal:
+    def get_sale_paid_amount(
+        session: Session,
+        sale: Sale,
+        include_write_off: bool = False,
+    ) -> Decimal:
         """Возвращает чистую оплаченную клиентом сумму в валюте чека."""
+        allowed_types = ("payment", "write_off") if include_write_off else ("payment",)
         payments = session.scalars(
             select(SalePayment).where(
                 SalePayment.sale_id == sale.id,
-                SalePayment.payment_type == "payment",
+                SalePayment.payment_type.in_(allowed_types),
             )
         ).all()
 
         if payments:
             paid = Decimal("0.00")
             for p in payments:
+                if not include_write_off and p.cash_register_id is None and p.payment_type != "payment":
+                    continue
                 p_rate = _validate_rate(p.exchange_rate or sale.exchange_rate or Decimal("1.0000"))
                 paid += _convert_currency(
                     _decimal(p.amount),
@@ -209,7 +216,7 @@ class SalesService:
         """
         if sale.status == "cancelled":
             return Decimal("0.00")
-        paid = SalesService.get_sale_paid_amount(session, sale)
+        paid = SalesService.get_sale_paid_amount(session, sale, include_write_off=True)
         total = _money(_decimal(sale.total_amount))
         return max(Decimal("0.00"), _money(total - paid))
 
@@ -707,8 +714,9 @@ class SalesService:
         sale_id: int,
         reason: str,
         refund_cash_register_id: int | None = None,
+        refund_to_cash: bool = True,
     ) -> Sale:
-        """Аудит-совместимая отмена продажи, возврат товара на склад и учет возврата/долга."""
+        """Аудит-совместимая отмена продажи, возврат товара на склад и точный возврат денег из кассы."""
         sale = session.get(Sale, sale_id)
         if not sale:
             raise ValueError(f"ID {sale_id} bolan satyş tapylmady.")
@@ -756,41 +764,38 @@ class SalesService:
                 if stock_item:
                     stock_item.status = "in_stock"
 
-        income_txs = session.scalars(
-            select(CashTransaction).where(
-                CashTransaction.sale_id == sale.id,
-                CashTransaction.transaction_type == "income",
-            )
+        all_sale_txs = session.scalars(
+            select(CashTransaction).where(CashTransaction.sale_id == sale.id)
         ).all()
+        income_txs = [tx for tx in all_sale_txs if tx.transaction_type == "income"]
+
+        refund_rate = _validate_rate(sale.exchange_rate or Decimal("1.0000"))
+        if refund_rate == Decimal("1.0000"):
+            for tx in income_txs:
+                tx_rate = Decimal(str(tx.exchange_rate or 0))
+                if tx_rate != Decimal("1.0000") and tx_rate > 0:
+                    refund_rate = tx_rate
+                    break
+
+        desc = f"Çek boýunça yzyna gaýtarma {sale.receipt_number}: {reason}"[:255]
 
         if refund_cash_register_id is not None:
             register = session.get(CashRegister, refund_cash_register_id)
             if not register:
                 raise ValueError(f"ID {refund_cash_register_id} bolan kassa tapylmady.")
 
-            refund_rate = _validate_rate(sale.exchange_rate or Decimal("1.0000"))
-            if register.currency != sale.currency and refund_rate == Decimal("1.0000"):
-                for tx in income_txs:
-                    tx_rate = Decimal(str(tx.exchange_rate))
-                    if tx_rate != Decimal("1.0000") and tx_rate > 0:
-                        refund_rate = tx_rate
-                        break
-
-            paid_in_sale_curr = SalesService.get_sale_paid_amount(session, sale)
-            refund_amount = (
-                paid_in_sale_curr
-                if income_txs
-                else _money(Decimal(str(sale.total_amount)))
+            paid_in_sale_curr = SalesService.get_sale_paid_amount(
+                session, sale, include_write_off=False
             )
-            if refund_amount > 0:
+            if paid_in_sale_curr > Decimal("0.00"):
                 CashService.adjust_register_balance(
                     session=session,
                     cash_register_id=refund_cash_register_id,
-                    amount=refund_amount,
+                    amount=paid_in_sale_curr,
                     transaction_type="refund",
                     currency=sale.currency,
                     exchange_rate=refund_rate,
-                    description=f"Çek boýunça yzyna gaýtarma {sale.receipt_number}: {reason}",
+                    description=desc,
                     sale_id=sale.id,
                 )
                 session.add(
@@ -798,11 +803,11 @@ class SalesService:
                         sale_id=sale.id,
                         payment_date=now,
                         currency=sale.currency,
-                        amount=refund_amount,
+                        amount=paid_in_sale_curr,
                         exchange_rate=refund_rate,
                         cash_register_id=refund_cash_register_id,
                         payment_type="reversal",
-                        description=f"Çek boýunça yzyna gaýtarma {sale.receipt_number}: {reason}",
+                        description=desc,
                     )
                 )
                 session.add(
@@ -810,11 +815,75 @@ class SalesService:
                         movement_date=now,
                         movement_type="sale_refund",
                         currency=sale.currency,
-                        amount=refund_amount,
+                        amount=paid_in_sale_curr,
                         exchange_rate=refund_rate,
                         cash_register_id=refund_cash_register_id,
                         sale_id=sale.id,
-                        description=f"Çek boýunça yzyna gaýtarma {sale.receipt_number}: {reason}",
+                        description=desc,
+                    )
+                )
+        elif refund_to_cash:
+            # Считаем фактический чистый приход в разрезе каждой конкретной кассы (USD / TMT),
+            # чтобы при отмене (в том числе со сдачей или смешанной оплатой) вернуть ровно те же суммы.
+            net_by_reg: dict[int, Decimal] = {}
+            reg_cache: dict[int, CashRegister] = {}
+            for tx in all_sale_txs:
+                reg = reg_cache.get(tx.cash_register_id)
+                if reg is None:
+                    reg = session.get(CashRegister, tx.cash_register_id)
+                    if reg is None:
+                        continue
+                    reg_cache[tx.cash_register_id] = reg
+
+                tx_rate = _validate_rate(tx.exchange_rate or refund_rate)
+                tx_in_reg_curr = _convert_currency(
+                    _decimal(tx.amount),
+                    tx.currency,
+                    reg.currency,
+                    tx_rate,
+                )
+                prev = net_by_reg.get(reg.id, Decimal("0.00"))
+                if tx.transaction_type == "income":
+                    net_by_reg[reg.id] = _money(prev + tx_in_reg_curr)
+                elif tx.transaction_type in ("expense", "refund"):
+                    net_by_reg[reg.id] = _money(prev - tx_in_reg_curr)
+
+            for reg_id, net_amt in net_by_reg.items():
+                if net_amt <= Decimal("0.00"):
+                    continue
+                reg = reg_cache[reg_id]
+                CashService.adjust_register_balance(
+                    session=session,
+                    cash_register_id=reg.id,
+                    amount=net_amt,
+                    transaction_type="refund",
+                    currency=reg.currency,
+                    exchange_rate=refund_rate,
+                    description=desc,
+                    sale_id=sale.id,
+                )
+                session.add(
+                    SalePayment(
+                        sale_id=sale.id,
+                        payment_date=now,
+                        currency=reg.currency,
+                        amount=net_amt,
+                        exchange_rate=refund_rate,
+                        cash_register_id=reg.id,
+                        payment_type="reversal",
+                        description=desc,
+                    )
+                )
+                session.add(
+                    CashMovement(
+                        movement_date=now,
+                        movement_type="sale_refund",
+                        currency=reg.currency,
+                        amount=net_amt,
+                        exchange_rate=refund_rate,
+                        cash_register_id=reg.id,
+                        sale_id=sale.id,
+                        description=desc,
                     )
                 )
 

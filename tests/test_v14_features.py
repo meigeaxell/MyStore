@@ -312,3 +312,67 @@ def test_incoming_queue_known_unknown_and_phone_flow(isolated_db):
         assert st_phone.imei1 == "354892100000777"
         assert st_phone.memory == "256GB"
         assert session.scalar(select(Category.name).where(Category.id == p_phone.category_id)) == "Telefon Täze"
+
+
+def test_cancel_sale_refunds_exact_mixed_cash_and_handles_simurg_and_insufficient_cash(isolated_db):
+    cat = product_repository.create_category("Çehol")
+    prod = product_repository.save_product(
+        product_id=None,
+        name="16 Pro",
+        category_id=cat.id,
+        stock_quantity=10,
+    )
+
+    with isolated_db() as session, session.begin():
+        regs = SalesService.ensure_default_registers(session)
+        regs["USD"].balance = Decimal("100.00")
+        regs["TMT"].balance = Decimal("1000.00")
+
+        # 1. Смешанная продажа: чек на 2000 TMT -> оплачено 50 USD (975 TMT) + 1100 TMT -> сдача 75 TMT
+        # Чистый приход: +50 USD в USD кассу, +1025 TMT в TMT кассу
+        sale = SalesService.create_sale(
+            session=session,
+            items=[{"product_id": prod.id, "quantity": 2, "unit_price": Decimal("1000.00"), "currency": "TMT"}],
+            payments=[
+                {"currency": "USD", "amount": Decimal("50.00"), "exchange_rate": Decimal("19.5000")},
+                {"currency": "TMT", "amount": Decimal("1100.00"), "exchange_rate": Decimal("19.5000")},
+            ],
+            currency="TMT",
+            exchange_rate=Decimal("19.5000"),
+        )
+        assert regs["USD"].balance == Decimal("150.00")
+        assert regs["TMT"].balance == Decimal("2025.00")
+
+        # Отмена без указания кассы -> возвращает ровно 50 USD и 1025 TMT в те же кассы + товар на склад!
+        SalesService.cancel_sale(session, sale.id, "Müşderi gaýtardy")
+        assert regs["USD"].balance == Decimal("100.00")
+        assert regs["TMT"].balance == Decimal("1000.00")
+        assert session.get(Product, prod.id).stock_quantity == 10
+        assert SalesService.get_store_debt_to_customer(session, sale) == Decimal("0.00")
+
+        # 2. Simurg / продажа в долг (0 оплачено) -> при отмене касса НЕ трогается!
+        sim_sale = SalesService.create_sale(
+            session=session,
+            items=[{"product_id": prod.id, "quantity": 1, "unit_price": Decimal("500.00"), "currency": "TMT"}],
+            payments=[],
+            currency="TMT",
+            exchange_rate=Decimal("19.5000"),
+            customer_name="Simurg Client",
+            is_simurg=True,
+        )
+        SalesService.cancel_sale(session, sim_sale.id, "Simurg ýatyryldy")
+        assert regs["TMT"].balance == Decimal("1000.00")
+        assert session.get(Product, prod.id).stock_quantity == 10
+
+        # 3. Недостаточно денег в кассе при отмене -> предупреждение ValueError!
+        sale3 = SalesService.create_sale(
+            session=session,
+            items=[{"product_id": prod.id, "quantity": 1, "unit_price": Decimal("400.00"), "currency": "TMT"}],
+            payments=[{"currency": "TMT", "amount": Decimal("400.00"), "exchange_rate": Decimal("19.5000")}],
+            currency="TMT",
+            exchange_rate=Decimal("19.5000"),
+        )
+        regs["TMT"].balance = Decimal("100.00")  # выручку забрали из кассы
+        with pytest.raises(ValueError, match="ýeterlik pul ýok"):
+            SalesService.cancel_sale(session, sale3.id, "Gaýtarma")
+
