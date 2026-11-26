@@ -98,6 +98,26 @@ class ReportService:
         }
 
         rows = []
+        sale_ids = [s.id for s in sales]
+        items_by_sale: dict[int, list[str]] = {}
+        units_by_sale: dict[int, int] = {}
+        if sale_ids:
+            si_rows = session.execute(
+                select(SaleItem, Product, Category.name)
+                .join(Product, SaleItem.product_id == Product.id)
+                .outerjoin(Category, Product.category_id == Category.id)
+                .where(SaleItem.sale_id.in_(sale_ids))
+                .order_by(SaleItem.id.asc())
+            ).all()
+            for si, prod, cat_name in si_rows:
+                units_by_sale[si.sale_id] = units_by_sale.get(si.sale_id, 0) + int(si.quantity or 0)
+                bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
+                if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
+                    bm = prod.specification.strip()
+                meta_parts = [p for p in (cat_name or "", bm) if p]
+                meta = f" ({' • '.join(meta_parts)})" if meta_parts else ""
+                qty_part = f" ×{si.quantity}" if int(si.quantity or 1) > 1 else ""
+                items_by_sale.setdefault(si.sale_id, []).append(f"{prod.name}{meta}{qty_part}")
 
         for sale in sales:
             cur = sale.currency.strip().upper()
@@ -106,10 +126,7 @@ class ReportService:
 
             total = _money(_decimal(sale.total_amount))
             paid = SalesService.get_sale_paid_amount(session, sale)
-            items = session.scalars(
-                select(SaleItem).where(SaleItem.sale_id == sale.id)
-            ).all()
-            sale_units = sum(i.quantity for i in items)
+            sale_units = units_by_sale.get(sale.id, 0)
 
             if sale.status == "cancelled":
                 cancelled_count += 1
@@ -127,11 +144,18 @@ class ReportService:
                     summary[cur]["customer_debt"] + cust_debt
                 )
 
+            item_list = items_by_sale.get(sale.id, [])
+            if len(item_list) > 2:
+                items_summary = f"{', '.join(item_list[:2])} (+{len(item_list) - 2})"
+            else:
+                items_summary = ", ".join(item_list) if item_list else "—"
+
             rows.append({
                 "sale_id": sale.id,
                 "receipt_number": sale.receipt_number,
                 "sale_date": sale.sale_date,
                 "customer_name": sale.customer_name or "Bölek müşderi",
+                "items_summary": items_summary,
                 "currency": cur,
                 "exchange_rate": _validate_rate(sale.exchange_rate or Decimal("1.0000")),
                 "units": sale_units,
@@ -166,9 +190,10 @@ class ReportService:
         Выручка, себестоимость, валовая прибыль и фактически полученные деньги разделены.
         """
         stmt = (
-            select(SaleItem, Sale, Product)
+            select(SaleItem, Sale, Product, Category.name)
             .join(Sale, SaleItem.sale_id == Sale.id)
             .join(Product, SaleItem.product_id == Product.id)
+            .outerjoin(Category, Product.category_id == Category.id)
             .where(Sale.status != "cancelled")
             .order_by(Sale.sale_date.desc(), SaleItem.id.asc())
         )
@@ -207,7 +232,7 @@ class ReportService:
         seen_sales: set[int] = set()
         lines = []
 
-        for s_item, sale, product in item_rows:
+        for s_item, sale, product, cat_name in item_rows:
             doc_cur = sale.currency.strip().upper()
             if doc_cur not in totals:
                 continue
@@ -222,9 +247,17 @@ class ReportService:
                 )
 
             ex = exchange_by_item_id.get(s_item.id)
+            eff_cat = cat_name or "—"
+            eff_brand = (product.brand or "").strip()
+            eff_model = (product.model or "").strip()
             if ex is not None:
                 # Если позиция была обменяна, итоговой экономической реализацией является новое устройство
                 new_prod = session.get(Product, ex.new_product_id)
+                if new_prod:
+                    new_cat = session.get(Category, new_prod.category_id)
+                    eff_cat = new_cat.name if new_cat else eff_cat
+                    eff_brand = (new_prod.brand or "").strip()
+                    eff_model = (new_prod.model or "").strip()
                 prod_name = (
                     f"{new_prod.name} (Çalyşyk {ex.exchange_number} ← {product.name})"
                     if new_prod
@@ -283,11 +316,19 @@ class ReportService:
                 totals[doc_cur]["gross_profit"] + profit_doc
             )
 
+            bm = " / ".join(filter(None, [eff_brand, eff_model]))
+            detail_parts = [p for p in (eff_cat, bm) if p and p != "—"]
+            product_display = f"{prod_name} ({' • '.join(detail_parts)})" if detail_parts else prod_name
+
             lines.append({
                 "sale_id": sale.id,
                 "receipt_number": sale.receipt_number,
                 "sale_date": sale.sale_date,
                 "product_name": prod_name,
+                "product_display": product_display,
+                "category": eff_cat,
+                "brand": eff_brand,
+                "model": eff_model,
                 "imei": imei_str,
                 "quantity": qty,
                 "currency": doc_cur,
@@ -925,8 +966,10 @@ class ReportService:
         else:
             rate = _validate_rate(exchange_rate)
 
-        products = session.scalars(
-            select(Product).where(Product.is_active.is_(True), Product.stock_quantity > 0)
+        prod_rows = session.execute(
+            select(Product, Category.name)
+            .outerjoin(Category, Product.category_id == Category.id)
+            .where(Product.is_active.is_(True), Product.stock_quantity > 0)
         ).all()
 
         in_stock_items = session.scalars(
@@ -941,8 +984,9 @@ class ReportService:
         total_units = 0
         devices_count = 0
         accessories_count = 0
+        by_cat_map: dict[int, dict] = {}
 
-        for prod in products:
+        for prod, cat_name in prod_rows:
             qty = int(prod.stock_quantity or 0)
             if qty <= 0:
                 continue
@@ -950,6 +994,25 @@ class ReportService:
             imei_items = items_by_prod.get(prod.id, [])
             imei_cnt = len(imei_items)
             devices_count += imei_cnt
+
+            cat_id = int(prod.category_id or 0)
+            cat_entry = by_cat_map.get(cat_id)
+            if cat_entry is None:
+                cat_entry = {
+                    "category_id": cat_id,
+                    "category_name": cat_name or "Kategoriýasyz",
+                    "products_count": 0,
+                    "devices_count": 0,
+                    "accessories_count": 0,
+                    "total_units": 0,
+                    "usd_native": Decimal("0.00"),
+                    "tmt_native": Decimal("0.00"),
+                }
+                by_cat_map[cat_id] = cat_entry
+
+            cat_entry["products_count"] += 1
+            cat_entry["devices_count"] += imei_cnt
+            cat_entry["total_units"] += qty
 
             for st in imei_items:
                 u_cost, u_curr, _u_rate = SalesService._resolve_item_cost_basis(
@@ -961,12 +1024,15 @@ class ReportService:
                 )
                 if u_curr == "USD":
                     usd_native = _money(usd_native + u_cost)
+                    cat_entry["usd_native"] = _money(cat_entry["usd_native"] + u_cost)
                 else:
                     tmt_native = _money(tmt_native + u_cost)
+                    cat_entry["tmt_native"] = _money(cat_entry["tmt_native"] + u_cost)
 
             rem_qty = max(0, qty - imei_cnt)
             if rem_qty > 0:
                 accessories_count += rem_qty
+                cat_entry["accessories_count"] += rem_qty
                 u_cost, u_curr, _u_rate = SalesService._resolve_item_cost_basis(
                     session=session,
                     product_id=prod.id,
@@ -977,8 +1043,19 @@ class ReportService:
                 line_val = _money(u_cost * rem_qty)
                 if u_curr == "USD":
                     usd_native = _money(usd_native + line_val)
+                    cat_entry["usd_native"] = _money(cat_entry["usd_native"] + line_val)
                 else:
                     tmt_native = _money(tmt_native + line_val)
+                    cat_entry["tmt_native"] = _money(cat_entry["tmt_native"] + line_val)
+
+        by_category: list[dict] = []
+        for entry in by_cat_map.values():
+            c_usd = entry["usd_native"]
+            c_tmt = entry["tmt_native"]
+            entry["total_in_usd"] = _money(c_usd + (c_tmt / rate))
+            entry["total_in_tmt"] = _money(c_tmt + (c_usd * rate))
+            by_category.append(entry)
+        by_category.sort(key=lambda x: x["total_in_tmt"], reverse=True)
 
         total_in_usd = _money(usd_native + (tmt_native / rate))
         total_in_tmt = _money(tmt_native + (usd_native * rate))
@@ -992,4 +1069,5 @@ class ReportService:
             "total_units": total_units,
             "devices_count": devices_count,
             "accessories_count": accessories_count,
+            "by_category": by_category,
         }

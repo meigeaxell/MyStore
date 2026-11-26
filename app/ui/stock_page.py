@@ -77,6 +77,7 @@ ROLE_IS_ACTIVE = Qt.ItemDataRole.UserRole + 3
 ROLE_TOTAL_DEVICES = Qt.ItemDataRole.UserRole + 4
 ROLE_IS_PHONE_UNIT = Qt.ItemDataRole.UserRole + 5
 ROLE_PRIMARY_STOCK_ITEM_ID = Qt.ItemDataRole.UserRole + 6
+ROLE_GROUP_KEY = Qt.ItemDataRole.UserRole + 7
 
 
 def _apply_phone_category_badge(label: QLabel, is_used: bool) -> None:
@@ -1597,7 +1598,114 @@ class StockPage(QWidget):
         item.setData(0, ROLE_PRIMARY_STOCK_ITEM_ID, p.get("primary_stock_item_id"))
         return item
 
+    def _iter_tree_items(self) -> list[QTreeWidgetItem]:
+        """Возвращает плоский список всех элементов дерева в порядке отображения."""
+        result: list[QTreeWidgetItem] = []
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top is None:
+                continue
+            result.append(top)
+            for j in range(top.childCount()):
+                ch = top.child(j)
+                if ch is not None:
+                    result.append(ch)
+        return result
+
+    def _capture_tree_state(self) -> dict:
+        cur = self.tree.currentItem()
+        all_items = self._iter_tree_items()
+        flat_idx = all_items.index(cur) if cur in all_items else -1
+        collapsed_keys: set[str] = set()
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top is not None and top.data(0, ROLE_ITEM_TYPE) == "group" and not top.isExpanded():
+                gk = top.data(0, ROLE_GROUP_KEY)
+                if gk:
+                    collapsed_keys.add(str(gk))
+        return {
+            "item_type": cur.data(0, ROLE_ITEM_TYPE) if cur is not None else None,
+            "product_id": cur.data(0, ROLE_PRODUCT_ID) if cur is not None else None,
+            "stock_item_id": cur.data(0, ROLE_PRIMARY_STOCK_ITEM_ID) if cur is not None else None,
+            "group_key": cur.data(0, ROLE_GROUP_KEY) if cur is not None else None,
+            "flat_idx": flat_idx,
+            "scroll_val": self.tree.verticalScrollBar().value(),
+            "collapsed_keys": collapsed_keys,
+            "had_focus": self.tree.hasFocus(),
+        }
+
+    def _restore_tree_state(
+        self,
+        state: dict | None,
+        prefer_product_id: int | None = None,
+        force_focus: bool = False,
+    ) -> None:
+        if not state and prefer_product_id is None:
+            return
+        all_items = self._iter_tree_items()
+        if not all_items:
+            return
+
+        target: QTreeWidgetItem | None = None
+        if prefer_product_id is not None:
+            for it in all_items:
+                if it.data(0, ROLE_ITEM_TYPE) == "product" and it.data(0, ROLE_PRODUCT_ID) == prefer_product_id:
+                    target = it
+                    break
+
+        if target is None and state:
+            if state.get("item_type") == "product":
+                pid = state.get("product_id")
+                sid = state.get("stock_item_id")
+                for it in all_items:
+                    if it.data(0, ROLE_ITEM_TYPE) != "product":
+                        continue
+                    if (pid is not None and it.data(0, ROLE_PRODUCT_ID) == pid) or (
+                        sid is not None and it.data(0, ROLE_PRIMARY_STOCK_ITEM_ID) == sid
+                    ):
+                        target = it
+                        break
+            elif state.get("item_type") == "group" and state.get("group_key"):
+                gk = state["group_key"]
+                for it in all_items:
+                    if it.data(0, ROLE_ITEM_TYPE) == "group" and it.data(0, ROLE_GROUP_KEY) == gk:
+                        target = it
+                        break
+
+            if target is None and state.get("flat_idx", -1) >= 0:
+                idx = min(state["flat_idx"], len(all_items) - 1)
+                target = all_items[idx]
+
+        if target is not None:
+            parent = target.parent()
+            if parent is not None and not parent.isExpanded():
+                parent.setExpanded(True)
+            self.tree.setCurrentItem(target)
+
+        scroll_val = state.get("scroll_val", 0) if state else 0
+        sb = self.tree.verticalScrollBar()
+        sb.setValue(min(scroll_val, sb.maximum()))
+
+        def _apply_scroll_and_focus() -> None:
+            try:
+                cur_sb = self.tree.verticalScrollBar()
+                if scroll_val > 0 and cur_sb.maximum() > 0:
+                    cur_sb.setValue(min(scroll_val, cur_sb.maximum()))
+                if target is not None:
+                    self.tree.scrollToItem(target, QAbstractItemView.ScrollHint.EnsureVisible)
+            except RuntimeError:
+                return
+            if force_focus or (state and state.get("had_focus")):
+                self.tree.setFocus()
+
+        from PySide6.QtCore import QTimer
+
+        QTimer.singleShot(0, _apply_scroll_and_focus)
+
     def _show_products(self, products: list[dict], has_search: bool = False) -> None:
+        prev_state = self._capture_tree_state()
+        collapsed_keys = prev_state.get("collapsed_keys", set())
+
         self.tree.setUpdatesEnabled(False)
         try:
             self.tree.clear()
@@ -1647,7 +1755,7 @@ class StockPage(QWidget):
             group_bg = QColor("#EEF2F6")
             group_fg = QColor(theme.NAVY)
 
-            for _key, (label, items) in sorted_groups:
+            for g_key, (label, items) in sorted_groups:
                 quant_qty = sum(
                     int(x.get("quantity", 0)) for x in items if not x.get("is_phone_unit", False)
                 )
@@ -1693,6 +1801,7 @@ class StockPage(QWidget):
                     "",
                 ])
                 group_item.setData(0, ROLE_ITEM_TYPE, "group")
+                group_item.setData(0, ROLE_GROUP_KEY, f"{group_mode}:{g_key}")
                 group_item.setSizeHint(0, QSize(0, 38))
                 for col in range(7):
                     group_item.setFont(col, group_font)
@@ -1705,13 +1814,20 @@ class StockPage(QWidget):
                     group_item.addChild(self._make_product_tree_item(prod))
 
                 self.tree.addTopLevelItem(group_item)
-
-            if has_search or len(sorted_groups) <= 40:
-                self.tree.expandAll()
+                full_gk = f"{group_mode}:{g_key}"
+                if (has_search or len(sorted_groups) <= 40) and full_gk not in collapsed_keys:
+                    group_item.setExpanded(True)
 
             self.count_label.setText(f"Jemi: {len(products)} ({len(sorted_groups)} topar)")
         finally:
             self.tree.setUpdatesEnabled(True)
+            self._restore_tree_state(
+                prev_state,
+                prefer_product_id=getattr(self, "_pending_select_product_id", None),
+                force_focus=getattr(self, "_pending_restore_focus", False),
+            )
+            self._pending_select_product_id = None
+            self._pending_restore_focus = False
 
     def _selected_product_meta(self, silent: bool = False) -> dict | None:
         item = self.tree.currentItem()
@@ -1735,6 +1851,8 @@ class StockPage(QWidget):
     def _open_add_product(self) -> None:
         dlg = ProductDialog(self)
         if dlg.exec():
+            self._pending_select_product_id = getattr(dlg, "created_product_id", None)
+            self._pending_restore_focus = True
             self._load_data()
 
     def _edit_selected_product(self) -> None:
@@ -1744,11 +1862,19 @@ class StockPage(QWidget):
         if meta.get("is_phone_unit") and meta.get("primary_stock_item_id") is not None:
             dlg = EditStockItemDialog(int(meta["primary_stock_item_id"]), self)
             if dlg.exec():
+                self._pending_select_product_id = meta["id"]
+                self._pending_restore_focus = True
                 self._load_data()
+            else:
+                self.tree.setFocus()
             return
         dlg = ProductDialog(self, product_id=meta["id"])
         if dlg.exec():
+            self._pending_select_product_id = meta["id"]
+            self._pending_restore_focus = True
             self._load_data()
+        else:
+            self.tree.setFocus()
 
     def _toggle_archive_selected_product(self) -> None:
         meta = self._selected_product_meta()
@@ -1761,6 +1887,8 @@ class StockPage(QWidget):
         if not is_active:
             try:
                 restore_product(product_id)
+                self._pending_select_product_id = product_id
+                self._pending_restore_focus = True
                 self._load_data()
                 show_toast(
                     self,
@@ -1780,9 +1908,11 @@ class StockPage(QWidget):
             QMessageBox.StandardButton.No,
         )
         if ans != QMessageBox.StandardButton.Yes:
+            self.tree.setFocus()
             return
         try:
             deactivate_product(product_id, force=True)
+            self._pending_restore_focus = True
             self._load_data()
             show_toast(self, f"«{prod_name}» arhiwe geçirildi.", kind="success")
         except (ValueError, SQLAlchemyError) as err:
@@ -1808,10 +1938,16 @@ class StockPage(QWidget):
         if meta.get("is_phone_unit") and meta.get("primary_stock_item_id") is not None:
             dlg = EditStockItemDialog(int(meta["primary_stock_item_id"]), self)
             if dlg.exec():
+                self._pending_select_product_id = meta["id"]
+                self._pending_restore_focus = True
                 self._load_data()
+            else:
+                self.tree.setFocus()
             return
         dlg = StockItemDialog(product_id=meta["id"], product_name=meta["name"], parent=self)
         dlg.exec()
+        self._pending_select_product_id = meta["id"]
+        self._pending_restore_focus = True
         self._load_data()
 
     def _open_selected_product_history(self) -> None:
@@ -1822,6 +1958,7 @@ class StockPage(QWidget):
             return
         dlg = ProductHistoryDialog(meta["id"], meta["name"], self)
         dlg.exec()
+        self.tree.setFocus()
 
     def _activate_tree_item(self, item: QTreeWidgetItem | None) -> None:
         if item is None:
@@ -1842,15 +1979,25 @@ class StockPage(QWidget):
         if is_phone_unit and primary_stock_item_id is not None:
             dlg = EditStockItemDialog(int(primary_stock_item_id), self)
             if dlg.exec():
+                self._pending_select_product_id = prod_id
+                self._pending_restore_focus = True
                 self._load_data()
+            else:
+                self.tree.setFocus()
         elif total_devices > 0:
             dlg = StockItemDialog(product_id=prod_id, product_name=prod_name, parent=self)
             dlg.exec()
+            self._pending_select_product_id = prod_id
+            self._pending_restore_focus = True
             self._load_data()
         else:
             dlg = ProductDialog(self, product_id=prod_id)
             if dlg.exec():
+                self._pending_select_product_id = prod_id
+                self._pending_restore_focus = True
                 self._load_data()
+            else:
+                self.tree.setFocus()
 
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _col: int) -> None:
         self._activate_tree_item(item)

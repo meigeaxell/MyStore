@@ -312,11 +312,12 @@ class ReportsPage(QWidget):
         )
         layout.addWidget(self.sales_summary_label)
 
-        self.sales_table = QTableWidget(0, 9)
+        self.sales_table = QTableWidget(0, 10)
         self.sales_table.setHorizontalHeaderLabels([
             "ID",
             "Çek",
             "Sene",
+            "Harytlar (Ady • Kategoriýa • Model)",
             "Müşderi",
             "Sany",
             "Walýuta",
@@ -629,6 +630,7 @@ class ReportsPage(QWidget):
                 str(r["sale_id"]),
                 r["receipt_number"],
                 d_str,
+                r.get("items_summary", "—"),
                 r["customer_name"],
                 str(r["units"]),
                 r["currency"],
@@ -638,11 +640,13 @@ class ReportsPage(QWidget):
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 4, 5, 6, 7, 8):
+                if c in (0, 5, 6, 7, 8, 9):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 3:
+                    cell.setToolTip(r.get("items_summary", ""))
                 if r["status"] == "cancelled":
                     cell.setForeground(QColor(theme.RED))
-                elif c == 8 and r["customer_debt"] > 0:
+                elif c == 9 and r["customer_debt"] > 0:
                     cell.setForeground(QColor(theme.ACCENT))
                 self.sales_table.setItem(i, c, cell)
 
@@ -670,7 +674,7 @@ class ReportsPage(QWidget):
             vals = [
                 r["receipt_number"],
                 d_str,
-                r["product_name"],
+                r.get("product_display", r["product_name"]),
                 r["imei"],
                 str(r["quantity"]),
                 r["currency"],

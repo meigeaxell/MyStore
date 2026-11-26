@@ -1,10 +1,9 @@
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from PySide6.QtCore import QDate, QEvent, QPoint, Qt, QTimer
+from PySide6.QtCore import QDate, QEvent, Qt, QTimer
 from PySide6.QtGui import QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication,
     QButtonGroup,
     QComboBox,
     QDateEdit,
@@ -15,7 +14,6 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
@@ -43,6 +41,7 @@ from app.ui.receipt_printer import export_sale_receipt_pdf
 from app.ui.selection_dialogs import InventorySelectorDialog
 from app.ui.widgets import (
     Card,
+    SearchResultPopup,
     configure_dialog_buttons,
     configure_table,
     make_button,
@@ -193,11 +192,11 @@ class SaleDetailsDialog(QDialog):
         items_title.setObjectName("cardTitle")
         root.addWidget(items_title)
 
-        self.items_table = QTableWidget(0, 6)
+        self.items_table = QTableWidget(0, 8)
         self.items_table.setHorizontalHeaderLabels([
-            "Haryt", "IMEI", "Sany", "Baha", "Öz bahasy", "Jemi",
+            "Haryt", "Kategoriýa", "Brend / Model", "IMEI", "Sany", "Baha", "Öz bahasy", "Jemi",
         ])
-        configure_table(self.items_table, stretch_col=0, row_height=42)
+        configure_table(self.items_table, stretch_col=[0, 2], row_height=42)
         self.items_table.setMinimumHeight(130)
         root.addWidget(self.items_table)
 
@@ -328,17 +327,23 @@ class SaleDetailsDialog(QDialog):
             self.settle_rate_spin.setValue(float(Decimal(str(sale.exchange_rate or 19.5))))
 
             item_rows = session.execute(
-                select(SaleItem, Product.name)
+                select(SaleItem, Product, Category.name)
                 .join(Product, SaleItem.product_id == Product.id)
+                .outerjoin(Category, Product.category_id == Category.id)
                 .where(SaleItem.sale_id == sale.id)
             ).all()
 
             self.items_table.setRowCount(len(item_rows))
-            for idx, (s_item, p_name) in enumerate(item_rows):
+            for idx, (s_item, prod, cat_name) in enumerate(item_rows):
                 line_sum = Decimal(str(s_item.unit_price)) * s_item.quantity - Decimal(str(s_item.discount))
                 cost_txt = f"{money_str(s_item.unit_cost)} {s_item.cost_currency}"
+                bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
+                if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
+                    bm = prod.specification.strip()
                 vals = [
-                    p_name,
+                    prod.name,
+                    cat_name or "—",
+                    bm or "—",
                     s_item.imei or "—",
                     str(s_item.quantity),
                     f"{money_str(s_item.unit_price)} {s_item.currency}",
@@ -347,7 +352,7 @@ class SaleDetailsDialog(QDialog):
                 ]
                 for c, val in enumerate(vals):
                     cell = QTableWidgetItem(val)
-                    if c >= 2:
+                    if c >= 4:
                         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.items_table.setItem(idx, c, cell)
 
@@ -522,8 +527,23 @@ class SalesPage(QWidget):
         if obj is getattr(self, "search_input", None):
             if event.type() == QEvent.Type.FocusOut:
                 QTimer.singleShot(140, self._check_hide_live_search_popup)
-            elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-                self._hide_live_search_popup()
+            elif event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                if key == Qt.Key.Key_Escape:
+                    self._hide_live_search_popup()
+                    return True
+                if self.live_search_popup.isVisible():
+                    if key == Qt.Key.Key_Down:
+                        self.live_search_popup.step_selection(1)
+                        return True
+                    if key == Qt.Key.Key_Up:
+                        self.live_search_popup.step_selection(-1)
+                        return True
+                    if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                        cur = self.live_search_popup.currentItem()
+                        if cur is not None:
+                            self._on_live_search_item_clicked(cur)
+                            return True
         elif obj is self.window() and event.type() in (
             QEvent.Type.WindowDeactivate,
             QEvent.Type.Move,
@@ -535,15 +555,9 @@ class SalesPage(QWidget):
     def _check_hide_live_search_popup(self) -> None:
         if not hasattr(self, "live_search_popup") or not self.live_search_popup.isVisible():
             return
-        fw = QApplication.focusWidget()
-        if (
-            fw is self.search_input
-            or fw is self.live_search_popup
-            or (fw is not None and self.live_search_popup.isAncestorOf(fw))
-        ):
+        if self.search_input.hasFocus() or self.live_search_popup.is_interacting():
             return
-        if not self.isVisible() or not self.search_input.hasFocus():
-            self._hide_live_search_popup()
+        self._hide_live_search_popup()
 
     def _setup_shortcuts(self) -> None:
         QShortcut(QKeySequence("F2"), self, activated=lambda: self._open_inventory_selector(""))
@@ -625,15 +639,7 @@ class SalesPage(QWidget):
         self._live_search_timer.setSingleShot(True)
         self._live_search_timer.timeout.connect(self._run_live_search)
 
-        self.live_search_popup = QListWidget(self)
-        self.live_search_popup.setWindowFlags(
-            Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint
-        )
-        self.live_search_popup.setStyleSheet(
-            f"QListWidget {{ background: white; border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 4px; }}"
-            "QListWidget::item { padding: 6px 10px; border-radius: 6px; }"
-            f"QListWidget::item:hover, QListWidget::item:selected {{ background: #EFF6FF; color: {theme.NAVY}; }}"
-        )
+        self.live_search_popup = SearchResultPopup(self)
         self.live_search_popup.itemClicked.connect(self._on_live_search_item_clicked)
         self.live_search_popup.hide()
 
@@ -856,9 +862,9 @@ class SalesPage(QWidget):
 
         self.history_table = QTableWidget(0, 8)
         self.history_table.setHorizontalHeaderLabels([
-            "ID", "Çek", "Sene", "Müşderi", "Walýuta", "Jemi", "Bergi / Status", "Bellik",
+            "ID", "Çek", "Sene", "Harytlar (Ady • Kategoriýa • Model)", "Müşderi", "Jemi", "Bergi / Status", "Bellik",
         ])
-        configure_table(self.history_table, stretch_col=[1, 3], row_height=44)
+        configure_table(self.history_table, stretch_col=[3], row_height=44)
         self.history_table.cellDoubleClicked.connect(self._open_sale_details)
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.history_table)
@@ -1013,6 +1019,31 @@ class SalesPage(QWidget):
             self.balances_label.setText(f"Kassalar: USD ${usd:,.2f}  |  TMT {tmt:,.2f} m.")
 
             sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc()).limit(200)).all()
+            sale_ids = [s.id for s in sales]
+            items_summary_map: dict[int, str] = {}
+            if sale_ids:
+                si_rows = session.execute(
+                    select(SaleItem, Product, Category.name)
+                    .join(Product, SaleItem.product_id == Product.id)
+                    .outerjoin(Category, Product.category_id == Category.id)
+                    .where(SaleItem.sale_id.in_(sale_ids))
+                    .order_by(SaleItem.id.asc())
+                ).all()
+                grouped: dict[int, list[str]] = {}
+                for si, prod, cat_name in si_rows:
+                    bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
+                    if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
+                        bm = prod.specification.strip()
+                    meta = " • ".join(p for p in (cat_name or "", bm) if p)
+                    qty_txt = f" ×{si.quantity}" if int(si.quantity or 1) > 1 else ""
+                    label = f"{prod.name} ({meta}){qty_txt}" if meta else f"{prod.name}{qty_txt}"
+                    grouped.setdefault(si.sale_id, []).append(label)
+                for sid_k, labels in grouped.items():
+                    if len(labels) > 2:
+                        items_summary_map[sid_k] = f"{', '.join(labels[:2])} (+{len(labels) - 2})"
+                    else:
+                        items_summary_map[sid_k] = ", ".join(labels)
+
             for s in sales:
                 date_str = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else "—"
                 if s.status == "cancelled":
@@ -1032,9 +1063,10 @@ class SalesPage(QWidget):
                     "id": s.id,
                     "receipt": s.receipt_number,
                     "date": date_str,
+                    "items_summary": items_summary_map.get(s.id, "—"),
                     "customer": s.customer_name or "—",
                     "currency": s.currency,
-                    "total": money_str(s.total_amount),
+                    "total": f"{money_str(s.total_amount)} {s.currency}",
                     "status_text": status_text,
                     "status_color": status_color,
                     "info": s.comment or s.cancellation_reason or "",
@@ -1044,10 +1076,15 @@ class SalesPage(QWidget):
 
     def _filter_history(self, *_args) -> None:
         q = self.history_search.text().strip().lower() if hasattr(self, "history_search") else ""
+        words = [w for w in q.split() if w]
         rows = [
             r
             for r in getattr(self, "_all_sales_rows", [])
-            if not q or q in f"{r['receipt']} {r['customer']} {r['info']}".lower()
+            if not words
+            or all(
+                w in f"{r['receipt']} {r['items_summary']} {r['customer']} {r['info']}".lower()
+                for w in words
+            )
         ]
         self.history_table.setRowCount(len(rows))
         for i, r in enumerate(rows):
@@ -1055,16 +1092,18 @@ class SalesPage(QWidget):
                 str(r["id"]),
                 r["receipt"],
                 r["date"],
+                r["items_summary"],
                 r["customer"],
-                r["currency"],
                 r["total"],
                 r["status_text"],
                 r["info"],
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 4, 5, 6):
+                if c in (0, 5, 6):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if c == 3:
+                    cell.setToolTip(r["items_summary"])
                 if c == 6:
                     cell.setForeground(QColor(r["status_color"]))
                 self.history_table.setItem(i, c, cell)
@@ -1188,15 +1227,20 @@ class SalesPage(QWidget):
                     fallback_currency=fallback_curr,
                     fallback_rate=fallback_rate,
                 )
-                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
-                title_part = f"{prod.name} ({meta_str})" if meta_str else prod.name
-                item = QListWidgetItem(
-                    f"📱 {title_part}  •  {cat_label}  •  IMEI: {st.imei1} ({cond})  •  Öz bahasy: {cost_str}"
+                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
+                sub_parts = [p for p in (meta_str, f"IMEI: {st.imei1}") if p]
+                self.live_search_popup.add_result_card(
+                    title=prod.name,
+                    category=cat_label,
+                    subtitle="  •  ".join(sub_parts),
+                    cost_text=cost_str,
+                    badge_text=cond,
+                    badge_tone="blue" if st.condition == "new" else "orange",
+                    icon_kind="imei",
+                    payload={"product_id": prod.id, "imei": st.imei1},
                 )
-                item.setData(Qt.ItemDataRole.UserRole, {"product_id": prod.id, "imei": st.imei1})
-                self.live_search_popup.addItem(item)
                 imei_added += 1
-                if imei_added >= 8:
+                if imei_added >= 50:
                     break
 
             prod_rows = session.execute(
@@ -1237,26 +1281,27 @@ class SalesPage(QWidget):
                     fallback_currency=fallback_curr,
                     fallback_rate=fallback_rate,
                 )
-                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
-                item = QListWidgetItem(
-                    f"📦 {p.name}  •  {cat_label}  •  {bm}  •  Öz bahasy: {cost_str}  •  Bar: {p.stock_quantity}"
+                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
+                sub_txt = f"{bm}  •  {p.specification}" if p.specification else bm
+                self.live_search_popup.add_result_card(
+                    title=p.name,
+                    category=cat_label,
+                    subtitle=sub_txt,
+                    cost_text=cost_str,
+                    badge_text=f"Bar: {p.stock_quantity}",
+                    badge_tone="green",
+                    icon_kind="product",
+                    payload={"product_id": p.id, "imei": None},
                 )
-                item.setData(Qt.ItemDataRole.UserRole, {"product_id": p.id, "imei": None})
-                self.live_search_popup.addItem(item)
                 prod_added += 1
-                if prod_added >= 8:
+                if prod_added >= 60:
                     break
 
         if self.live_search_popup.count() == 0:
             self._hide_live_search_popup()
             return
 
-        pos = self.search_input.mapToGlobal(QPoint(0, self.search_input.height() + 2))
-        self.live_search_popup.move(pos)
-        self.live_search_popup.setFixedWidth(max(580, self.search_input.width()))
-        h = min(300, self.live_search_popup.count() * 34 + 12)
-        self.live_search_popup.setFixedHeight(h)
-        self.live_search_popup.show()
+        self.live_search_popup.show_below(self.search_input, min_width=640, max_height=420)
 
     def _on_live_search_item_clicked(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.ItemDataRole.UserRole) or {}

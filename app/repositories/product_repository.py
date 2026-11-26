@@ -73,6 +73,38 @@ def get_low_stock_products():
         return session.scalars(statement).all()
 
 
+def get_low_stock_products_detailed() -> list[dict]:
+    """Возвращает подробный список товаров с низким остатком (с категорией, брендом и моделью)."""
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(Product, Category.name)
+            .outerjoin(Category, Product.category_id == Category.id)
+            .where(
+                Product.is_active.is_(True),
+                Product.is_phone_unit.is_(False),
+                Product.min_stock_quantity > 0,
+                Product.stock_quantity <= Product.min_stock_quantity,
+            )
+            .order_by(Product.stock_quantity.asc(), Product.name.asc())
+        ).all()
+
+        result: list[dict] = []
+        for prod, cat_name in rows:
+            qty = int(prod.stock_quantity or 0)
+            min_qty = int(prod.min_stock_quantity or 0)
+            result.append({
+                "id": prod.id,
+                "name": prod.name,
+                "category": cat_name or "Kategoriýasyz",
+                "brand": (prod.brand or "").strip(),
+                "model": (prod.model or "").strip(),
+                "stock_quantity": qty,
+                "min_stock_quantity": min_qty,
+                "deficit": max(0, min_qty - qty),
+            })
+        return result
+
+
 def list_categories(active_only: bool = False) -> list[Category]:
     """Возвращает список категорий товаров."""
     with SessionLocal() as session:

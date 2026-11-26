@@ -376,3 +376,257 @@ def test_cancel_sale_refunds_exact_mixed_cash_and_handles_simurg_and_insufficien
         with pytest.raises(ValueError, match="ýeterlik pul ýok"):
             SalesService.cancel_sale(session, sale3.id, "Gaýtarma")
 
+
+def test_stock_valuation_by_category_low_stock_detailed_and_chart_zoom(isolated_db):
+    cat_case = product_repository.create_category("Çehol")
+    cat_glass = product_repository.create_category("Udarnyk")
+
+    p_case = product_repository.save_product(
+        product_id=None,
+        name="16 Pro Max",
+        category_id=cat_case.id,
+        brand="Blueo",
+        model="iPhone",
+        min_stock_quantity=5,
+    )
+    p_glass = product_repository.save_product(
+        product_id=None,
+        name="Note 14",
+        category_id=cat_glass.id,
+        brand="Remax",
+        model="Xiaomi",
+        min_stock_quantity=10,
+    )
+    purchase_service.create_purchase(
+        items=[
+            {"product_id": p_case.id, "quantity": 2, "unit_cost": "10.00"},
+            {"product_id": p_glass.id, "quantity": 20, "unit_cost": "2.00"},
+        ],
+        currency="USD",
+        exchange_rate="19.5000",
+        supplier_name="",
+    )
+
+    with isolated_db() as session:
+        val = ReportService.get_stock_valuation(session, Decimal("19.5000"))
+        assert len(val["by_category"]) == 2
+        by_name = {c["category_name"]: c for c in val["by_category"]}
+        assert by_name["Çehol"]["total_in_usd"] == Decimal("20.00")
+        assert by_name["Udarnyk"]["total_in_usd"] == Decimal("40.00")
+
+    low = product_repository.get_low_stock_products_detailed()
+    assert len(low) == 1
+    assert low[0]["name"] == "16 Pro Max"
+    assert low[0]["category"] == "Çehol"
+    assert low[0]["brand"] == "Blueo"
+    assert low[0]["model"] == "iPhone"
+    assert low[0]["deficit"] == 3
+
+
+_QT_APP = None
+
+
+def test_search_popup_scrolling_and_stock_cursor_preservation(isolated_db):
+    global _QT_APP
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
+
+    from app.ui.stock_page import ROLE_ITEM_TYPE, ROLE_PRODUCT_ID, StockPage
+    from app.ui.widgets import SearchResultPopup
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    _QT_APP = app
+
+    # 1. SearchResultPopup: 20 карточек -> скроллбар активен, step_selection и прокрутка работают
+    host = QWidget()
+    host.resize(1100, 720)
+    anchor = QLineEdit(host)
+    anchor.setGeometry(20, 20, 420, 36)
+    host.show()
+
+    popup = SearchResultPopup(host)
+    for i in range(20):
+        popup.add_result_card(
+            title=f"iPhone 16 Pro Max #{i + 1}",
+            category="Telefon Täze" if i % 2 == 0 else "Çehol",
+            subtitle=f"Apple / iPhone 16 Pro Max • IMEI: 35000000000{i:04d}",
+            cost_text=f"Öz bahasy: {100 + i}.00 USD",
+            badge_text="Bar (Täze)" if i % 2 == 0 else f"Skladda: {i + 3}",
+            badge_tone="blue" if i % 2 == 0 else "green",
+            icon_kind="imei" if i % 2 == 0 else "product",
+            payload={"kind": "product", "product_id": i + 1},
+        )
+    popup.show_below(anchor, min_width=640, max_height=340)
+    app.processEvents()
+
+    assert popup.isVisible()
+    assert popup.verticalScrollBar().maximum() > 0
+    popup.step_selection(1)
+    assert popup.currentRow() == 0
+    for _ in range(12):
+        popup.step_selection(1)
+    app.processEvents()
+    assert popup.currentRow() == 12
+    assert popup.verticalScrollBar().value() > 0
+    popup.hide()
+    host.close()
+
+    # 2. StockPage: сохранение позиции курсора после _load_data() (имитация редактирования)
+    cat = product_repository.create_category("Aksesuar")
+    created_ids = []
+    for i in range(18):
+        p = product_repository.save_product(
+            product_id=None,
+            name=f"Haryt {i + 1:02d}",
+            category_id=cat.id,
+            brand="Baseus",
+            model=f"M-{i + 1:02d}",
+            min_stock_quantity=2,
+        )
+        created_ids.append(p.id)
+
+    page = StockPage()
+    page.resize(1100, 500)
+    page.show()
+    app.processEvents()
+
+    target_id = created_ids[11]
+    target_item = None
+    for it in page._iter_tree_items():
+        if it.data(0, ROLE_ITEM_TYPE) == "product" and it.data(0, ROLE_PRODUCT_ID) == target_id:
+            target_item = it
+            break
+    assert target_item is not None
+    page.tree.setCurrentItem(target_item)
+    page.tree.scrollToItem(target_item)
+    app.processEvents()
+
+    page._pending_select_product_id = target_id
+    page._pending_restore_focus = True
+    page._load_data()
+    app.processEvents()
+
+    cur = page.tree.currentItem()
+    assert cur is not None
+    assert cur.data(0, ROLE_PRODUCT_ID) == target_id
+    page.close()
+    page.deleteLater()
+    popup.deleteLater()
+    host.deleteLater()
+    app.processEvents()
+
+
+def test_sliding_sidebar_expand_collapse_and_settings_at_bottom(isolated_db):
+    global _QT_APP
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    from app.ui.main_window import NAV_BOTTOM_ITEM, NAV_SECTIONS
+    from app.ui.sidebar import SIDEBAR_COLLAPSED_W, SIDEBAR_EXPANDED_W, SlidingSidebar
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    _QT_APP = app
+
+    host = QWidget()
+    host.resize(1200, 760)
+    sidebar = SlidingSidebar(NAV_SECTIONS, NAV_BOTTOM_ITEM, parent=host)
+    host.show()
+    sidebar.sync_geometry()
+    app.processEvents()
+
+    # В свёрнутом состоянии ширина ровно SIDEBAR_COLLAPSED_W, настройки в самом низу
+    assert sidebar.width() == SIDEBAR_COLLAPSED_W
+    assert sidebar.nav_buttons[-1].property("title") == "Sazlamalar"
+    assert sidebar.settings_btn.y() > sidebar.nav_buttons[-2].y() + 40
+
+    # Проверка счётчика бейджа на кнопке очереди приёма
+    queue_btn = next(b for b in sidebar.nav_buttons if b.property("title") == "Kabul ediş nobaty")
+    queue_btn.set_badge_count(5)
+    assert "(5)" in queue_btn.toolTip()
+
+    # Раскрытие и сворачивание
+    sidebar.set_expanded_immediate(True)
+    app.processEvents()
+    assert sidebar.width() == SIDEBAR_EXPANDED_W
+
+    sidebar.set_expanded_immediate(False)
+    app.processEvents()
+    assert sidebar.width() == SIDEBAR_COLLAPSED_W
+
+    sidebar.deleteLater()
+    host.close()
+    host.deleteLater()
+    app.processEvents()
+
+
+def test_dashboard_semantic_timeline_zoom(isolated_db):
+    global _QT_APP
+    import os
+    from datetime import date
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from app.ui.dashboard_page import DashboardPage
+
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
+    _QT_APP = app
+
+    page = DashboardPage()
+    page.resize(1200, 740)
+    page.show()
+    app.processEvents()
+
+    # По умолчанию: уровень "day" (дни месяца)
+    assert page.timeline_level == "day"
+    _, _, labels_day, buckets_day, _, _ = page._build_buckets_for_range(date(2026, 4, 15))
+    assert len(labels_day) == 30
+    assert buckets_day[14]["focus_date"] == date(2026, 4, 15)
+
+    # Приближение (+1) -> максимальный зум: "hour" (24 часа конкретного дня)
+    page._zoom_timeline(1, anchor_date=date(2026, 4, 15))
+    assert page.timeline_level == "hour"
+    assert page.focus_date == date(2026, 4, 15)
+    _, _, labels_hour, _, _, _ = page._build_buckets_for_range(page.focus_date)
+    assert len(labels_hour) == 24
+    assert labels_hour[0] == "00:00"
+    assert labels_hour[-1] == "23:00"
+
+    # Отдаление (-1): hour -> day -> week -> month -> year
+    page._zoom_timeline(-1)
+    assert page.timeline_level == "day"
+    page._zoom_timeline(-1)
+    assert page.timeline_level == "week"
+    _, _, labels_week, _, _, _ = page._build_buckets_for_range(page.focus_date)
+    assert len(labels_week) == 12
+    page._zoom_timeline(-1)
+    assert page.timeline_level == "month"
+    _, _, labels_month, _, _, _ = page._build_buckets_for_range(page.focus_date)
+    assert len(labels_month) == 12
+    page._zoom_timeline(-1)
+    assert page.timeline_level == "year"
+    _, _, labels_year, _, _, _ = page._build_buckets_for_range(page.focus_date)
+    assert len(labels_year) == 5
+
+    # Дальше "year" отдалять нельзя
+    page._zoom_timeline(-1)
+    assert page.timeline_level == "year"
+
+    page.close()
+    page.deleteLater()
+    app.processEvents()
+
+
+
+
+

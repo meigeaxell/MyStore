@@ -1,14 +1,11 @@
 
-from PySide6.QtCore import QEvent, QPoint, QSettings, QSize, Qt, QTimer
-from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication,
-    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
     QListWidgetItem,
     QMainWindow,
     QPushButton,
@@ -19,7 +16,6 @@ from PySide6.QtWidgets import (
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.config import APP_VERSION, BUNDLE_ROOT
 from app.database.engine import SessionLocal
 from app.models.category import Category
 from app.models.product import Product
@@ -40,29 +36,29 @@ from app.ui.quick_search_dialog import QuickSearchDialog
 from app.ui.reports_page import ReportsPage
 from app.ui.sales_page import SalesPage
 from app.ui.settings_page import SettingsPage
+from app.ui.sidebar import SIDEBAR_COLLAPSED_W, SlidingSidebar
 from app.ui.stock_page import StockPage
-from app.ui.widgets import make_button, money_str, show_toast
+from app.ui.widgets import SearchResultPopup, make_button, money_str, show_toast
 
-NAV = [
+NAV_SECTIONS = [
     ("Harytlar", [
-        ("Harytlar we sklad", "▦"),
-        ("Alyşlar", "⇩"),
-        ("Kabul ediş nobaty", "📥"),
+        ("Harytlar we sklad", "stock"),
+        ("Alyşlar", "purchases"),
+        ("Kabul ediş nobaty", "queue"),
     ]),
     ("Satyş", [
-        ("Satyş we kassa", "◉"),
-        ("Trade-in", "⇄"),
+        ("Satyş we kassa", "sales"),
+        ("Trade-in", "tradein"),
     ]),
     ("Maliýe", [
-        ("Maliýe", "₮"),
+        ("Maliýe", "finance"),
     ]),
     ("Analitika", [
-        ("Hasabatlar", "▥"),
-    ]),
-    ("Ulgam", [
-        ("Sazlamalar", "⚙"),
+        ("Hasabatlar", "reports"),
     ]),
 ]
+
+NAV_BOTTOM_ITEM = ("Sazlamalar", "settings")
 
 
 class PlaceholderPage(QWidget):
@@ -90,12 +86,16 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 640)
         self.setStyleSheet(theme.STYLE)
 
-        central = QWidget()
-        root = QHBoxLayout(central)
+        self._central = QWidget()
+        self._central.installEventFilter(self)
+        root = QHBoxLayout(self._central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_sidebar())
+        # Резервируем место под свёрнутый рельс сайдбара (72px), чтобы контент не дёргался при раскрытии
+        sidebar_rail = QWidget(self._central)
+        sidebar_rail.setFixedWidth(SIDEBAR_COLLAPSED_W)
+        root.addWidget(sidebar_rail)
 
         right = QVBoxLayout()
         right.setSpacing(0)
@@ -105,7 +105,11 @@ class MainWindow(QMainWindow):
         right.addWidget(self.pages, 1)
 
         root.addLayout(right, 1)
-        self.setCentralWidget(central)
+        self.setCentralWidget(self._central)
+
+        # Выдвижной оверлей-сайдбар поверх левого края окна
+        self.sidebar = self._build_sidebar()
+        self.sidebar.sync_geometry()
 
         self.mobile_server = MobileWebSocketServer(
             add_to_sale_callback=self._handle_mobile_add_to_sale,
@@ -189,24 +193,43 @@ class MainWindow(QMainWindow):
         if getattr(self, "sales_page", None) is not None:
             self.sales_page._hide_live_search_popup()
         super().resizeEvent(event)
+        if getattr(self, "sidebar", None) is not None:
+            self.sidebar.sync_geometry()
 
     def eventFilter(self, obj, event) -> bool:
+        if (
+            obj is getattr(self, "_central", None)
+            and event.type() == QEvent.Type.Resize
+            and getattr(self, "sidebar", None) is not None
+        ):
+            self.sidebar.sync_geometry()
         if obj is getattr(self, "top_search", None):
             if event.type() == QEvent.Type.FocusOut:
-                QTimer.singleShot(140, self._check_hide_top_search_popup)
-            elif event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
-                self._hide_top_search_popup()
+                QTimer.singleShot(160, self._check_hide_top_search_popup)
+            elif event.type() == QEvent.Type.KeyPress:
+                key = event.key()
+                popup = getattr(self, "top_search_popup", None)
+                if key == Qt.Key.Key_Escape:
+                    self._hide_top_search_popup()
+                    return True
+                if popup is not None and popup.isVisible():
+                    if key == Qt.Key.Key_Down:
+                        popup.step_selection(1)
+                        return True
+                    if key == Qt.Key.Key_Up:
+                        popup.step_selection(-1)
+                        return True
+                    if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                        cur = popup.currentItem()
+                        if cur is not None:
+                            self._on_top_live_item_clicked(cur)
+                            return True
         return super().eventFilter(obj, event)
 
     def _check_hide_top_search_popup(self) -> None:
         if not hasattr(self, "top_search_popup") or not self.top_search_popup.isVisible():
             return
-        fw = QApplication.focusWidget()
-        if (
-            fw is self.top_search
-            or fw is self.top_search_popup
-            or (fw is not None and self.top_search_popup.isAncestorOf(fw))
-        ):
+        if self.top_search.hasFocus() or self.top_search_popup.is_interacting():
             return
         if not self.isActiveWindow() or not self.top_search.hasFocus():
             self._hide_top_search_popup()
@@ -316,10 +339,12 @@ class MainWindow(QMainWindow):
             except SQLAlchemyError:
                 count = 0
         n = max(0, int(count))
-        if n > 0:
-            self.incoming_queue_button.setText(f"📥 Kabul ediş nobaty ({n})")
+        if hasattr(self.incoming_queue_button, "set_badge_count"):
+            self.incoming_queue_button.set_badge_count(n)
+        elif n > 0:
+            self.incoming_queue_button.setText(f"Kabul ediş nobaty ({n})")
         else:
-            self.incoming_queue_button.setText("📥 Kabul ediş nobaty")
+            self.incoming_queue_button.setText("Kabul ediş nobaty")
 
     def _on_mobile_incoming_queued(self, data: dict) -> None:
         counts = data.get("counts") if isinstance(data, dict) else None
@@ -461,6 +486,8 @@ class MainWindow(QMainWindow):
             ).all()
             prod_added = 0
             for p, cat_name in prod_rows:
+                if getattr(p, "is_phone_unit", False):
+                    continue
                 hay = " ".join(
                     filter(
                         None,
@@ -485,21 +512,27 @@ class MainWindow(QMainWindow):
                     fallback_currency=default_curr,
                     fallback_rate=default_rate,
                 )
-                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
-                item = QListWidgetItem(
-                    f"📦 {p.name}  •  {cat_label}  •  {bm}  •  Öz bahasy: {cost_str}  •  Skladda: {p.stock_quantity}"
+                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
+                qty_val = int(p.stock_quantity or 0)
+                self.top_search_popup.add_result_card(
+                    title=p.name,
+                    category=cat_label,
+                    subtitle=bm if not p.specification else f"{bm}  •  {p.specification}",
+                    cost_text=cost_str,
+                    badge_text=f"Skladda: {qty_val}" if qty_val > 0 else "Ýok",
+                    badge_tone="green" if qty_val > 0 else "red",
+                    icon_kind="product",
+                    payload={"kind": "product", "product_id": p.id, "imei": None},
                 )
-                item.setData(Qt.ItemDataRole.UserRole, {"kind": "product", "product_id": p.id, "imei": None})
-                self.top_search_popup.addItem(item)
                 prod_added += 1
-                if prod_added >= 6:
+                if prod_added >= 50:
                     break
 
             imei_rows = session.execute(
                 select(StockItem, Product, Category.name)
                 .join(Product, StockItem.product_id == Product.id)
                 .outerjoin(Category, Product.category_id == Category.id)
-                .order_by(StockItem.id.desc())
+                .order_by(StockItem.status.asc(), StockItem.id.desc())
             ).all()
             imei_added = 0
             for st, prod, cat_name in imei_rows:
@@ -516,13 +549,20 @@ class MainWindow(QMainWindow):
                             st.imei1,
                             st.imei2,
                             st.serial_number,
+                            st.memory,
+                            st.color,
                         ],
                     )
                 ).lower()
                 if not all(w in hay for w in words):
                     continue
                 cat_label = cat_name or "—"
-                bm = " / ".join(filter(None, [prod.brand, prod.model])) or "—"
+                spec_parts = [x for x in (st.memory, st.color) if x]
+                if not spec_parts:
+                    bm = " / ".join(filter(None, [prod.brand, prod.model]))
+                    if bm:
+                        spec_parts.append(bm)
+                spec_parts.append(f"IMEI: {st.imei1}")
                 u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
                     session=session,
                     product_id=prod.id,
@@ -530,18 +570,21 @@ class MainWindow(QMainWindow):
                     fallback_currency=default_curr,
                     fallback_rate=default_rate,
                 )
-                cost_str = f"{money_str(u_cost)} {c_curr}" if u_cost > 0 else "—"
-                st_lbl = "Bar" if st.status == "in_stock" else "Satyldy"
-                item = QListWidgetItem(
-                    f"📱 {prod.name}  •  {cat_label}  •  {bm}  •  IMEI: {st.imei1} [{st_lbl}]  •  Öz bahasy: {cost_str}"
+                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
+                is_in = st.status == "in_stock"
+                cond_lbl = "Täze" if st.condition == "new" else "B/U"
+                self.top_search_popup.add_result_card(
+                    title=prod.name,
+                    category=cat_label,
+                    subtitle=" • ".join(spec_parts),
+                    cost_text=cost_str,
+                    badge_text=f"Bar ({cond_lbl})" if is_in else "Satyldy",
+                    badge_tone=("blue" if st.condition == "new" else "orange") if is_in else "muted",
+                    icon_kind="imei",
+                    payload={"kind": "imei", "product_id": prod.id, "imei": st.imei1, "in_stock": is_in},
                 )
-                item.setData(
-                    Qt.ItemDataRole.UserRole,
-                    {"kind": "imei", "product_id": prod.id, "imei": st.imei1, "in_stock": st.status == "in_stock"},
-                )
-                self.top_search_popup.addItem(item)
                 imei_added += 1
-                if imei_added >= 5:
+                if imei_added >= 40:
                     break
 
             sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc())).all()
@@ -553,25 +596,26 @@ class MainWindow(QMainWindow):
                 if not all(w in hay for w in words):
                     continue
                 cust = s.customer_name or "Bölek müşderi"
-                item = QListWidgetItem(
-                    f"🧾 Çek {s.receipt_number} • {cust} • {money_str(s.total_amount)} {s.currency}"
+                date_s = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else ""
+                self.top_search_popup.add_result_card(
+                    title=f"Çek {s.receipt_number}",
+                    category="Satyş çeki",
+                    subtitle=f"{cust}  •  {date_s}",
+                    cost_text=f"{money_str(s.total_amount)} {s.currency}",
+                    badge_text="Ýatyryldy" if s.status == "cancelled" else "Çek",
+                    badge_tone="red" if s.status == "cancelled" else "muted",
+                    icon_kind="sale",
+                    payload={"kind": "sale", "sale_id": s.id},
                 )
-                item.setData(Qt.ItemDataRole.UserRole, {"kind": "sale", "sale_id": s.id})
-                self.top_search_popup.addItem(item)
                 sale_added += 1
-                if sale_added >= 4:
+                if sale_added >= 12:
                     break
 
         if self.top_search_popup.count() == 0:
             self._hide_top_search_popup()
             return
 
-        pos = self.top_search.mapToGlobal(QPoint(0, self.top_search.height() + 2))
-        self.top_search_popup.move(pos)
-        self.top_search_popup.setFixedWidth(max(580, self.top_search.width()))
-        h = min(320, self.top_search_popup.count() * 34 + 12)
-        self.top_search_popup.setFixedHeight(h)
-        self.top_search_popup.show()
+        self.top_search_popup.show_below(self.top_search, min_width=680, max_height=420)
 
     def _on_top_live_item_clicked(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.ItemDataRole.UserRole) or {}
@@ -624,13 +668,7 @@ class MainWindow(QMainWindow):
         self._top_search_timer.setSingleShot(True)
         self._top_search_timer.timeout.connect(self._run_top_live_search)
 
-        self.top_search_popup = QListWidget(self)
-        self.top_search_popup.setWindowFlags(Qt.WindowType.ToolTip | Qt.WindowType.FramelessWindowHint)
-        self.top_search_popup.setStyleSheet(
-            f"QListWidget {{ background: white; border: 1px solid {theme.BORDER}; border-radius: 8px; padding: 4px; }}"
-            "QListWidget::item { padding: 6px 10px; border-radius: 6px; }"
-            f"QListWidget::item:hover, QListWidget::item:selected {{ background: #EFF6FF; color: {theme.NAVY}; }}"
-        )
+        self.top_search_popup = SearchResultPopup(self)
         self.top_search_popup.itemClicked.connect(self._on_top_live_item_clicked)
         self.top_search_popup.hide()
 
@@ -651,71 +689,11 @@ class MainWindow(QMainWindow):
 
         return bar
 
-    def _build_sidebar(self) -> QFrame:
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(240)
-
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(14, 16, 14, 14)
-        layout.setSpacing(2)
-
-        group = QButtonGroup(self)
-        group.setExclusive(True)
-
-        self.nav_buttons: list[QPushButton] = []
-
-        # Активная верхняя кнопка с логотипом MobileStore -> открывает Главную панель (без дубля "Esasy panel")
-        brand_btn = QPushButton("  MobileStore")
-        brand_btn.setObjectName("brandNavButton")
-        brand_btn.setProperty("title", "MobileStore")
-        brand_btn.setCheckable(True)
-        brand_btn.setAutoDefault(False)
-        brand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        brand_btn.setToolTip("Esasy panel (Ctrl+1)")
-        logo_svg = BUNDLE_ROOT / "resources" / "mobilestore.svg"
-        logo_png = BUNDLE_ROOT / "resources" / "mobilestore.png"
-        if logo_svg.exists():
-            brand_btn.setIcon(QIcon(str(logo_svg)))
-            brand_btn.setIconSize(QSize(34, 34))
-        elif logo_png.exists():
-            pix = QPixmap(str(logo_png)).scaled(
-                34,
-                34,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            brand_btn.setIcon(QIcon(pix))
-            brand_btn.setIconSize(QSize(34, 34))
-        else:
-            brand_btn.setText("⌂  MobileStore")
-
-        group.addButton(brand_btn)
-        layout.addWidget(brand_btn)
-        layout.addSpacing(6)
-        self.nav_buttons.append(brand_btn)
-
-        for section, items in NAV:
-            label = QLabel(section)
-            label.setObjectName("navSection")
-            layout.addWidget(label)
-
-            for name, icon in items:
-                button = QPushButton(f"{icon}   {name}")
-                button.setObjectName("navButton")
-                button.setProperty("title", name)
-                button.setCheckable(True)
-                button.setAutoDefault(False)
-                button.setCursor(Qt.CursorShape.PointingHandCursor)
-
-                group.addButton(button)
-                layout.addWidget(button)
-                self.nav_buttons.append(button)
-
-        layout.addStretch()
-
-        footer = QLabel(f"Wersiýa {APP_VERSION}")
-        footer.setObjectName("sideFooter")
-        layout.addWidget(footer)
-
+    def _build_sidebar(self) -> SlidingSidebar:
+        sidebar = SlidingSidebar(
+            sections=NAV_SECTIONS,
+            bottom_item=NAV_BOTTOM_ITEM,
+            parent=self._central,
+        )
+        self.nav_buttons: list[QPushButton] = sidebar.nav_buttons
         return sidebar

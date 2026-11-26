@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database.engine import SessionLocal
+from app.models.category import Category
 from app.models.product import Product
 from app.models.purchase import Purchase
 from app.models.purchase_item import PurchaseItem
@@ -878,9 +879,11 @@ class PurchaseDetailsDialog(QDialog):
         items_title.setObjectName("cardTitle")
         root.addWidget(items_title)
 
-        self.items_table = QTableWidget(0, 4)
-        self.items_table.setHorizontalHeaderLabels(["Haryt", "Sany", "Baha", "Jemi"])
-        configure_table(self.items_table, stretch_col=0, row_height=42)
+        self.items_table = QTableWidget(0, 6)
+        self.items_table.setHorizontalHeaderLabels([
+            "Haryt", "Kategoriýa", "Brend / Model", "Sany", "Baha", "Jemi",
+        ])
+        configure_table(self.items_table, stretch_col=[0, 2], row_height=42)
         self.items_table.setMinimumHeight(130)
         root.addWidget(self.items_table)
 
@@ -992,8 +995,9 @@ class PurchaseDetailsDialog(QDialog):
             )
 
             items = session.execute(
-                select(PurchaseItem, Product.name)
+                select(PurchaseItem, Product, Category.name)
                 .join(Product, PurchaseItem.product_id == Product.id)
+                .outerjoin(Category, Product.category_id == Category.id)
                 .where(PurchaseItem.purchase_id == self.purchase_id)
             ).all()
 
@@ -1009,10 +1013,19 @@ class PurchaseDetailsDialog(QDialog):
                 .order_by(PurchaseRefund.refund_date)
             ).all()
 
-            item_rows = [
-                (name, item.quantity, money_str(item.unit_cost), money_str(item.total_cost))
-                for item, name in items
-            ]
+            item_rows = []
+            for item, prod, cat_name in items:
+                bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
+                if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
+                    bm = prod.specification.strip()
+                item_rows.append((
+                    prod.name,
+                    cat_name or "—",
+                    bm or "—",
+                    item.quantity,
+                    money_str(item.unit_cost),
+                    money_str(item.total_cost),
+                ))
             payment_rows = [
                 (
                     p.payment_date.strftime("%d.%m.%Y %H:%M"),
@@ -1244,16 +1257,17 @@ class PurchasePage(QWidget):
         root.addLayout(stats)
 
         self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Alyş belgisi, üpjün ediji ýa-da bellik boýunça gözleg...")
+        self.search_input.setPlaceholderText("Alyş belgisi, haryt, kategoriýa, model, üpjün ediji ýa-da bellik boýunça gözleg...")
         self.search_input.setClearButtonEnabled(True)
         self.search_input.setMinimumHeight(40)
         self.search_input.textChanged.connect(self._filter_data)
         root.addWidget(self.search_input)
 
-        self.table = QTableWidget(0, 8)
+        self.table = QTableWidget(0, 9)
         self.table.setHorizontalHeaderLabels([
             "№",
             "Sene",
+            "Harytlar (Ady • Kategoriýa • Model)",
             "Üpjün ediji",
             "Walýuta",
             "Jemi",
@@ -1291,10 +1305,36 @@ class PurchasePage(QWidget):
                 select(Purchase).order_by(Purchase.purchase_date.desc())
             ).all()
             monthly_exp = FinanceService.get_monthly_expenses_summary(session)
+            pur_ids = [p.id for p in purchases]
+            pur_items_summary: dict[int, str] = {}
+            if pur_ids:
+                pi_rows = session.execute(
+                    select(PurchaseItem, Product, Category.name)
+                    .join(Product, PurchaseItem.product_id == Product.id)
+                    .outerjoin(Category, Product.category_id == Category.id)
+                    .where(PurchaseItem.purchase_id.in_(pur_ids))
+                    .order_by(PurchaseItem.id.asc())
+                ).all()
+                grouped_p: dict[int, list[str]] = {}
+                for pi, prod, cat_name in pi_rows:
+                    bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
+                    if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
+                        bm = prod.specification.strip()
+                    meta = " • ".join(x for x in (cat_name or "", bm) if x)
+                    qty_txt = f" ×{pi.quantity}" if int(pi.quantity or 1) > 1 else ""
+                    lbl = f"{prod.name} ({meta}){qty_txt}" if meta else f"{prod.name}{qty_txt}"
+                    grouped_p.setdefault(pi.purchase_id, []).append(lbl)
+                for pid_k, labels in grouped_p.items():
+                    if len(labels) > 2:
+                        pur_items_summary[pid_k] = f"{', '.join(labels[:2])} (+{len(labels) - 2})"
+                    else:
+                        pur_items_summary[pid_k] = ", ".join(labels)
+
             self.purchases = [
                 {
                     "id": p.id,
                     "date": p.purchase_date,
+                    "items_summary": pur_items_summary.get(p.id, "—"),
                     "supplier": (
                         PERSONAL_SOURCE_LABEL
                         if is_personal_source_purchase(p)
@@ -1342,13 +1382,14 @@ class PurchasePage(QWidget):
 
     def _filter_data(self, *_args) -> None:
         query = self.search_input.text().strip().lower()
+        words = [w for w in query.split() if w]
         filtered = [
             p
             for p in self.purchases
-            if (
-                query in str(p["id"]).lower()
-                or query in p["note"].lower()
-                or query in p["supplier"].lower()
+            if not words
+            or all(
+                w in f"{p['id']} {p['items_summary']} {p['supplier']} {p['note']}".lower()
+                for w in words
             )
         ]
 
@@ -1376,6 +1417,7 @@ class PurchasePage(QWidget):
             values = [
                 str(purchase["id"]),
                 purchase["date"].strftime("%d.%m.%Y %H:%M"),
+                purchase["items_summary"],
                 purchase["supplier"],
                 purchase["currency"],
                 money_str(purchase["total"]),
@@ -1385,13 +1427,15 @@ class PurchasePage(QWidget):
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-                if column in (0, 3, 4, 5, 6):
+                if column in (0, 4, 5, 6, 7):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if column == 7:
+                if column == 2:
+                    cell.setToolTip(purchase["items_summary"])
+                if column == 8:
                     cell.setForeground(QColor("white"))
                     cell.setBackground(QColor(status_color))
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if cancelled and column != 7:
+                if cancelled and column != 8:
                     cell.setForeground(QColor("#858B94"))
                 self.table.setItem(row, column, cell)
 
