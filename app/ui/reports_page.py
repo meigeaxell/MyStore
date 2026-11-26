@@ -273,6 +273,8 @@ class ReportsPage(QWidget):
         self.tabs.addTab(self._create_inventory_tab(), "5. Sklad hasabaty")
         self.tabs.addTab(self._create_suppliers_tab(), "6. Üpjün edijiler")
         self.tabs.addTab(self._create_customers_tab(), "7. Müşderiler")
+        self._dirty_tabs: set[int] = set(range(7))
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
     def _on_preset_changed(self) -> None:
@@ -582,15 +584,28 @@ class ReportsPage(QWidget):
 
         return widget
 
+    def _load_tab_by_index(self, idx: int) -> None:
+        loaders = (
+            self._load_sales_report,
+            self._load_profit_report,
+            self._load_products_report,
+            self._load_devices_report,
+            self._load_inventory_report,
+            self._load_suppliers_report,
+            self._load_customers_report,
+        )
+        if 0 <= idx < len(loaders):
+            loaders[idx]()
+            self._dirty_tabs.discard(idx)
+
+    def _on_tab_changed(self, idx: int) -> None:
+        if idx in self._dirty_tabs:
+            self._load_tab_by_index(idx)
+
     def refresh_data(self, *_args) -> None:
         self._reload_category_combo()
-        self._load_sales_report()
-        self._load_profit_report()
-        self._load_products_report()
-        self._load_devices_report()
-        self._load_inventory_report()
-        self._load_suppliers_report()
-        self._load_customers_report()
+        self._dirty_tabs = set(range(7))
+        self._load_tab_by_index(self.tabs.currentIndex())
 
     def _reload_category_combo(self) -> None:
         cur_data = self.prod_cat_combo.currentData()

@@ -86,8 +86,15 @@ def has_icon(icon_key: str) -> bool:
     return icon_key in _SHAPES or icon_key in NAV_KEYS
 
 
+_ICON_CACHE: dict[tuple[str, str, int], QIcon] = {}
+
+
 def make_icon(icon_key: str, color: str = theme.NAVY, size: int = 18) -> QIcon:
-    """Векторная иконка (рендер в pixmap ×2 для чёткости на HiDPI)."""
+    """Векторная иконка (рендер в pixmap ×2 для чёткости на HiDPI, кэшируется)."""
+    cache_key = (icon_key, color, size)
+    cached = _ICON_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     scale = 2
     pm = QPixmap(size * scale, size * scale)
     pm.setDevicePixelRatio(scale)
@@ -108,7 +115,9 @@ def make_icon(icon_key: str, color: str = theme.NAVY, size: int = 18) -> QIcon:
         for path in _SHAPES.get(icon_key, []):
             p.drawPath(path)
     p.end()
-    return QIcon(pm)
+    icon = QIcon(pm)
+    _ICON_CACHE[cache_key] = icon
+    return icon
 
 
 def icon_size(size: int = 18) -> QSize:

@@ -18,7 +18,7 @@ def _resolve_bundle_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 
 PROJECT_ROOT = _resolve_project_root()
 BUNDLE_ROOT = _resolve_bundle_root()

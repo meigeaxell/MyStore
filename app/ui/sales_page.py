@@ -1894,16 +1894,6 @@ class SalesPage(QWidget):
                 if u_price * Decimal("2.5") < u_cost:
                     text += " — walýuta ýa-da nol ýalňyşlygy bolup biler"
                 issues.append((idx, "loss", text, f"«{name}»: baha öz bahasyndan pes (−{loss:,.0f} {cur})"))
-            elif u_cost > Decimal("0.00") and u_price > u_cost * Decimal(3):
-                issues.append((
-                    idx,
-                    "high",
-                    (
-                        f"«{name}»: baha {u_price:,.2f} {cur} öz bahasyndan {u_cost:,.2f} {cur} "
-                        "3 esse köp — walýuta ýa-da artykmaç nol barlaň"
-                    ),
-                    f"«{name}»: baha öz bahasyndan 3 esse köp",
-                ))
         return issues
 
     def _update_price_alert(self) -> None:

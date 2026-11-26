@@ -209,7 +209,7 @@ def show_toast(
     if host is None:
         return None
     prev = ToastNotification._active_toast
-    if prev is not None:
+    if _is_qt_alive(prev):
         try:
             prev.close()
         except RuntimeError:
@@ -250,17 +250,33 @@ def style_combo(combo: QComboBox) -> QComboBox:
 
 
 _CONFIGURED_TABLES: list[tuple[weakref.ref, list[int] | None, int]] = []
+_CACHED_TABLE_PRESET: str | None = None
+
+
+def _is_qt_alive(obj) -> bool:
+    if obj is None:
+        return False
+    try:
+        from shiboken6 import isValid
+
+        return bool(isValid(obj))
+    except (ImportError, RuntimeError):
+        return True
 
 
 def _get_active_table_preset() -> str:
+    global _CACHED_TABLE_PRESET
+    if _CACHED_TABLE_PRESET is not None:
+        return _CACHED_TABLE_PRESET
     try:
         from sqlalchemy.exc import SQLAlchemyError
 
         from app.services.settings_service import SettingsService
 
-        return SettingsService.get_table_layout_preset()
+        _CACHED_TABLE_PRESET = SettingsService.get_table_layout_preset()
     except (ImportError, RuntimeError, ValueError, SQLAlchemyError):
-        return "auto_fit"
+        _CACHED_TABLE_PRESET = "auto_fit"
+    return _CACHED_TABLE_PRESET
 
 
 def apply_table_preset(
@@ -270,6 +286,8 @@ def apply_table_preset(
     preset: str | None = None,
 ) -> None:
     """Применяет выбранный шаблон построения таблицы (auto_fit | wrap_full | compact | wide_scroll)."""
+    if not _is_qt_alive(table):
+        return
     mode = preset or _get_active_table_preset()
     header = table.horizontalHeader()
     vheader = table.verticalHeader()
@@ -284,7 +302,7 @@ def apply_table_preset(
         table.setTextElideMode(Qt.TextElideMode.ElideNone)
         header.setStretchLastSection(False)
         for col in range(col_count):
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         vheader.setDefaultSectionSize(max(38, min(base_row_height, 44)))
     elif mode == "wrap_full":
@@ -296,9 +314,9 @@ def apply_table_preset(
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
             else:
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        vheader.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        vheader.setMinimumSectionSize(max(36, base_row_height - 6))
-        vheader.setDefaultSectionSize(base_row_height)
+        # Фиксированная двухстрочная высота вместо ResizeToContents (исключает лаги Qt на больших таблицах)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vheader.setDefaultSectionSize(max(56, base_row_height + 12))
     elif mode == "compact":
         table.setWordWrap(False)
         table.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -311,8 +329,8 @@ def apply_table_preset(
         vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         vheader.setDefaultSectionSize(theme.ROW_H_COMPACT)
     else:
-        # auto_fit (по умолчанию): интерактивные колонки с умным авто-подбором и переносом длинных названий
-        table.setWordWrap(True)
+        # auto_fit (по умолчанию): быстрый фиксированный ритм строк + интерактивные колонки с авто-подбором
+        table.setWordWrap(False)
         table.setTextElideMode(Qt.TextElideMode.ElideRight)
         header.setStretchLastSection(False)
         for col in range(col_count):
@@ -320,38 +338,73 @@ def apply_table_preset(
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
             else:
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-        vheader.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        vheader.setMinimumSectionSize(max(38, base_row_height - 4))
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
         vheader.setDefaultSectionSize(base_row_height)
 
-    QTimer.singleShot(0, lambda t=table, m=mode, ss=stretch_set: _fit_table_after_data(t, m, ss))
+    _schedule_table_fit(table, mode, stretch_set)
+
+
+def _schedule_table_fit(table: QTableWidget, mode: str, stretch_set: set[int]) -> None:
+    if mode not in ("auto_fit", "wide_scroll"):
+        return
+    if getattr(table, "_fit_pending", False):
+        return
+    table._fit_pending = True
+    t_ref = weakref.ref(table)
+
+    def _run() -> None:
+        t = t_ref()
+        if not _is_qt_alive(t):
+            return
+        t._fit_pending = False
+        _fit_table_after_data(t, mode, stretch_set)
+
+    QTimer.singleShot(25, _run)
 
 
 def _fit_table_after_data(table: QTableWidget, mode: str, stretch_set: set[int]) -> None:
+    """Быстрый O(1) автоподбор ширины колонок по заголовку и первым 60 строкам (без тормозов на 5000+ строках)."""
+    if not _is_qt_alive(table):
+        return
     try:
-        if table.columnCount() == 0:
+        col_count = table.columnCount()
+        row_count = table.rowCount()
+        if col_count == 0 or row_count == 0:
             return
-        if mode == "auto_fit":
-            for col in range(table.columnCount()):
-                if col in stretch_set or table.isColumnHidden(col):
-                    continue
-                table.resizeColumnToContents(col)
-                w = table.columnWidth(col)
-                table.setColumnWidth(col, max(54, min(w + 18, 280)))
-            table.resizeRowsToContents()
-        elif mode == "wrap_full":
-            table.resizeRowsToContents()
+        max_w = 420 if mode == "wide_scroll" else 260
+        sample_rows = min(row_count, 60)
+        fm = QFontMetrics(table.font())
+        hfm = QFontMetrics(table.horizontalHeader().font())
+        for col in range(col_count):
+            if (mode == "auto_fit" and col in stretch_set) or table.isColumnHidden(col):
+                continue
+            hdr_item = table.horizontalHeaderItem(col)
+            best = hfm.horizontalAdvance(hdr_item.text()) + 28 if hdr_item else 54
+            for r in range(sample_rows):
+                it = table.item(r, col)
+                if it is not None:
+                    txt = it.text()
+                    if txt:
+                        w = fm.horizontalAdvance(txt) + 26
+                        if w > best:
+                            best = w
+                            if best >= max_w:
+                                break
+            table.setColumnWidth(col, max(54, min(best, max_w)))
     except RuntimeError:
         pass
 
 
 def apply_table_layout_preset_all(preset: str | None = None) -> None:
     """Мгновенно применяет шаблон таблиц ко всем открытым таблицам приложения."""
+    global _CACHED_TABLE_PRESET
+    if preset is not None:
+        _CACHED_TABLE_PRESET = preset
     mode = preset or _get_active_table_preset()
     alive: list[tuple[weakref.ref, list[int] | None, int]] = []
     for ref, stretch_cols, base_h in _CONFIGURED_TABLES:
         tbl = ref()
-        if tbl is not None:
+        if _is_qt_alive(tbl):
             try:
                 apply_table_preset(tbl, stretch_cols, base_h, preset=mode)
                 alive.append((ref, stretch_cols, base_h))
@@ -380,28 +433,29 @@ def configure_table(
 
     apply_table_preset(table, cols, row_height)
 
-    # Авто-подстройка при заполнении таблицы данными
+    # Лёгкий дебаунс-автоподбор ширины колонок при загрузке данных (без SQLite-запросов)
     tbl_ref = weakref.ref(table)
+    stretch_set = set(cols or [])
 
-    def _on_data_changed(*_args, _ref=tbl_ref, sc=cols) -> None:
+    def _on_data_changed(*_args, _ref=tbl_ref, _ss=stretch_set) -> None:
         t = _ref()
-        if t is None:
+        if not _is_qt_alive(t):
             return
         mode = _get_active_table_preset()
-        if mode in ("auto_fit", "wrap_full"):
-            QTimer.singleShot(0, lambda tt=t, m=mode, ss=set(sc or []): _fit_table_after_data(tt, m, ss))
+        if mode in ("auto_fit", "wide_scroll"):
+            _schedule_table_fit(t, mode, _ss)
 
     model = table.model()
     if model is not None:
         model.rowsInserted.connect(_on_data_changed)
         model.modelReset.connect(_on_data_changed)
 
-    _CONFIGURED_TABLES.append((weakref.ref(table), cols, row_height))
+    _CONFIGURED_TABLES.append((tbl_ref, cols, row_height))
 
     header = table.horizontalHeader()
     header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     header.customContextMenuRequested.connect(
-        lambda pos, tbl=table: _show_header_column_menu(tbl, pos)
+        lambda pos, _ref=tbl_ref: _show_header_column_menu(_ref(), pos) if _is_qt_alive(_ref()) else None
     )
 
 
@@ -697,14 +751,11 @@ class BarChart(QWidget):
         self._tx_span = max(min_x_span, min(full_x, self._tx_span))
         self._tx_start = max(0.0, min(full_x - self._tx_span, self._tx_start))
 
-        min_y_span = max(1.0, self.base_y_max * 0.04)
-        max_y_span = self.base_y_max * 2.5
+        min_y_span = max(1.0, self.base_y_max * 0.05)
+        max_y_span = self.base_y_max
         y_span = max(min_y_span, min(max_y_span, self._ty_max - self._ty_min))
-        self._ty_min = max(0.0, min(self.base_y_max * 0.96, self._ty_min))
+        self._ty_min = max(0.0, min(self.base_y_max - y_span, self._ty_min))
         self._ty_max = self._ty_min + y_span
-        if self._ty_max > max_y_span:
-            self._ty_max = max_y_span
-            self._ty_min = max(0.0, self._ty_max - y_span)
 
     def _start_smooth_anim(self) -> None:
         self._clamp_targets()
@@ -776,11 +827,15 @@ class BarChart(QWidget):
             self._tx_start = anchor_data_x - ax * new_span
         if zoom_y:
             y_span = max(1.0, self._ty_max - self._ty_min)
-            # ay=0 внизу оси Y (0), ay=1 вверху
-            anchor_data_y = self._ty_min + ay * y_span
             new_y_span = y_span * factor
-            self._ty_min = anchor_data_y - ay * new_y_span
-            self._ty_max = self._ty_min + new_y_span
+            # Столбцы остаются привязаны к нулю по умолчанию; при сдвиге по Y сохраняем точку под курсором
+            if self._ty_min <= 0.5:
+                self._ty_min = 0.0
+                self._ty_max = new_y_span
+            else:
+                anchor_data_y = self._ty_min + ay * y_span
+                self._ty_min = anchor_data_y - ay * new_y_span
+                self._ty_max = self._ty_min + new_y_span
         self._start_smooth_anim()
 
     def reset_zoom(self) -> None:
@@ -825,6 +880,11 @@ class BarChart(QWidget):
             super().wheelEvent(event)
             return
 
+        # Если уже на 100% и пользователь крутит колесо вниз — отдаём прокрутку странице (QScrollArea)
+        if delta_y < 0 and not self._is_zoomed():
+            event.ignore()
+            return
+
         left, _right, top, _bottom, w, h = self._chart_geometry()
         pos = event.position()
         anchor_x = max(0.0, min(1.0, (pos.x() - left) / max(1, w)))
@@ -838,8 +898,8 @@ class BarChart(QWidget):
         else:
             zx, zy = True, True
 
-        # Пропорциональный плавный коэффициент (учитывает и обычную мышь, и плавный тачпад)
-        steps = delta_y / 120.0
+        # Ограничиваем шаг за один тик, чтобы на Windows с high-res колесом не было скачков
+        steps = max(-3.0, min(3.0, delta_y / 120.0))
         factor = 0.85 ** steps
         self._apply_zoom_factor(factor, anchor_x, anchor_y, zoom_x=zx, zoom_y=zy)
         event.accept()
