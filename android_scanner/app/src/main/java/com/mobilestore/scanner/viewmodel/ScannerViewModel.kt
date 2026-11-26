@@ -49,6 +49,11 @@ data class PendingReceivingDevice(
     val requestId: String = UUID.randomUUID().toString(),
 )
 
+data class PendingBarcodeScan(
+    val barcode: String,
+    val requestId: String = UUID.randomUUID().toString(),
+)
+
 data class SessionQueuedEntry(
     val queueId: Int,
     val itemKind: String, // "phone_imei" | "known" | "unknown"
@@ -119,6 +124,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
 
     private val _pendingReceivingDevice = MutableStateFlow<PendingReceivingDevice?>(null)
     val pendingReceivingDevice: StateFlow<PendingReceivingDevice?> = _pendingReceivingDevice.asStateFlow()
+
+    private val _pendingBarcodeScan = MutableStateFlow<PendingBarcodeScan?>(null)
+    val pendingBarcodeScan: StateFlow<PendingBarcodeScan?> = _pendingBarcodeScan.asStateFlow()
 
     private val _isReceivingBusy = MutableStateFlow(false)
     val isReceivingBusy: StateFlow<Boolean> = _isReceivingBusy.asStateFlow()
@@ -541,8 +549,13 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         _scanCooldownTrigger.value += 1
     }
 
+    fun dismissPendingBarcodeScan() {
+        _pendingBarcodeScan.value = null
+        _scanCooldownTrigger.value += 1
+    }
+
     fun onReceivingBundleDetected(bundle: ScanBundle) {
-        if (_pendingReceivingDevice.value != null || _isReceivingBusy.value) return
+        if (_pendingReceivingDevice.value != null || _pendingBarcodeScan.value != null || _isReceivingBusy.value) return
         feedback.onScanSuccess()
 
         val useImeiMode = receivingMeta.value?.useImeiMode ?: true
@@ -579,10 +592,10 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             return
         }
 
-        // Режим 2: Sany bilen (Haryt / Aksessuar) -> сразу отправляем штрихкод в PK nobaty (+1)
+        // Режим 2: Sany bilen (Haryt / Aksessuar) -> открываем короткое окно с полем примечания (Bellik) и количества
         val scannedCode = (bundle.productBarcode ?: bundle.primaryCode).trim()
         if (scannedCode.isNotEmpty()) {
-            queueBarcodeQuantityToPc(barcode = scannedCode, quantity = 1)
+            _pendingBarcodeScan.value = PendingBarcodeScan(barcode = scannedCode)
         }
     }
 
@@ -700,6 +713,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         unitCost: String? = null,
         currency: String? = null,
         supplierName: String? = null,
+        modelHint: String? = null,
         onSuccess: () -> Unit = {},
     ) {
         val clean = barcode.trim()
@@ -708,6 +722,8 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         val safeQty = quantity.coerceAtLeast(1)
+        val cleanHint = modelHint?.trim()?.ifBlank { null }
+        val cleanCost = unitCost?.trim()?.replace(",", ".")?.ifBlank { null }
 
         viewModelScope.launch {
             val meta = ensureDraftMetaExists()
@@ -719,8 +735,9 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 mode = "quantity",
                 productId = null,
                 barcode = clean,
+                modelHint = cleanHint,
                 quantity = safeQty,
-                unitCost = unitCost,
+                unitCost = cleanCost,
                 currency = effCurrency,
                 supplierName = effSupplier,
             )
@@ -733,12 +750,13 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                     IncomingQueuedData(
                         itemKind = "unknown",
                         quantity = safeQty,
-                        productName = clean,
-                        message = "«$clean» PK nobatyna goşuldy ($safeQty sany)",
+                        productName = cleanHint ?: clean,
+                        message = "«${cleanHint ?: clean}» PK nobatyna goşuldy ($safeQty sany)",
                     )
                 )
+                _pendingBarcodeScan.value = null
                 _scanCooldownTrigger.value += 1
-                handleIncomingQueuedSuccess(parsed, clean)
+                handleIncomingQueuedSuccess(parsed, cleanHint ?: clean)
                 onSuccess()
             } else {
                 _scanCooldownTrigger.value += 1
@@ -754,6 +772,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
         unitCost: String? = null,
         currency: String = "USD",
         supplierName: String? = null,
+        modelHint: String? = null,
         onSuccess: () -> Unit = {},
     ) {
         if (productId == null) {
@@ -772,6 +791,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
                 return
             }
         }
+        val cleanHint = modelHint?.trim()?.ifBlank { null }
 
         viewModelScope.launch {
             val meta = ensureDraftMetaExists()
@@ -790,6 +810,7 @@ class ScannerViewModel(application: Application) : AndroidViewModel(application)
             val resp = ws.queueIncomingItem(
                 mode = "quantity",
                 productId = productId,
+                modelHint = cleanHint,
                 quantity = quantity,
                 unitCost = cleanCost,
                 currency = effCurrency,

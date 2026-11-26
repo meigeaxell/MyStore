@@ -605,15 +605,19 @@ class MobileProtocolProcessor:
                     )
 
             for cand in candidates:
-                prod_exact = session.scalar(
-                    select(Product).where(
+                prod_matches = session.scalars(
+                    select(Product)
+                    .where(
                         Product.is_active.is_(True),
                         (Product.barcode.ilike(cand))
                         | (Product.sku.ilike(cand))
                         | (Product.specification.ilike(f"%{cand}%")),
                     )
-                )
-                if prod_exact is not None:
+                    .order_by(Product.name.asc())
+                    .limit(15)
+                ).all()
+                if len(prod_matches) == 1:
+                    prod_exact = prod_matches[0]
                     card = self._build_product_card_data(
                         session,
                         prod_exact,
@@ -630,6 +634,27 @@ class MobileProtocolProcessor:
                     return (
                         make_response("product_card", request_id, card),
                         f"Kod skan {cand} → {prod_exact.name}",
+                    )
+                if len(prod_matches) > 1:
+                    items = [
+                        self._build_product_card_data(
+                            session,
+                            p,
+                            None,
+                            match_info={
+                                "match_type": "exact",
+                                "match_score": 100,
+                                "match_detail": "Umumy ştrihkod — görnüşi saýlaň",
+                                "scanned_code": cand,
+                                "matched_code": p.sku,
+                                "requires_confirmation": True,
+                            },
+                        )
+                        for p in prod_matches
+                    ]
+                    return (
+                        make_response("scan_multiple", request_id, {"code": cand, "items": items}),
+                        f"Umumy ştrihkod {cand}: {len(items)} haryt tapyldy",
                     )
 
             matches = session.scalars(

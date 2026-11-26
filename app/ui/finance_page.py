@@ -31,15 +31,19 @@ from app.services.finance_service import FinanceService
 from app.services.report_service import ReportService
 from app.services.settings_service import SettingsService
 from app.ui import theme
+from app.ui.icons import make_icon
 from app.ui.purchase_page import PurchaseDetailsDialog
 from app.ui.receipt_printer import export_shift_report_pdf
 from app.ui.sales_page import SaleDetailsDialog
 from app.ui.widgets import (
+    NUM_ALIGN,
     Card,
     ClickableCard,
+    align_numeric_columns,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
     show_toast,
     style_combo,
@@ -291,7 +295,7 @@ class SimurgPayoutDialog(QDialog):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(12)
 
-        title = QLabel("🏦 Simurg tölegini kabul etmek")
+        title = QLabel("Simurg tölegini kabul etmek")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
@@ -459,7 +463,7 @@ class ShiftAndCashDialog(QDialog):
         root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(12)
 
-        title = QLabel("🔒 Smena ýapmak we kassany sanamak")
+        title = QLabel("Smena ýapmak we kassany sanamak")
         title.setObjectName("pageTitle")
         root.addWidget(title)
 
@@ -474,12 +478,12 @@ class ShiftAndCashDialog(QDialog):
         root.addWidget(summary)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_shift_tab(), "🔒 Smena barlagy (Z-hasabat)")
-        self.tabs.addTab(self._build_bills_tab(), "🧮 Kupýura sanawy (TMT + USD)")
+        self.tabs.addTab(self._build_shift_tab(), make_icon("lock", theme.NAVY, 16), "Smena barlagy (Z-hasabat)")
+        self.tabs.addTab(self._build_bills_tab(), make_icon("calc", theme.NAVY, 16), "Kupýura sanawy (TMT + USD)")
         root.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
-        self.adjust_btn = make_button("⚖ Kassany hakyky pul boýunça deňle")
+        self.adjust_btn = make_icon_button("Kassany hakyky pul boýunça deňle", "scale")
         self.adjust_btn.clicked.connect(self._apply_reconciliation)
         footer.addWidget(self.adjust_btn)
 
@@ -487,7 +491,7 @@ class ShiftAndCashDialog(QDialog):
 
         close_btn = make_button("Ýap")
         close_btn.clicked.connect(self.accept)
-        pdf_btn = make_button("🖨 Z-hasabaty PDF-de ýatda sakla", "primary")
+        pdf_btn = make_icon_button("Z-hasabaty PDF-de ýatda sakla", "print", "primary")
         pdf_btn.clicked.connect(self._export_pdf)
         footer.addWidget(close_btn)
         footer.addWidget(pdf_btn)
@@ -582,7 +586,7 @@ class ShiftAndCashDialog(QDialog):
         clear_btn.clicked.connect(self._clear_bills)
         rate_row.addWidget(clear_btn)
 
-        sync_btn = make_button("↪ Smena barlagyna geçir")
+        sync_btn = make_icon_button("Smena barlagyna geçir", "export")
         sync_btn.clicked.connect(self._sync_bills_to_shift)
         rate_row.addWidget(sync_btn)
         lay.addLayout(rate_row)
@@ -727,7 +731,7 @@ class ShiftAndCashDialog(QDialog):
         has_diff = diff_usd != Decimal("0.00") or diff_tmt != Decimal("0.00")
         self.adjust_btn.setEnabled(has_diff)
         if not has_diff:
-            self.status_banner.setText("✔ Iki kassadaky hakyky nagt pul hasaplanan galyndy bilen doly gabat gelýär.")
+            self.status_banner.setText("Iki kassadaky hakyky nagt pul hasaplanan galyndy bilen doly gabat gelýär.")
             self.status_banner.setStyleSheet(
                 f"padding: 8px 10px; border-radius: 8px; background: #EAF7EF; color: {theme.GREEN}; font-weight: 600;"
             )
@@ -857,15 +861,15 @@ class FinancePage(QWidget):
         adjust_btn.clicked.connect(self._open_adjustment_dialog)
         header.addWidget(adjust_btn)
 
-        zero_cash_btn = make_button("🧹 Kassany nolla", "danger")
+        zero_cash_btn = make_icon_button("Kassany nolla", "trash", "danger")
         zero_cash_btn.clicked.connect(self._zero_cash_dialog)
         header.addWidget(zero_cash_btn)
 
-        shift_cash_btn = make_button("🔒 Smena we kassa sanawy", "dark")
+        shift_cash_btn = make_icon_button("Smena we kassa sanawy", "lock", "dark")
         shift_cash_btn.clicked.connect(self._open_shift_and_cash_dialog)
         header.addWidget(shift_cash_btn)
 
-        refresh_btn = make_button("↻ Täzele", "primary")
+        refresh_btn = make_icon_button("Täzele", "refresh", "primary")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -888,7 +892,7 @@ class FinancePage(QWidget):
 
         # 2. Simurg bergisi (кликабельная -> открывает вкладку Simurg)
         self.simurg_main_label = QLabel("$0.00 USD  |  0.00 TMT")
-        self.simurg_sub_label = QLabel("✔ Taýýar: 0.00 TMT • 0 enjam")
+        self.simurg_sub_label = QLabel("Taýýar: 0.00 TMT • 0 enjam")
         self.simurg_card = self._build_clean_card(
             "Simurg bergisi →",
             self.simurg_main_label,
@@ -930,7 +934,7 @@ class FinancePage(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_journal_tab(), "Maliýe amallary žurnaly")
-        self.tabs.addTab(self._create_simurg_tab(), "🏦 Simurg hasaplaşyklary")
+        self.tabs.addTab(self._create_simurg_tab(), make_icon("bank", theme.NAVY, 16), "Simurg hasaplaşyklary")
         self.tabs.addTab(self._create_supplier_debts_tab(), "Üpjün edijiler bilen hasaplaşyk")
         root.addWidget(self.tabs, 1)
 
@@ -1019,7 +1023,7 @@ class FinancePage(QWidget):
         self.journal_search.textChanged.connect(self._load_journal)
         filters.addWidget(self.journal_search, 1)
 
-        open_doc_btn = make_button("📄 Aç", "primary")
+        open_doc_btn = make_icon_button("Aç", "list", "primary")
         open_doc_btn.setToolTip("Bagly resminamany aç")
         open_doc_btn.clicked.connect(self._open_selected_journal_doc)
         filters.addWidget(open_doc_btn)
@@ -1036,7 +1040,10 @@ class FinancePage(QWidget):
             "ID", "Sene", "Ugur", "Amal görnüşi", "Jemi", "Walýuta", "Kurs", "Resminama", "Bellik",
         ])
         configure_table(self.journal_table)
+        align_numeric_columns(self.journal_table, (4, 6))
         self.journal_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Stretch)
+        for col, width in ((0, 52), (1, 138), (2, 96), (3, 128), (4, 108), (5, 74), (6, 82), (7, 118)):
+            self.journal_table.setColumnWidth(col, width)
         self.journal_table.cellDoubleClicked.connect(self._open_journal_document)
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.journal_table)
@@ -1061,8 +1068,8 @@ class FinancePage(QWidget):
 
         self.simurg_filter_combo = style_combo(QComboBox())
         self.simurg_filter_combo.addItem("Ähli açyk Simurg bergileri", "open")
-        self.simurg_filter_combo.addItem("🟢 Diňe almak üçin taýýar (≥5 gün)", "ready")
-        self.simurg_filter_combo.addItem("🟡 Garaşylýanlar (<5 gün)", "pending")
+        self.simurg_filter_combo.addItem("Diňe almak üçin taýýar (≥5 gün)", "ready")
+        self.simurg_filter_combo.addItem("Garaşylýanlar (<5 gün)", "pending")
         self.simurg_filter_combo.addItem("Ähli çekler (tölenenler bilen)", "all")
         self.simurg_filter_combo.currentIndexChanged.connect(self._load_simurg_table)
         top.addWidget(self.simurg_filter_combo)
@@ -1073,19 +1080,19 @@ class FinancePage(QWidget):
         self.simurg_search.textChanged.connect(self._load_simurg_table)
         top.addWidget(self.simurg_search, 1)
 
-        collect_ready_btn = make_button("💰 Taýýar puly al (≥5 gün)", "success")
+        collect_ready_btn = make_icon_button("Taýýar puly al (≥5 gün)", "cash", "success")
         collect_ready_btn.clicked.connect(self._collect_all_ready_simurg)
         top.addWidget(collect_ready_btn)
 
-        collect_custom_btn = make_button("💵 Töleg al (summa)", "primary")
+        collect_custom_btn = make_icon_button("Töleg al (summa)", "cash", "primary")
         collect_custom_btn.clicked.connect(self._open_simurg_payout_dialog)
         top.addWidget(collect_custom_btn)
 
-        open_btn = make_button("📄 Çeki aç")
+        open_btn = make_icon_button("Çeki aç", "list")
         open_btn.clicked.connect(self._open_selected_simurg_sale)
         top.addWidget(open_btn)
 
-        zero_debt_btn = make_button("🧹 Bergini nolla", "danger")
+        zero_debt_btn = make_icon_button("Bergini nolla", "trash", "danger")
         zero_debt_btn.clicked.connect(self._zero_selected_simurg_debt)
         top.addWidget(zero_debt_btn)
 
@@ -1104,7 +1111,10 @@ class FinancePage(QWidget):
             "Ýagdaýy",
         ])
         configure_table(self.simurg_table)
+        align_numeric_columns(self.simurg_table, (6, 7))
         self.simurg_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        for col, width in ((0, 52), (1, 115), (2, 105), (3, 128), (5, 145), (6, 105), (7, 105), (8, 115)):
+            self.simurg_table.setColumnWidth(col, width)
         self.simurg_table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected_simurg_sale())
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.simurg_table)
@@ -1141,11 +1151,11 @@ class FinancePage(QWidget):
         open_btn.clicked.connect(self._open_selected_supplier_purchase)
         top.addWidget(open_btn)
 
-        pay_sup_btn = make_button("✔ Doly hasaplaş (kassa)")
+        pay_sup_btn = make_icon_button("Doly hasaplaş (kassa)", "check")
         pay_sup_btn.clicked.connect(lambda: self._settle_selected_supplier_debt(with_cash=True))
         top.addWidget(pay_sup_btn)
 
-        zero_sup_btn = make_button("🧹 Bergini nolla", "danger")
+        zero_sup_btn = make_icon_button("Bergini nolla", "trash", "danger")
         zero_sup_btn.clicked.connect(lambda: self._settle_selected_supplier_debt(with_cash=False))
         top.addWidget(zero_sup_btn)
 
@@ -1162,7 +1172,10 @@ class FinancePage(QWidget):
             "Galan bergi",
         ])
         configure_table(self.sup_table)
+        align_numeric_columns(self.sup_table, (4, 5, 6))
         self.sup_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.sup_table.setColumnWidth(0, 72)
+        self.sup_table.setColumnWidth(1, 138)
         self.sup_table.cellDoubleClicked.connect(lambda _r, _c: self._open_selected_supplier_purchase())
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.sup_table)
@@ -1209,7 +1222,7 @@ class FinancePage(QWidget):
         if rdy["USD"] > 0:
             ready_parts.append(f"${rdy['USD']:,.2f} USD")
         self.simurg_sub_label.setText(
-            f"✔ Taýýar (≥5g): {' + '.join(ready_parts)}  •  {simurg['total_items_count']} enjam"
+            f"Taýýar (≥5g): {' + '.join(ready_parts)}  •  {simurg['total_items_count']} enjam"
         )
         self.simurg_card.setToolTip(
             f"Açyk çekler: {simurg['open_sales_count']}\n"
@@ -1289,7 +1302,9 @@ class FinancePage(QWidget):
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 2, 4, 5, 6):
+                if c in (4, 6):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (0, 2, 5):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c in (2, 4):
                     cell.setForeground(
@@ -1350,19 +1365,22 @@ class FinancePage(QWidget):
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 2, 3, 6, 7, 8):
+                if c in (6, 7):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (0, 2, 3, 8):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 7 and r["remaining_debt"] > 0:
                     cell.setForeground(QColor(theme.GREEN if r["is_ready"] else theme.ACCENT))
                 if c == 8:
+                    f = cell.font()
+                    f.setBold(True)
+                    cell.setFont(f)
                     if r["remaining_debt"] <= 0:
                         cell.setForeground(QColor(theme.MUTED))
                     elif r["is_ready"]:
-                        cell.setForeground(QColor("white"))
-                        cell.setBackground(QColor(theme.GREEN))
+                        cell.setForeground(QColor(theme.GREEN))
                     else:
-                        cell.setForeground(QColor("#9A3412"))
-                        cell.setBackground(QColor("#FFEDD5"))
+                        cell.setForeground(QColor(theme.ACCENT))
                 self.simurg_table.setItem(i, c, cell)
 
         tot = summary["total_debt"]
@@ -1410,7 +1428,9 @@ class FinancePage(QWidget):
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 3, 4, 5, 6):
+                if c in (4, 5, 6):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (0, 3):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 6 and r["store_debt_to_supplier"] > 0:
                     cell.setForeground(QColor(theme.RED))

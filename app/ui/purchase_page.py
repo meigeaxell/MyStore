@@ -30,7 +30,7 @@ from app.models.purchase_item import PurchaseItem
 from app.models.purchase_payment import PurchasePayment
 from app.models.purchase_refund import PurchaseRefund
 from app.repositories.product_repository import (
-    find_product_by_barcode,
+    find_products_by_barcode,
     get_low_stock_products,
 )
 from app.services.finance_service import FinanceService
@@ -48,10 +48,13 @@ from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.selection_dialogs import CatalogProductSelectorDialog
 from app.ui.widgets import (
+    NUM_ALIGN,
     ClickableCard,
+    align_numeric_columns,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     make_stat_card,
     money_str,
     show_toast,
@@ -311,7 +314,7 @@ class PurchaseDialog(QDialog):
         section.setObjectName("cardTitle")
         sec_row.addWidget(section, 1)
 
-        low_stock_btn = make_button("⚡ Az galan harytlary doldur")
+        low_stock_btn = make_icon_button("Az galan harytlary doldur", "bolt")
         low_stock_btn.clicked.connect(self._fill_low_stock_products)
         sec_row.addWidget(low_stock_btn)
         root.addLayout(sec_row)
@@ -350,7 +353,7 @@ class PurchaseDialog(QDialog):
 
         self._populate_product_combo()
 
-        browse_btn = make_button("🔍 Katalog / + Täze…")
+        browse_btn = make_icon_button("Katalog / Täze…", "search")
         browse_btn.setMinimumHeight(38)
         browse_btn.clicked.connect(self._open_catalog_selector)
 
@@ -377,7 +380,7 @@ class PurchaseDialog(QDialog):
         root.addWidget(self.items_table, 2)
 
         item_actions = QHBoxLayout()
-        imei_button = make_button("📱 Saýlanan setir üçin IMEI görkez")
+        imei_button = make_icon_button("Saýlanan setir üçin IMEI görkez", "phone")
         imei_button.clicked.connect(self._open_imei_for_selected)
         remove_item_button = make_button("Saýlanan setiri poz", "danger")
         remove_item_button.clicked.connect(self._remove_item)
@@ -558,7 +561,29 @@ class PurchaseDialog(QDialog):
         trans_map.update({ord(r.upper()): ord(e.upper()) for r, e in zip(ru_layout, en_layout)})
         code_en = raw_code.translate(trans_map)
 
-        product = find_product_by_barcode(raw_code) or find_product_by_barcode(code_en)
+        matches = find_products_by_barcode(raw_code) or find_products_by_barcode(code_en)
+        product = None
+        if len(matches) == 1:
+            product = matches[0]
+        elif len(matches) > 1:
+            labels = [
+                f"{p.name}"
+                + (f" — {' / '.join(filter(None, [p.brand, p.model, p.specification]))}" if any((p.brand, p.model, p.specification)) else "")
+                for p in matches
+            ]
+            chosen, ok = QInputDialog.getItem(
+                self,
+                "Ştrihkod boýunça harydy saýlaň",
+                f"«{raw_code}» ştrihkodyna {len(matches)} sany haryt gabat geldi:",
+                labels,
+                0,
+                False,
+            )
+            if not ok:
+                self.barcode_scan_input.selectAll()
+                return
+            product = matches[labels.index(chosen)]
+
         if product is None:
             from app.ui.product_dialog import ProductDialog
 
@@ -1201,7 +1226,7 @@ class PurchasePage(QWidget):
         self.count_label.setObjectName("mutedText")
         header.addWidget(self.count_label)
 
-        refresh_button = make_button("↻ Täzele")
+        refresh_button = make_icon_button("Täzele", "refresh")
         refresh_button.clicked.connect(self._load_data)
         header.addWidget(refresh_button)
 
@@ -1233,7 +1258,7 @@ class PurchasePage(QWidget):
         self.expenses_card.setToolTip("Täze çykdajy ýazmak üçin basyň")
         self.expenses_card.clicked.connect(self._open_expense_dialog)
         exp_head = QHBoxLayout()
-        exp_title = QLabel("💸 Çykdajylar (şu aý)")
+        exp_title = QLabel("Çykdajylar (şu aý)")
         exp_title.setObjectName("mutedText")
         exp_badge = QLabel("+ Çykdajy ýaz →")
         exp_badge.setStyleSheet(
@@ -1276,6 +1301,9 @@ class PurchasePage(QWidget):
             "Ýagdaýy",
         ])
         configure_table(self.table, stretch_col=2, row_height=46)
+        align_numeric_columns(self.table, (5, 6, 7))
+        for col, width in ((0, 52), (1, 138), (3, 125), (4, 72), (5, 100), (6, 100), (7, 105), (8, 110)):
+            self.table.setColumnWidth(col, width)
         self.table.cellDoubleClicked.connect(self._open_selected)
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.table)
@@ -1284,11 +1312,11 @@ class PurchasePage(QWidget):
         root.addWidget(self.table, 1)
 
         actions = QHBoxLayout()
-        open_btn = make_button("📄 Saýlanan alyşy aç", "primary")
+        open_btn = make_icon_button("Saýlanan alyşy aç", "list", "primary")
         open_btn.clicked.connect(self._open_selected_button)
         actions.addWidget(open_btn)
 
-        repeat_btn = make_button("🔁 Saýlanan alyşy gaýtala")
+        repeat_btn = make_icon_button("Saýlanan alyşy gaýtala", "repeat")
         repeat_btn.clicked.connect(self._repeat_selected_purchase)
         actions.addWidget(repeat_btn)
 
@@ -1427,13 +1455,17 @@ class PurchasePage(QWidget):
             ]
             for column, value in enumerate(values):
                 cell = QTableWidgetItem(value)
-                if column in (0, 4, 5, 6, 7):
+                if column in (5, 6, 7):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif column in (0, 4):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if column == 2:
                     cell.setToolTip(purchase["items_summary"])
                 if column == 8:
-                    cell.setForeground(QColor("white"))
-                    cell.setBackground(QColor(status_color))
+                    f = cell.font()
+                    f.setBold(True)
+                    cell.setFont(f)
+                    cell.setForeground(QColor(status_color))
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if cancelled and column != 8:
                     cell.setForeground(QColor("#858B94"))

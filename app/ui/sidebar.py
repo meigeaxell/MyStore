@@ -532,6 +532,25 @@ class NavItemButton(QPushButton):
                 p.setPen(QColor("#FFFFFF"))
                 p.drawText(brect, Qt.AlignmentFlag.AlignCenter, b_txt)
                 text_right = brect.left() - 6.0
+            elif self._shortcut_hint and self._progress > 0.45:
+                hint_alpha = min(1.0, (self._progress - 0.45) / 0.45) * text_alpha
+                p.save()
+                p.setOpacity(hint_alpha)
+                hf = QFont(self.font())
+                hf.setPointSizeF(7.6)
+                hf.setWeight(QFont.Weight.Medium)
+                hfm = QFontMetrics(hf)
+                hw = hfm.horizontalAdvance(self._shortcut_hint) + 4.0
+                hrect = QRectF(text_right - hw, 0.0, hw, rect.height())
+                p.setFont(hf)
+                p.setPen(QColor(theme.FAINT))
+                p.drawText(
+                    hrect,
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    self._shortcut_hint,
+                )
+                p.restore()
+                text_right = hrect.left() - 6.0
 
             lbl_font = QFont(self.font())
             lbl_font.setPointSizeF(9.6)

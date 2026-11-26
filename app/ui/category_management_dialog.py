@@ -75,7 +75,7 @@ class CategoryManagementDialog(QDialog):
                 is_system = is_system_category_code(cat.code)
                 markers: list[str] = []
                 if is_system:
-                    markers.append("🔒 Hemişelik")
+                    markers.append("Hemişelik")
                 if not cat.is_active:
                     markers.append("işjeň däl")
                 suffix = f"  •  {'  •  '.join(markers)}" if markers else ""

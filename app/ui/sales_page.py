@@ -40,11 +40,15 @@ from app.ui import theme
 from app.ui.receipt_printer import export_sale_receipt_pdf
 from app.ui.selection_dialogs import InventorySelectorDialog
 from app.ui.widgets import (
+    NUM_ALIGN,
     Card,
+    InlineAlert,
     SearchResultPopup,
+    align_numeric_columns,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
     show_toast,
     style_combo,
@@ -167,7 +171,7 @@ class SaleDetailsDialog(QDialog):
         self.title_label.setObjectName("pageTitle")
         top_bar.addWidget(self.title_label, 1)
 
-        print_btn = make_button("🖨 Çap et / PDF çek", "primary")
+        print_btn = make_icon_button("Çap et / PDF çek", "print", "primary")
         print_btn.clicked.connect(lambda: export_sale_receipt_pdf(self.sale_id, self))
         top_bar.addWidget(print_btn)
         root.addLayout(top_bar)
@@ -192,11 +196,12 @@ class SaleDetailsDialog(QDialog):
         items_title.setObjectName("cardTitle")
         root.addWidget(items_title)
 
-        self.items_table = QTableWidget(0, 8)
+        self.items_table = QTableWidget(0, 9)
         self.items_table.setHorizontalHeaderLabels([
-            "Haryt", "Kategoriýa", "Brend / Model", "IMEI", "Sany", "Baha", "Öz bahasy", "Jemi",
+            "Haryt", "Kategoriýa", "Brend / Model", "IMEI", "Sany", "Baha", "Öz bahasy", "Jemi", "Peýda",
         ])
         configure_table(self.items_table, stretch_col=[0, 2], row_height=42)
+        align_numeric_columns(self.items_table, (5, 6, 7, 8))
         self.items_table.setMinimumHeight(130)
         root.addWidget(self.items_table)
 
@@ -314,7 +319,7 @@ class SaleDetailsDialog(QDialog):
             if getattr(sale, "is_simurg", False):
                 p_dt = getattr(sale, "simurg_payout_date", None)
                 p_str = p_dt.strftime("%d.%m.%Y") if p_dt else "—"
-                simurg_str = f"   |   🏦 Simurg (aljak güni: {p_str})"
+                simurg_str = f"   |   Simurg (aljak güni: {p_str})"
 
             self.info_label.setText(
                 f"Sene: {sale.sale_date:%d.%m.%Y %H:%M}   |   "
@@ -333,10 +338,23 @@ class SaleDetailsDialog(QDialog):
                 .where(SaleItem.sale_id == sale.id)
             ).all()
 
+            sale_rate = Decimal(str(sale.exchange_rate or 19.5))
+            total_profit = Decimal("0.00")
             self.items_table.setRowCount(len(item_rows))
             for idx, (s_item, prod, cat_name) in enumerate(item_rows):
                 line_sum = Decimal(str(s_item.unit_price)) * s_item.quantity - Decimal(str(s_item.discount))
+                cost_cur = (s_item.cost_currency or sale.currency or "TMT").upper()
+                line_cost_doc = _convert_currency(
+                    Decimal(str(s_item.unit_cost or 0)),
+                    cost_cur,
+                    sale.currency,
+                    sale_rate,
+                ) * s_item.quantity
+                line_profit = line_sum - line_cost_doc
+                total_profit += line_profit
                 cost_txt = f"{money_str(s_item.unit_cost)} {s_item.cost_currency}"
+                p_sign = "+" if line_profit >= 0 else "−"
+                profit_txt = f"{p_sign}{money_str(abs(line_profit))} {sale.currency}"
                 bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
                 if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
                     bm = prod.specification.strip()
@@ -349,12 +367,23 @@ class SaleDetailsDialog(QDialog):
                     f"{money_str(s_item.unit_price)} {s_item.currency}",
                     cost_txt,
                     f"{money_str(line_sum)} {s_item.currency}",
+                    profit_txt,
                 ]
                 for c, val in enumerate(vals):
                     cell = QTableWidgetItem(val)
-                    if c >= 4:
+                    if c in (5, 6, 7, 8):
+                        cell.setTextAlignment(NUM_ALIGN)
+                    elif c == 4:
                         cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    if c == 8:
+                        cell.setForeground(QColor(theme.GREEN if line_profit >= 0 else theme.RED))
                     self.items_table.setItem(idx, c, cell)
+
+            tp_sign = "+" if total_profit >= 0 else "−"
+            self.info_label.setText(
+                self.info_label.text()
+                + f"   |   Peýda: {tp_sign}{money_str(abs(total_profit))} {sale.currency}"
+            )
 
             payments = session.scalars(
                 select(SalePayment)
@@ -593,11 +622,11 @@ class SalesPage(QWidget):
         title_col.addWidget(sub)
         top_layout.addLayout(title_col, 1)
 
-        self.hold_btn = make_button("⏸ Çeki goý")
+        self.hold_btn = make_icon_button("Çeki goý", "pause")
         self.hold_btn.clicked.connect(self._hold_current_cart)
         top_layout.addWidget(self.hold_btn)
 
-        self.held_list_btn = make_button("📂 Garaşýanlar (0)")
+        self.held_list_btn = make_icon_button("Garaşýanlar (0)", "folder")
         self.held_list_btn.clicked.connect(self._open_held_carts_dialog)
         top_layout.addWidget(self.held_list_btn)
 
@@ -661,12 +690,13 @@ class SalesPage(QWidget):
             "ID",
             "Haryt",
             "IMEI",
-            "Sany ✎",
-            "Öz bahasy ✎",
-            "Satyş bahasy ✎",
+            "Sany",
+            "Öz bahasy",
+            "Satyş bahasy",
             "Jemi (Peýda)",
         ])
         configure_table(self.cart_table, stretch_col=1, row_height=46)
+        align_numeric_columns(self.cart_table, (self.COL_COST, self.COL_PRICE, self.COL_SUM_PROFIT))
         self.cart_table.setEditTriggers(
             QTableWidget.EditTrigger.DoubleClicked
             | QTableWidget.EditTrigger.SelectedClicked
@@ -678,7 +708,7 @@ class SalesPage(QWidget):
         cart_actions = QHBoxLayout()
         cart_actions.setSpacing(8)
 
-        price_btn = make_button("✎ Satyş bahasyny giriz (F4)", "primary")
+        price_btn = make_icon_button("Satyş bahasyny giriz (F4)", "edit", "primary")
         price_btn.clicked.connect(self._edit_selected_price)
         cart_actions.addWidget(price_btn)
 
@@ -735,6 +765,9 @@ class SalesPage(QWidget):
         grid.addWidget(self.profit_label, 3, 1)
         rl.addLayout(grid)
 
+        self.price_alert = InlineAlert("warning")
+        rl.addWidget(self.price_alert)
+
         mode_label = QLabel("Töleg usuly:")
         mode_label.setStyleSheet("font-weight: 600;")
         rl.addWidget(mode_label)
@@ -743,7 +776,7 @@ class SalesPage(QWidget):
         mode_row.setSpacing(6)
         self.mode_group = QButtonGroup(self)
 
-        self.full_pay_mode_btn = QPushButton("✔ Nagt (doly töleg)")
+        self.full_pay_mode_btn = QPushButton("Nagt (doly töleg)")
         self.full_pay_mode_btn.setObjectName("chip")
         self.full_pay_mode_btn.setCheckable(True)
         self.full_pay_mode_btn.setAutoDefault(False)
@@ -751,7 +784,7 @@ class SalesPage(QWidget):
         self.full_pay_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.full_pay_mode_btn.clicked.connect(lambda: self._set_payment_mode(True))
 
-        self.simurg_mode_btn = QPushButton("🏦 Simurg (+5 gün)")
+        self.simurg_mode_btn = QPushButton("Simurg (+5 gün)")
         self.simurg_mode_btn.setObjectName("chip")
         self.simurg_mode_btn.setCheckable(True)
         self.simurg_mode_btn.setAutoDefault(False)
@@ -765,7 +798,7 @@ class SalesPage(QWidget):
         rl.addLayout(mode_row)
 
         self.auto_pay_banner = QLabel(
-            "✔ Nagt satyş: doly jemi şol wagtda kassa geçýär."
+            "Nagt satyş: doly jemi şol wagtda kassa geçýär."
         )
         self.auto_pay_banner.setWordWrap(True)
         self.auto_pay_banner.setStyleSheet(
@@ -779,7 +812,7 @@ class SalesPage(QWidget):
         sb_layout.setSpacing(8)
 
         self.simurg_banner = QLabel(
-            "🏦 Simurg garaşaryna: kassaga 0 geçýär, doly jemi (peýda bilen) "
+            "Simurg garaşaryna: kassaga 0 geçýär, doly jemi (peýda bilen) "
             "Simurg bergisine ýazylýar we 5 günden soň almaga taýýar bolýar."
         )
         self.simurg_banner.setWordWrap(True)
@@ -821,7 +854,7 @@ class SalesPage(QWidget):
         self.checkout_btn.clicked.connect(self._process_checkout)
         rl.addWidget(self.checkout_btn)
 
-        self.print_last_btn = make_button("🖨 Soňky çeki çap et / PDF")
+        self.print_last_btn = make_icon_button("Soňky çeki çap et / PDF", "print")
         self.print_last_btn.setEnabled(False)
         self.print_last_btn.clicked.connect(self._print_last_receipt)
         rl.addWidget(self.print_last_btn)
@@ -843,7 +876,7 @@ class SalesPage(QWidget):
         self.history_search.textChanged.connect(self._filter_history)
         header.addWidget(self.history_search, 1)
 
-        print_btn = make_button("🖨 Çap et / PDF çek")
+        print_btn = make_icon_button("Çap et / PDF çek", "print")
         print_btn.clicked.connect(self._print_selected_history_sale)
         header.addWidget(print_btn)
 
@@ -851,7 +884,7 @@ class SalesPage(QWidget):
         open_btn.clicked.connect(self._open_selected_sale_button)
         header.addWidget(open_btn)
 
-        refresh_btn = make_button("↻ Täzele")
+        refresh_btn = make_icon_button("Täzele", "refresh")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -860,11 +893,14 @@ class SalesPage(QWidget):
         header.addWidget(cancel_btn)
         layout.addLayout(header)
 
-        self.history_table = QTableWidget(0, 8)
+        self.history_table = QTableWidget(0, 9)
         self.history_table.setHorizontalHeaderLabels([
-            "ID", "Çek", "Sene", "Harytlar (Ady • Kategoriýa • Model)", "Müşderi", "Jemi", "Bergi / Status", "Bellik",
+            "ID", "Çek", "Sene", "Harytlar (Ady • Kategoriýa • Model)", "Müşderi", "Jemi", "Peýda", "Bergi / Status", "Bellik",
         ])
         configure_table(self.history_table, stretch_col=[3], row_height=44)
+        align_numeric_columns(self.history_table, (5, 6))
+        self.history_table.setColumnWidth(0, 52)
+        self.history_table.setColumnWidth(2, 138)
         self.history_table.cellDoubleClicked.connect(self._open_sale_details)
         for seq in ("Return", "Enter"):
             sc = QShortcut(QKeySequence(seq), self.history_table)
@@ -885,14 +921,14 @@ class SalesPage(QWidget):
         self.simurg_box.setVisible(not auto_full)
         if not auto_full:
             self.simurg_payout_date.setDate(QDate.currentDate().addDays(5))
-            self.checkout_btn.setText("🏦 SIMURG SATYŞY GEÇIR (F9)")
+            self.checkout_btn.setText("SIMURG SATYŞY GEÇIR (F9)")
         else:
             self.checkout_btn.setText("SATYŞY GEÇIR (F9)")
         self._recalculate_totals()
 
     def _update_held_button_count(self) -> None:
         carts = SettingsService.get_held_carts()
-        self.held_list_btn.setText(f"📂 Garaşýanlar ({len(carts)})")
+        self.held_list_btn.setText(f"Garaşýanlar ({len(carts)})")
 
     def _hold_current_cart(self) -> None:
         if not self.cart_items:
@@ -1020,7 +1056,9 @@ class SalesPage(QWidget):
 
             sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc()).limit(200)).all()
             sale_ids = [s.id for s in sales]
+            sale_by_id = {s.id: s for s in sales}
             items_summary_map: dict[int, str] = {}
+            profit_by_sale: dict[int, Decimal] = {}
             if sale_ids:
                 si_rows = session.execute(
                     select(SaleItem, Product, Category.name)
@@ -1031,6 +1069,14 @@ class SalesPage(QWidget):
                 ).all()
                 grouped: dict[int, list[str]] = {}
                 for si, prod, cat_name in si_rows:
+                    s_obj = sale_by_id.get(si.sale_id)
+                    if s_obj is not None:
+                        s_cur = (s_obj.currency or "TMT").upper()
+                        s_rate = Decimal(str(s_obj.exchange_rate or 19.5))
+                        c_cur = (si.cost_currency or s_cur).upper()
+                        l_rev = Decimal(str(si.unit_price or 0)) * int(si.quantity or 0) - Decimal(str(si.discount or 0))
+                        l_cost = _convert_currency(Decimal(str(si.unit_cost or 0)), c_cur, s_cur, s_rate) * int(si.quantity or 0)
+                        profit_by_sale[si.sale_id] = profit_by_sale.get(si.sale_id, Decimal("0.00")) + (l_rev - l_cost)
                     bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
                     if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
                         bm = prod.specification.strip()
@@ -1046,17 +1092,23 @@ class SalesPage(QWidget):
 
             for s in sales:
                 date_str = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else "—"
+                sale_profit = profit_by_sale.get(s.id, Decimal("0.00"))
                 if s.status == "cancelled":
                     status_text = "Ýatyryldy"
                     status_color = theme.RED
+                    profit_text = "—"
+                    profit_color = theme.MUTED
                 else:
+                    p_sign = "+" if sale_profit >= 0 else "−"
+                    profit_text = f"{p_sign}{money_str(abs(sale_profit))} {s.currency}"
+                    profit_color = theme.GREEN if sale_profit >= 0 else theme.RED
                     cust_debt = SalesService.get_customer_debt(session, s)
                     if cust_debt > 0:
-                        prefix = "🏦 Simurg" if getattr(s, "is_simurg", False) else "Bergi"
+                        prefix = "Simurg" if getattr(s, "is_simurg", False) else "Bergi"
                         status_text = f"{prefix}: {money_str(cust_debt)}"
                         status_color = theme.ACCENT
                     else:
-                        status_text = "🏦 Simurg (tölendi)" if getattr(s, "is_simurg", False) else "Tölendi"
+                        status_text = "Simurg (tölendi)" if getattr(s, "is_simurg", False) else "Tölendi"
                         status_color = theme.GREEN
 
                 self._all_sales_rows.append({
@@ -1067,6 +1119,8 @@ class SalesPage(QWidget):
                     "customer": s.customer_name or "—",
                     "currency": s.currency,
                     "total": f"{money_str(s.total_amount)} {s.currency}",
+                    "profit_text": profit_text,
+                    "profit_color": profit_color,
                     "status_text": status_text,
                     "status_color": status_color,
                     "info": s.comment or s.cancellation_reason or "",
@@ -1095,16 +1149,21 @@ class SalesPage(QWidget):
                 r["items_summary"],
                 r["customer"],
                 r["total"],
+                r["profit_text"],
                 r["status_text"],
                 r["info"],
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 5, 6):
+                if c in (5, 6):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (0, 7):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 3:
                     cell.setToolTip(r["items_summary"])
                 if c == 6:
+                    cell.setForeground(QColor(r["profit_color"]))
+                if c == 7:
                     cell.setForeground(QColor(r["status_color"]))
                 self.history_table.setItem(i, c, cell)
 
@@ -1382,17 +1441,23 @@ class SalesPage(QWidget):
                         self.search_input.clear()
                         return
 
-            # 2. Точный поиск по штрихкоду (Barcode)
-            exact_barcode = session.scalar(
-                select(Product).where(
+            # 2. Точный поиск по штрихкоду (Barcode) — поддерживаем общие штрихкоды для нескольких вариантов
+            exact_barcodes = session.scalars(
+                select(Product)
+                .where(
                     Product.is_active.is_(True),
                     Product.stock_quantity > 0,
                     (func.lower(Product.barcode) == text.lower())
                     | (func.lower(Product.barcode) == text_en.lower()),
                 )
-            )
-            if exact_barcode is not None:
-                self._append_to_cart(exact_barcode)
+                .order_by(Product.name.asc())
+            ).all()
+            if len(exact_barcodes) == 1:
+                self._append_to_cart(exact_barcodes[0])
+                self.search_input.clear()
+                return
+            if len(exact_barcodes) > 1:
+                self._open_inventory_selector(text)
                 self.search_input.clear()
                 return
 
@@ -1667,20 +1732,20 @@ class SalesPage(QWidget):
 
             c_cost = QTableWidgetItem(f"{unit_cost_doc:.2f}")
             c_cost.setFlags(editable_flags)
-            c_cost.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_cost.setTextAlignment(NUM_ALIGN)
             c_cost.setToolTip(f"1 sanynyň {cur} öz bahasy (şu ýerde üýtgedip bilersiňiz)")
             c_cost.setForeground(QColor(theme.MUTED))
 
             c_price = QTableWidgetItem(f"{unit_price:.2f}")
             c_price.setFlags(editable_flags)
-            c_price.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_price.setTextAlignment(NUM_ALIGN)
             c_price.setBackground(QColor("#FFF8F1"))
             c_price.setForeground(QColor(theme.NAVY))
             c_price.setToolTip("Ylalaşylan satyş bahasyny giriziň we Enter basyň")
 
             c_sum = QTableWidgetItem(sum_profit_str)
             c_sum.setFlags(read_only_flags)
-            c_sum.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_sum.setTextAlignment(NUM_ALIGN)
             c_sum.setForeground(QColor(theme.GREEN if line_profit >= 0 else theme.RED))
 
             self.cart_table.setItem(i, self.COL_ID, c_id)
@@ -1797,16 +1862,63 @@ class SalesPage(QWidget):
             f"font-size: 12.5pt; font-weight: 700; color: {theme.GREEN if profit >= 0 else theme.RED};"
         )
 
+        self._update_price_alert()
+
         if self.auto_full_payment:
             self.auto_pay_banner.setText(
-                f"✔ Nagt satyş: {total:,.2f} {cur} şol wagtda kassa geçýär."
+                f"Nagt satyş: {total:,.2f} {cur} şol wagtda kassa geçýär."
             )
         else:
             p_date = self.simurg_payout_date.date().toString("dd.MM.yyyy")
             self.simurg_banner.setText(
-                f"🏦 Simurg garaşaryna: {total:,.2f} {cur} Simurg bergisine ýazylýar "
+                f"Simurg garaşaryna: {total:,.2f} {cur} Simurg bergisine ýazylýar "
                 f"(aljak güni: {p_date}, kassa: 0.00)."
             )
+
+    def _price_issues(self) -> list[tuple[int, str, str, str]]:
+        """Подозрительные цены в корзине: (индекс строки, тип, текст). Только UI-проверка."""
+        cur = self.currency_combo.currentText()
+        issues: list[tuple[int, str, str, str]] = []
+        for idx, it in enumerate(self.cart_items):
+            u_price = Decimal(str(it["unit_price"]))
+            u_cost = self._item_cost_in_receipt_currency(it)
+            name = it["name"]
+            if u_price <= Decimal("0.00"):
+                issues.append((idx, "zero", f"«{name}»: satyş bahasy 0.00 {cur}", f"«{name}»: baha 0.00"))
+            elif u_cost > Decimal("0.00") and u_price < u_cost:
+                loss = (u_cost - u_price) * int(it["quantity"])
+                text = (
+                    f"«{name}»: baha {u_price:,.2f} {cur} öz bahasyndan {u_cost:,.2f} {cur} pes "
+                    f"(zyýan −{loss:,.2f} {cur})"
+                )
+                if u_price * Decimal("2.5") < u_cost:
+                    text += " — walýuta ýa-da nol ýalňyşlygy bolup biler"
+                issues.append((idx, "loss", text, f"«{name}»: baha öz bahasyndan pes (−{loss:,.0f} {cur})"))
+            elif u_cost > Decimal("0.00") and u_price > u_cost * Decimal(3):
+                issues.append((
+                    idx,
+                    "high",
+                    (
+                        f"«{name}»: baha {u_price:,.2f} {cur} öz bahasyndan {u_cost:,.2f} {cur} "
+                        "3 esse köp — walýuta ýa-da artykmaç nol barlaň"
+                    ),
+                    f"«{name}»: baha öz bahasyndan 3 esse köp",
+                ))
+        return issues
+
+    def _update_price_alert(self) -> None:
+        alert = getattr(self, "price_alert", None)
+        if alert is None:
+            return
+        issues = self._price_issues()
+        if not issues:
+            alert.clear()
+            return
+        tone = "danger" if any(kind in ("zero", "loss") for _i, kind, _t, _s in issues) else "warning"
+        lines = [short for _i, _k, _t, short in issues[:2]]
+        if len(issues) > 2:
+            lines.append(f"... we ýene {len(issues) - 2} (F9 basanyňyzda doly sanaw)")
+        alert.show_message("\n".join(lines), tone)
 
     def _process_checkout(self) -> None:
         if not self.cart_items:
@@ -1815,37 +1927,23 @@ class SalesPage(QWidget):
 
         cur = self.currency_combo.currentText()
 
-        # Проверка нулевой цены или цены ниже себестоимости
-        for idx, it in enumerate(self.cart_items):
-            u_price = Decimal(str(it["unit_price"]))
-            u_cost = self._item_cost_in_receipt_currency(it)
-            if u_price <= Decimal("0.00"):
-                ans = QMessageBox.question(
-                    self,
-                    "Satyş bahasy görkezilmedik",
-                    f"«{it['name']}» harydynyň satyş bahasy 0.00 {cur}.\n\n"
-                    "Baha girizmek üçin «No», haryt hakykatdan mugt bolsa «Yes» basyň.",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if ans != QMessageBox.StandardButton.Yes:
-                    self._focus_price_cell(idx)
-                    return
-            elif u_cost > Decimal("0.00") and u_price < u_cost:
-                loss = (u_cost - u_price) * int(it["quantity"])
-                ans = QMessageBox.question(
-                    self,
-                    "Baha öz bahasyndan pes",
-                    f"Üns beriň! «{it['name']}» harydynyň satyş bahasy ({u_price:,.2f} {cur}) "
-                    f"öz bahasyndan ({u_cost:,.2f} {cur}) pes.\n"
-                    f"Bu setir boýunça zyýan: −{loss:,.2f} {cur}.\n\n"
-                    "Öz bahasyndan pes satyşy tassyklamalymy?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
-                )
-                if ans != QMessageBox.StandardButton.Yes:
-                    self._focus_price_cell(idx)
-                    return
+        # Предупреждения о цене: одно общее подтверждение на весь чек
+        issues = self._price_issues()
+        if issues:
+            lines = [f"• {text}" for _idx, _kind, text, _short in issues[:6]]
+            if len(issues) > 6:
+                lines.append(f"• ... we ýene {len(issues) - 6}")
+            ans = QMessageBox.question(
+                self,
+                "Bahany barlaň",
+                "Çekde şu bahalar şübheli:\n\n" + "\n".join(lines)
+                + "\n\nEmma-da şeýle satmaly bolsa «Yes», düzetmek üçin «No» basyň.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ans != QMessageBox.StandardButton.Yes:
+                self._focus_price_cell(issues[0][0])
+                return
 
         with SessionLocal() as session:
             try:
@@ -1900,7 +1998,7 @@ class SalesPage(QWidget):
                 session.commit()
 
                 self.print_last_btn.setEnabled(True)
-                self.print_last_btn.setText(f"🖨 Çeki çap et / PDF ({rec_num})")
+                self.print_last_btn.setText(f"Çeki çap et / PDF ({rec_num})")
                 self._clear_cart()
                 self._set_payment_mode(True)
                 self.refresh_data()
@@ -1908,14 +2006,14 @@ class SalesPage(QWidget):
                 if is_simurg:
                     show_toast(
                         self,
-                        f"🏦 Simurg satyşy geçirildi ({rec_num}): {total:,.2f} {cur}",
+                        f"Simurg satyşy geçirildi ({rec_num}): {total:,.2f} {cur}",
                         kind="success",
                         duration_ms=3200,
                     )
                 else:
                     show_toast(
                         self,
-                        f"✔ Satyş geçirildi ({rec_num}): {total:,.2f} {cur}",
+                        f"Satyş geçirildi ({rec_num}): {total:,.2f} {cur}",
                         kind="success",
                         duration_ms=2600,
                     )

@@ -2,7 +2,7 @@ import calendar
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -34,6 +34,7 @@ from app.services.report_service import ReportService
 from app.services.sales_service import _convert_currency
 from app.services.settings_service import SettingsService
 from app.ui import theme
+from app.ui.icons import make_icon
 from app.ui.widgets import (
     BarChart,
     Card,
@@ -42,6 +43,7 @@ from app.ui.widgets import (
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
 )
 
@@ -787,13 +789,13 @@ class DashboardPage(QScrollArea):
 
         r_start = stats["range_start"]
         r_end = stats["range_end"]
-        date_text = f"📅  {r_start:%d.%m.%Y} – {r_end:%d.%m.%Y}"
+        date_text = f"{r_start:%d.%m.%Y} – {r_end:%d.%m.%Y}"
 
         pill = QLabel(date_text)
         pill.setObjectName("datePill")
         row.addWidget(pill, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        refresh_btn = make_button("↻  Täzele")
+        refresh_btn = make_icon_button("Täzele", "refresh")
         refresh_btn.clicked.connect(self.refresh_data)
         row.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -803,8 +805,8 @@ class DashboardPage(QScrollArea):
         box = ClickableCard(margins=(12, 6, 8, 6), spacing=0)
         box.setObjectName("alert")
         box.setStyleSheet(
-            "QFrame#alert { background: #FDECEA; border: 1px solid #F9CFCB; border-radius: 9px; }"
-            "QFrame#alert:hover { background: #FBDAD6; border: 1px solid #E5484D; }"
+            f"QFrame#alert {{ background: {theme.DANGER_BG}; border: 1px solid {theme.DANGER_BORDER}; border-radius: 9px; }}"
+            f"QFrame#alert:hover {{ background: #FBDAD6; border: 1px solid {theme.RED}; }}"
         )
 
         if not self.low_stock_products:
@@ -819,8 +821,13 @@ class DashboardPage(QScrollArea):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
 
+        warn_icon = QLabel()
+        warn_icon.setFixedSize(18, 18)
+        warn_icon.setPixmap(make_icon("warning", theme.DANGER_TEXT, 18).pixmap(QSize(18, 18)))
+        row.addWidget(warn_icon)
+
         text = QLabel(
-            f"⚠ <b>{_format_low_stock_label(first)}</b> gutaryp barýar: "
+            f"<b>{_format_low_stock_label(first)}</b> gutaryp barýar: "
             f"skladda <b>{first['stock_quantity']} sany</b> (iň azy: {first['min_stock_quantity']}){extra_str}"
         )
         text.setObjectName("alertText")
@@ -832,8 +839,11 @@ class DashboardPage(QScrollArea):
         action = make_button("Alyş et", "link")
         action.clicked.connect(lambda: self.navigateRequested.emit("Alyşlar"))
 
-        close = make_button("✕")
+        close = QPushButton()
         close.setObjectName("alertClose")
+        close.setCursor(Qt.CursorShape.PointingHandCursor)
+        close.setIcon(make_icon("close", theme.DANGER_TEXT, 14))
+        close.setIconSize(QSize(14, 14))
         close.clicked.connect(box.hide)
 
         row.addWidget(view_btn)
@@ -865,10 +875,10 @@ class DashboardPage(QScrollArea):
         stock_units_badge = f"{sv['total_units']} sany"
 
         data = [
-            (f"Satyşlar ({period_label})", sales_val, badge_code, True, theme.ACCENT, "🧾", False),
-            ("Çalyşyk / Ýatyrma", f"{ex_cnt} çal. / {canc_cnt} ýat.", badge_code, True, theme.NAVY, "↩", False),
-            (f"Alyşlar ({period_label})", pur_val, badge_code, True, theme.TEAL, "📦", False),
-            ("Sklad jemi baha →", stock_val_text, stock_units_badge, True, theme.BLUE, "🏪", True),
+            (f"Satyşlar ({period_label})", sales_val, badge_code, True, theme.ACCENT, "sales", False),
+            ("Çalyşyk / Ýatyrma", f"{ex_cnt} çal. / {canc_cnt} ýat.", badge_code, True, theme.NAVY, "tradein", False),
+            (f"Alyşlar ({period_label})", pur_val, badge_code, True, theme.TEAL, "purchases", False),
+            ("Sklad jemi baha →", stock_val_text, stock_units_badge, True, theme.BLUE, "stock", True),
         ]
 
         for i, (*args, is_clickable) in enumerate(data):
@@ -902,10 +912,11 @@ class DashboardPage(QScrollArea):
         col.addWidget(v)
         top.addLayout(col, 1)
 
-        icon = QLabel(glyph)
+        icon = QLabel()
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setFixedSize(34, 34)
-        icon.setStyleSheet(f"background:{tint}; border-radius:9px; font-size:13pt;")
+        icon.setStyleSheet(f"background:{tint}; border-radius:9px;")
+        icon.setPixmap(make_icon(glyph, value_color, 18).pixmap(QSize(18, 18)))
         top.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
         card.body.addLayout(top)
 
@@ -936,7 +947,7 @@ class DashboardPage(QScrollArea):
             primary_line=f"${prof_u:,.2f} USD   |   {prof_t:,.2f} TMT",
             secondary_line=f"Umumy ekwiwalent (kurs {rate:.2f}):  <b>${prof_total_usd:,.2f} USD</b>  •  <b>{prof_total_tmt:,.2f} TMT</b>",
             tint="#E3F6F1",
-            glyph="📈",
+            glyph="reports",
             value_color=theme.GREEN if prof_total_tmt >= 0 else theme.RED,
         )
 
@@ -945,7 +956,7 @@ class DashboardPage(QScrollArea):
             primary_line=f"${cash_u:,.2f} USD   |   {cash_t:,.2f} TMT",
             secondary_line=f"Jemi kassa (kurs {rate:.2f}):  <b>${cash_total_usd:,.2f} USD</b>  •  <b>{cash_total_tmt:,.2f} TMT</b>",
             tint="#E8F1FF",
-            glyph="💵",
+            glyph="cash",
             value_color=theme.NAVY,
         )
 
@@ -987,7 +998,7 @@ class DashboardPage(QScrollArea):
         )
         sim_val.setStyleSheet(f"font-size: 11pt; font-weight: 800; color: {theme.ACCENT};")
         sim_ready = QLabel(
-            f"✔ Taýýar (≥5g): <b>{sim['ready_amount']['TMT']:,.2f} TMT</b>"
+            f"Taýýar (≥5g): <b>{sim['ready_amount']['TMT']:,.2f} TMT</b>"
             + (f" / <b>${sim['ready_amount']['USD']:,.2f}</b>" if sim["ready_amount"]["USD"] > 0 else "")
             + f"  •  {sim['ready_items_count']} taýýar"
         )
@@ -999,7 +1010,7 @@ class DashboardPage(QScrollArea):
 
         # 2. Üpjün edijilere bergi
         sup_box = QFrame()
-        sup_box.setStyleSheet("background: #FDECEA; border-radius: 10px;")
+        sup_box.setStyleSheet(f"background: {theme.DANGER_BG}; border-radius: 10px;")
         sv_l = QVBoxLayout(sup_box)
         sv_l.setContentsMargins(12, 8, 12, 8)
         sv_l.setSpacing(2)
@@ -1160,12 +1171,10 @@ class DashboardPage(QScrollArea):
             c_sal,
             y_max=max_val,
             buckets_meta=buckets,
-            timeline_mode=True,
+            timeline_mode=False,
             can_zoom_in=can_zoom_in,
             can_zoom_out=can_zoom_out,
         )
-        chart.timelineZoomRequested.connect(self._zoom_timeline)
-        chart.timelinePanRequested.connect(self._pan_timeline)
         card.body.addWidget(chart, 1)
         return card
 

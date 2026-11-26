@@ -101,6 +101,7 @@ fun ReceivingScreen(
     val config by vm.serverConfig.collectAsState()
     val draftMeta by vm.receivingMeta.collectAsState()
     val pendingDevice by vm.pendingReceivingDevice.collectAsState()
+    val pendingBarcode by vm.pendingBarcodeScan.collectAsState()
     val isBusy by vm.isReceivingBusy.collectAsState()
     val catalog by vm.catalogProducts.collectAsState()
     val cooldownTrigger by vm.scanCooldownTrigger.collectAsState()
@@ -126,6 +127,7 @@ fun ReceivingScreen(
     }
 
     val isPaused = pendingDevice != null ||
+        pendingBarcode != null ||
         receivingOcrResult != null ||
         showQueueSheet ||
         showProductPicker ||
@@ -401,7 +403,7 @@ fun ReceivingScreen(
                 onPersistDefaults = { sup, curr ->
                     vm.updateReceivingMeta(supplierName = sup, currency = curr)
                 },
-                onSendQuantityProduct = { qty, cost, curr, sup ->
+                onSendQuantityProduct = { qty, cost, curr, sup, note ->
                     vm.queueQuantityProductToPc(
                         productId = meta?.productId,
                         productName = meta?.productName.orEmpty(),
@@ -409,6 +411,7 @@ fun ReceivingScreen(
                         unitCost = cost,
                         currency = curr,
                         supplierName = sup,
+                        modelHint = note,
                         onSuccess = { showQueueSheet = false },
                     )
                 },
@@ -576,10 +579,96 @@ fun ReceivingScreen(
         )
     }
 
+    // Окно подтверждения отсканированного штрихкода в режиме Sany bilen (с полем примечания)
+    val pb = pendingBarcode
+    if (pb != null) {
+        var scanQty by remember(pb) { mutableStateOf("1") }
+        var scanNote by remember(pb) { mutableStateOf("") }
+        var scanCost by remember(pb) { mutableStateOf("") }
+        AlertDialog(
+            containerColor = SurfaceWhite,
+            onDismissRequest = { if (!isBusy) vm.dismissPendingBarcodeScan() },
+            title = { Text("Harydy PK nobatyna iber", color = NavyDark) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Surface(
+                        color = SurfaceBg,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, BorderColor),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                            Text("Ştrihkod", fontSize = 11.sp, color = TextMuted)
+                            Text(
+                                text = pb.barcode,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                color = NavyDark,
+                                fontSize = 14.sp,
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = scanNote,
+                        onValueChange = { scanNote = it },
+                        label = { Text("Bellik (ady, reňki, modeli…)") },
+                        placeholder = { Text("Mysal: Nauşnik gara / Çehol 15PM") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = scanQty,
+                            onValueChange = { scanQty = it.filter(Char::isDigit) },
+                            label = { Text("Sany") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedTextField(
+                            value = scanCost,
+                            onValueChange = { scanCost = it },
+                            label = { Text("Alyş bahasy") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.weight(1.3f),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),
+                    enabled = !isBusy,
+                    onClick = {
+                        val qtyVal = (scanQty.toIntOrNull() ?: 1).coerceAtLeast(1)
+                        vm.queueBarcodeQuantityToPc(
+                            barcode = pb.barcode,
+                            quantity = qtyVal,
+                            unitCost = scanCost,
+                            modelHint = scanNote,
+                        )
+                    },
+                ) {
+                    Text(if (isBusy) "Iberilýär…" else "PK nobatyna iber")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !isBusy,
+                    onClick = { vm.dismissPendingBarcodeScan() },
+                ) {
+                    Text("Ýatyr")
+                }
+            },
+        )
+    }
+
     // Ручной ввод штрихкода в режиме Sany bilen
     if (showManualBarcodeDialog) {
         var manualCode by remember { mutableStateOf("") }
         var manualQty by remember { mutableStateOf("1") }
+        var manualNote by remember { mutableStateOf("") }
         AlertDialog(
             containerColor = SurfaceWhite,
             onDismissRequest = { if (!isBusy) showManualBarcodeDialog = false },
@@ -590,6 +679,14 @@ fun ReceivingScreen(
                         value = manualCode,
                         onValueChange = { manualCode = it },
                         label = { Text("Ştrihkod / SKU *") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedTextField(
+                        value = manualNote,
+                        onValueChange = { manualNote = it },
+                        label = { Text("Bellik (ady, reňki, modeli…)") },
+                        placeholder = { Text("Mysal: Nauşnik gara") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -612,6 +709,7 @@ fun ReceivingScreen(
                         vm.queueBarcodeQuantityToPc(
                             barcode = manualCode,
                             quantity = qtyVal,
+                            modelHint = manualNote,
                             onSuccess = { showManualBarcodeDialog = false },
                         )
                     },
@@ -764,7 +862,7 @@ private fun ReceivingQueueBottomSheet(
     onPickProduct: () -> Unit,
     onClearProduct: () -> Unit,
     onPersistDefaults: (supplier: String, currency: String) -> Unit,
-    onSendQuantityProduct: (qty: Int, cost: String, currency: String, supplier: String) -> Unit,
+    onSendQuantityProduct: (qty: Int, cost: String, currency: String, supplier: String, note: String) -> Unit,
     onClearSession: () -> Unit,
 ) {
     val useImeiMode = meta?.useImeiMode ?: true
@@ -779,6 +877,7 @@ private fun ReceivingQueueBottomSheet(
     var qtyText by remember(meta?.requestId, meta?.productId) {
         mutableStateOf((meta?.nonImeiQuantity ?: 1).coerceAtLeast(1).toString())
     }
+    var noteText by remember(meta?.requestId, meta?.productId) { mutableStateOf("") }
 
     val chipColors = FilterChipDefaults.filterChipColors(
         selectedContainerColor = AccentBg,
@@ -896,6 +995,14 @@ private fun ReceivingQueueBottomSheet(
                     modifier = Modifier.weight(1.3f),
                 )
             }
+            OutlinedTextField(
+                value = noteText,
+                onValueChange = { noteText = it },
+                label = { Text("Bellik (hökmany däl)") },
+                placeholder = { Text("Mysal: Reňki, tapgyr ýa-da bellik…") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         }
 
         // Общие необязательные поля по умолчанию: Walýuta и Üpjün ediji
@@ -939,7 +1046,7 @@ private fun ReceivingQueueBottomSheet(
             Button(
                 onClick = {
                     val qtyVal = qtyText.toIntOrNull() ?: 0
-                    onSendQuantityProduct(qtyVal, unitCostText, currency, supplierText)
+                    onSendQuantityProduct(qtyVal, unitCostText, currency, supplierText, noteText)
                 },
                 enabled = !isBusy && meta?.productId != null && (qtyText.toIntOrNull() ?: 0) > 0,
                 colors = ButtonDefaults.buttonColors(containerColor = AccentOrange),

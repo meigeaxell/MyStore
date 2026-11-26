@@ -363,35 +363,52 @@ def list_distinct_brands_and_models() -> tuple[list[str], list[str]]:
     return brands, models
 
 
-def find_product_by_barcode(code: str) -> Product | None:
-    """Ищет активный товар по штрихкоду (Product.barcode), SKU или упоминанию кода в характеристиках."""
+def find_products_by_barcode(code: str) -> list[Product]:
+    """Ищет все активные товары по штрихкоду (Product.barcode), SKU или упоминанию кода в характеристиках."""
     clean = (code or "").strip()
     if not clean:
-        return None
+        return []
     with SessionLocal() as session:
-        exact_bc = session.scalar(
-            select(Product).where(
-                Product.is_active.is_(True),
-                func.lower(Product.barcode) == clean.lower(),
-            )
+        exact_bc = list(
+            session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    func.lower(Product.barcode) == clean.lower(),
+                )
+                .order_by(Product.name.asc())
+            ).all()
         )
-        if exact_bc is not None:
+        if exact_bc:
             return exact_bc
-        exact_sku = session.scalar(
-            select(Product).where(
-                Product.is_active.is_(True),
-                func.lower(Product.sku) == clean.lower(),
-            )
+        exact_sku = list(
+            session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    func.lower(Product.sku) == clean.lower(),
+                )
+                .order_by(Product.name.asc())
+            ).all()
         )
-        if exact_sku is not None:
+        if exact_sku:
             return exact_sku
-        in_spec = session.scalar(
-            select(Product).where(
-                Product.is_active.is_(True),
-                Product.specification.ilike(f"%{clean}%"),
-            )
+        return list(
+            session.scalars(
+                select(Product)
+                .where(
+                    Product.is_active.is_(True),
+                    Product.specification.ilike(f"%{clean}%"),
+                )
+                .order_by(Product.name.asc())
+            ).all()
         )
-        return in_spec
+
+
+def find_product_by_barcode(code: str) -> Product | None:
+    """Ищет первый активный товар по штрихкоду (Product.barcode), SKU или характеристикам."""
+    matches = find_products_by_barcode(code)
+    return matches[0] if matches else None
 
 
 def get_product_with_devices(product_id: int) -> tuple[Product | None, int, list[StockItem]]:
@@ -411,6 +428,26 @@ def get_product_with_devices(product_id: int) -> tuple[Product | None, int, list
         return product, in_stock_cnt, items
 
 
+def _resolve_existing_product_cost(session: Session, product_id: int) -> tuple[Decimal, str]:
+    """Возвращает базовую себестоимость товара (amount, currency) из настроек или последней закупки."""
+    saved = SettingsService.get_product_default_cost(product_id)
+    if saved is not None:
+        return Decimal(str(saved[0])).quantize(Decimal("0.01")), str(saved[1]).strip().upper()
+    row = session.execute(
+        select(PurchaseItem.unit_cost, Purchase.currency)
+        .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
+        .where(
+            PurchaseItem.product_id == product_id,
+            Purchase.status == "active",
+        )
+        .order_by(Purchase.purchase_date.desc(), PurchaseItem.id.desc())
+        .limit(1)
+    ).first()
+    if row and row[0] is not None:
+        return Decimal(str(row[0])).quantize(Decimal("0.01")), str(row[1] or "USD").strip().upper()
+    return Decimal("0.00"), "USD"
+
+
 def save_product(
     product_id: int | None,
     name: str,
@@ -421,8 +458,16 @@ def save_product(
     stock_quantity: int = 0,
     min_stock_quantity: int = 0,
     barcode: str | None = None,
+    default_cost: Decimal | float | str | None = None,
+    default_cost_currency: str | None = None,
+    merge_duplicates: bool = True,
 ) -> Product:
-    """Создаёт или обновляет товар в каталоге с проверкой синхронизации IMEI и штрихкода."""
+    """Создаёт или обновляет товар в каталоге.
+
+    Штрихкоды могут быть общими для нескольких товаров (например, разные цвета одной модели).
+    При создании нового количественного товара с совпадающими названием, моделью, категорией,
+    характеристиками и себестоимостью количество суммируется с существующим товаром.
+    """
     clean_name = (name or "").strip()
     if not clean_name:
         raise ValueError("Harydyň adyny giriziň.")
@@ -438,20 +483,54 @@ def save_product(
     clean_spec = (specification or "").strip() or None
     clean_barcode = (barcode or "").strip() or None
 
-    with SessionLocal() as session, session.begin():
-        if clean_barcode:
-            dup_bc = session.scalar(
-                select(Product).where(
-                    Product.is_active.is_(True),
-                    func.lower(Product.barcode) == clean_barcode.lower(),
-                )
-            )
-            if dup_bc is not None and dup_bc.id != product_id:
-                raise ValueError(
-                    f"«{clean_barcode}» ştrihkody eýýäm «{dup_bc.name}» ({dup_bc.sku}) harydyna berkidilen."
-                )
+    cost_dec: Decimal | None = None
+    cost_curr: str = (default_cost_currency or "USD").strip().upper()
+    if default_cost is not None:
+        try:
+            cost_dec = Decimal(str(default_cost)).quantize(Decimal("0.01"))
+        except (InvalidOperation, ValueError, TypeError):
+            cost_dec = Decimal("0.00")
 
+    created_product: Product | None = None
+    with SessionLocal() as session, session.begin():
         if product_id is None:
+            if merge_duplicates:
+                candidates = session.scalars(
+                    select(Product).where(
+                        Product.is_active.is_(True),
+                        Product.is_phone_unit.is_(False),
+                        Product.category_id == category_id,
+                        func.lower(Product.name) == clean_name.lower(),
+                    )
+                ).all()
+                target_model = (clean_model or "").lower()
+                target_spec = (clean_spec or "").lower()
+                for existing in candidates:
+                    if (existing.model or "").strip().lower() != target_model:
+                        continue
+                    if (existing.specification or "").strip().lower() != target_spec:
+                        continue
+                    ex_cost, ex_curr = _resolve_existing_product_cost(session, existing.id)
+                    if cost_dec is not None:
+                        if cost_dec == Decimal("0.00") and ex_cost == Decimal("0.00"):
+                            cost_matches = True
+                        else:
+                            cost_matches = (ex_cost == cost_dec and ex_curr == cost_curr)
+                    else:
+                        cost_matches = ex_cost == Decimal("0.00")
+                    if cost_matches:
+                        existing.stock_quantity = int(existing.stock_quantity or 0) + int(stock_quantity)
+                        if clean_barcode and not existing.barcode:
+                            existing.barcode = clean_barcode
+                        if clean_brand and not existing.brand:
+                            existing.brand = clean_brand
+                        if min_stock_quantity > 0 and existing.min_stock_quantity == 0:
+                            existing.min_stock_quantity = min_stock_quantity
+                        session.flush()
+                        session.refresh(existing)
+                        existing._merged_duplicate = True
+                        return existing
+
             last_product = session.scalar(
                 select(Product).order_by(Product.id.desc()).limit(1)
             )
@@ -473,39 +552,45 @@ def save_product(
 
             sync_product_glossary(session, product)
             session.refresh(product)
+            product._merged_duplicate = False
+            created_product = product
+
+        else:
+            product = session.get(Product, product_id)
+            if product is None:
+                raise ValueError("Haryt tapylmady.")
+
+            in_stock_imeis = session.scalars(
+                select(StockItem).where(
+                    StockItem.product_id == product_id,
+                    StockItem.status == "in_stock",
+                )
+            ).all()
+            imei_cnt = len(in_stock_imeis)
+            if imei_cnt > 0 and stock_quantity < imei_cnt:
+                raise ValueError(
+                    f"Bu harydyň skladynda IMEI boýunça {imei_cnt} enjam hasaba alnan.\n"
+                    f"Skladdaky jemi galyndy {imei_cnt} sanydan az bolup bilmez."
+                )
+
+            product.category_id = category_id
+            product.barcode = clean_barcode
+            product.name = clean_name
+            product.brand = clean_brand
+            product.model = clean_model
+            product.specification = clean_spec
+            product.stock_quantity = stock_quantity
+            product.min_stock_quantity = min_stock_quantity
+            session.flush()
+            from app.services.accessory_matcher import sync_product_glossary
+
+            sync_product_glossary(session, product)
+            session.refresh(product)
             return product
 
-        product = session.get(Product, product_id)
-        if product is None:
-            raise ValueError("Haryt tapylmady.")
-
-        in_stock_imeis = session.scalars(
-            select(StockItem).where(
-                StockItem.product_id == product_id,
-                StockItem.status == "in_stock",
-            )
-        ).all()
-        imei_cnt = len(in_stock_imeis)
-        if imei_cnt > 0 and stock_quantity < imei_cnt:
-            raise ValueError(
-                f"Bu harydyň skladynda IMEI boýunça {imei_cnt} enjam hasaba alnan.\n"
-                f"Skladdaky jemi galyndy {imei_cnt} sanydan az bolup bilmez."
-            )
-
-        product.category_id = category_id
-        product.barcode = clean_barcode
-        product.name = clean_name
-        product.brand = clean_brand
-        product.model = clean_model
-        product.specification = clean_spec
-        product.stock_quantity = stock_quantity
-        product.min_stock_quantity = min_stock_quantity
-        session.flush()
-        from app.services.accessory_matcher import sync_product_glossary
-
-        sync_product_glossary(session, product)
-        session.refresh(product)
-        return product
+    if created_product is not None and cost_dec is not None and cost_dec > Decimal("0.00"):
+        SettingsService.set_product_default_cost(created_product.id, cost_dec, cost_curr)
+    return created_product
 
 
 def deactivate_product(product_id: int, force: bool = True) -> None:

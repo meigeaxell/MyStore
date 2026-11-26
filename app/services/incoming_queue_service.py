@@ -165,13 +165,15 @@ def enqueue_incoming_item(payload: dict[str, Any], device_name: str = "") -> dic
                 )
             )
         if resolved_product is None and barcode:
-            resolved_product = session.scalar(
+            bc_matches = session.scalars(
                 select(Product).where(
                     Product.is_active.is_(True),
                     Product.is_phone_unit.is_(False),
                     (Product.barcode == barcode) | (Product.sku == barcode),
                 )
-            )
+            ).all()
+            if len(bc_matches) == 1:
+                resolved_product = bc_matches[0]
 
         if resolved_product is not None:
             # Ищем уже ожидающую строку того же известного товара -> склеиваем количество
@@ -192,6 +194,8 @@ def enqueue_incoming_item(payload: dict[str, Any], device_name: str = "") -> dic
                     existing.supplier_name = supplier_name
                 if ocr_raw_text and not existing.ocr_raw_text:
                     existing.ocr_raw_text = ocr_raw_text
+                if model_hint:
+                    existing.model_hint = model_hint
                 session.flush()
                 q_id = existing.id
                 final_qty = existing.quantity
@@ -220,17 +224,22 @@ def enqueue_incoming_item(payload: dict[str, Any], device_name: str = "") -> dic
             item_kind = "known"
             msg = f"«{prod_name}» belli harytlar nobatyna goşuldy (jemi: {final_qty} sany)"
         else:
-            # Неизвестный товар -> склеиваем, если совпал штрихкод
+            # Неизвестный товар -> склеиваем, если совпал штрихкод и примечание (model_hint)
             existing = None
             if barcode:
-                existing = session.scalar(
+                candidates = session.scalars(
                     select(IncomingQueueItem)
                     .where(
                         IncomingQueueItem.item_kind == "unknown",
                         IncomingQueueItem.barcode == barcode,
                     )
                     .order_by(IncomingQueueItem.id.desc())
-                )
+                ).all()
+                norm_hint = (model_hint or "").strip().lower()
+                for cand in candidates:
+                    if (cand.model_hint or "").strip().lower() == norm_hint:
+                        existing = cand
+                        break
             if existing is not None:
                 existing.quantity += qty
                 if unit_cost is not None and unit_cost > 0:
@@ -240,6 +249,8 @@ def enqueue_incoming_item(payload: dict[str, Any], device_name: str = "") -> dic
                     existing.supplier_name = supplier_name
                 if ocr_raw_text and not existing.ocr_raw_text:
                     existing.ocr_raw_text = ocr_raw_text
+                if model_hint:
+                    existing.model_hint = model_hint
                 session.flush()
                 q_id = existing.id
                 final_qty = existing.quantity
@@ -514,6 +525,8 @@ def commit_unknown_item(
         stock_quantity=0,
         min_stock_quantity=int(min_stock or 0),
         barcode=effective_barcode,
+        default_cost=cost_dec,
+        default_cost_currency=curr,
     )
     if cost_dec > 0:
         SettingsService.set_product_default_cost(product.id, cost_dec, curr)

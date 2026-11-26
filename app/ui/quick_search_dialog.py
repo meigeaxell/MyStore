@@ -26,7 +26,13 @@ from app.ui import theme
 from app.ui.purchase_page import PurchaseDetailsDialog
 from app.ui.sales_page import SaleDetailsDialog
 from app.ui.stock_page import EditStockItemDialog, StockItemDialog
-from app.ui.widgets import configure_dialog_buttons, configure_table, make_button, money_str
+from app.ui.widgets import (
+    configure_dialog_buttons,
+    configure_table,
+    make_button,
+    make_icon_button,
+    money_str,
+)
 
 
 class QuickSearchDialog(QDialog):
@@ -86,7 +92,7 @@ class QuickSearchDialog(QDialog):
         footer.addWidget(self.count_label)
         footer.addStretch()
 
-        pos_btn = make_button("🛒 Saýlanan harydy / IMEI-ni kassa goş")
+        pos_btn = make_icon_button("Saýlanan harydy / IMEI-ni kassa goş", "sales")
         pos_btn.clicked.connect(self._send_to_pos)
         footer.addWidget(pos_btn)
 

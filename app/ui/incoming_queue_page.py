@@ -48,11 +48,13 @@ from app.services.incoming_queue_service import (
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.category_dialog import CategoryDialog
+from app.ui.icons import make_icon
 from app.ui.widgets import (
     Card,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
     show_toast,
     style_combo,
@@ -131,12 +133,12 @@ class CommitUnknownItemDialog(QDialog):
             hb_layout.setContentsMargins(12, 8, 12, 8)
             hb_layout.setSpacing(4)
             if ocr_raw:
-                ocr_lbl = QLabel(f"<b>📷 OCR guty teksti:</b> {ocr_raw}")
+                ocr_lbl = QLabel(f"<b>OCR guty teksti:</b> {ocr_raw}")
                 ocr_lbl.setWordWrap(True)
                 ocr_lbl.setStyleSheet(f"color: {theme.TEXT}; font-size: 9pt;")
                 hb_layout.addWidget(ocr_lbl)
             if model_hint and model_hint != ocr_raw:
-                mh_lbl = QLabel(f"<b>📝 Skaner belligi:</b> {model_hint}")
+                mh_lbl = QLabel(f"<b>Skaner belligi:</b> {model_hint}")
                 mh_lbl.setWordWrap(True)
                 mh_lbl.setStyleSheet(f"color: {theme.MUTED}; font-size: 9pt;")
                 hb_layout.addWidget(mh_lbl)
@@ -154,7 +156,7 @@ class CommitUnknownItemDialog(QDialog):
         self.category_combo.setPlaceholderText("Kategoriýa saýlaň")
         cat_row.addWidget(self.category_combo, 1)
 
-        add_cat_btn = make_button("+ Kategoriýa")
+        add_cat_btn = make_icon_button("Kategoriýa", "plus")
         add_cat_btn.setToolTip("Täze kategoriýa döretmek")
         add_cat_btn.clicked.connect(self._add_category)
         cat_row.addWidget(add_cat_btn)
@@ -217,7 +219,7 @@ class CommitUnknownItemDialog(QDialog):
         footer.addStretch()
         cancel_btn = make_button("Ýatyr")
         cancel_btn.clicked.connect(self.reject)
-        save_btn = make_button("✓ Sakla we sklada geçir", "primary")
+        save_btn = make_icon_button("Sakla we sklada geçir", "check", "primary")
         save_btn.clicked.connect(self._save)
         footer.addWidget(cancel_btn)
         footer.addWidget(save_btn)
@@ -370,7 +372,7 @@ class CommitQueuedPhoneDialog(QDialog):
 
         ocr_raw = (self.item.get("ocr_raw_text") or "").strip()
         if ocr_raw:
-            ocr_box = QLabel(f"📷 OCR tekst: {ocr_raw}")
+            ocr_box = QLabel(f"OCR tekst: {ocr_raw}")
             ocr_box.setWordWrap(True)
             ocr_box.setStyleSheet(
                 f"background: #F8F9FB; border: 1px solid {theme.BORDER}; "
@@ -490,7 +492,7 @@ class CommitQueuedPhoneDialog(QDialog):
         footer.addStretch()
         cancel_btn = make_button("Ýatyr")
         cancel_btn.clicked.connect(self.reject)
-        save_btn = make_button("📱 Kabul et we sklada geçir", "primary")
+        save_btn = make_icon_button("Kabul et we sklada geçir", "phone", "primary")
         save_btn.clicked.connect(self._save)
         footer.addWidget(cancel_btn)
         footer.addWidget(save_btn)
@@ -627,11 +629,11 @@ class IncomingQueuePage(QWidget):
         title_col.addWidget(subtitle)
         header.addLayout(title_col, 1)
 
-        self.refresh_btn = make_button("↻ Täzele")
+        self.refresh_btn = make_icon_button("Täzele", "refresh")
         self.refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(self.refresh_btn)
 
-        self.clear_btn = make_button("🗑 Nobaty arassala", "danger")
+        self.clear_btn = make_icon_button("Nobaty arassala", "trash", "danger")
         self.clear_btn.clicked.connect(self._clear_all_queue)
         header.addWidget(self.clear_btn)
 
@@ -683,9 +685,9 @@ class IncomingQueuePage(QWidget):
 
         # 3-tab QTabWidget
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_known_tab(), "✅ Belli harytlar (0)")
-        self.tabs.addTab(self._build_unknown_tab(), "❓ Näbelli harytlar (0)")
-        self.tabs.addTab(self._build_phone_tab(), "📱 Telefonlar (IMEI) (0)")
+        self.tabs.addTab(self._build_known_tab(), make_icon("check", theme.NAVY, 16), "Belli harytlar (0)")
+        self.tabs.addTab(self._build_unknown_tab(), make_icon("search", theme.NAVY, 16), "Näbelli harytlar (0)")
+        self.tabs.addTab(self._build_phone_tab(), make_icon("phone", theme.NAVY, 16), "Telefonlar (IMEI) (0)")
         layout.addWidget(self.tabs, 1)
 
     def _build_known_tab(self) -> QWidget:
@@ -718,12 +720,13 @@ class IncomingQueuePage(QWidget):
         actions = QHBoxLayout()
         actions.setSpacing(10)
 
-        self.commit_selected_known_btn = make_button("✓ Saýlanany sklada geçir", "primary")
+        self.commit_selected_known_btn = make_icon_button("Saýlanany sklada geçir", "check", "primary")
         self.commit_selected_known_btn.clicked.connect(self._commit_selected_known)
         actions.addWidget(self.commit_selected_known_btn)
 
-        self.commit_all_known_btn = make_button(
-            "✓✓ Ähli belli harytlary bir alyş bilen geçir",
+        self.commit_all_known_btn = make_icon_button(
+            "Ähli belli harytlary bir alyş bilen geçir",
+            "check",
             "success",
         )
         self.commit_all_known_btn.clicked.connect(self._commit_all_known)
@@ -731,7 +734,7 @@ class IncomingQueuePage(QWidget):
 
         actions.addStretch()
 
-        self.delete_known_btn = make_button("🗑 Poz", "danger")
+        self.delete_known_btn = make_icon_button("Poz", "trash", "danger")
         self.delete_known_btn.clicked.connect(lambda: self._delete_selected_from(self.known_table))
         actions.addWidget(self.delete_known_btn)
 
@@ -767,13 +770,13 @@ class IncomingQueuePage(QWidget):
         actions = QHBoxLayout()
         actions.setSpacing(10)
 
-        self.commit_unknown_btn = make_button("📝 Karty doldur we sklada geçir", "primary")
+        self.commit_unknown_btn = make_icon_button("Karty doldur we sklada geçir", "edit", "primary")
         self.commit_unknown_btn.clicked.connect(self._open_unknown_dialog)
         actions.addWidget(self.commit_unknown_btn)
 
         actions.addStretch()
 
-        self.delete_unknown_btn = make_button("🗑 Poz", "danger")
+        self.delete_unknown_btn = make_icon_button("Poz", "trash", "danger")
         self.delete_unknown_btn.clicked.connect(lambda: self._delete_selected_from(self.unknown_table))
         actions.addWidget(self.delete_unknown_btn)
 
@@ -811,13 +814,13 @@ class IncomingQueuePage(QWidget):
         actions = QHBoxLayout()
         actions.setSpacing(10)
 
-        self.commit_phone_btn = make_button("📱 Maglumaty doldur we kabul et", "primary")
+        self.commit_phone_btn = make_icon_button("Maglumaty doldur we kabul et", "phone", "primary")
         self.commit_phone_btn.clicked.connect(self._open_phone_dialog)
         actions.addWidget(self.commit_phone_btn)
 
         actions.addStretch()
 
-        self.delete_phone_btn = make_button("🗑 Poz", "danger")
+        self.delete_phone_btn = make_icon_button("Poz", "trash", "danger")
         self.delete_phone_btn.clicked.connect(lambda: self._delete_selected_from(self.phone_table))
         actions.addWidget(self.delete_phone_btn)
 
@@ -849,9 +852,9 @@ class IncomingQueuePage(QWidget):
         n_phone = len(self._phone_items)
         total = n_known + n_unknown + n_phone
 
-        self.tabs.setTabText(0, f"✅ Belli harytlar ({n_known})")
-        self.tabs.setTabText(1, f"❓ Näbelli harytlar ({n_unknown})")
-        self.tabs.setTabText(2, f"📱 Telefonlar (IMEI) ({n_phone})")
+        self.tabs.setTabText(0, f"Belli harytlar ({n_known})")
+        self.tabs.setTabText(1, f"Näbelli harytlar ({n_unknown})")
+        self.tabs.setTabText(2, f"Telefonlar (IMEI) ({n_phone})")
 
         self.clear_btn.setEnabled(total > 0)
         self.commit_selected_known_btn.setEnabled(n_known > 0)
@@ -888,7 +891,11 @@ class IncomingQueuePage(QWidget):
 
             bm = " / ".join(filter(None, [item.get("brand"), item.get("model")]))
             cat_bm = " • ".join(filter(None, [item.get("category") or "—", bm]))
-            self.known_table.setItem(r, 2, QTableWidgetItem(cat_bm))
+            if item.get("model_hint"):
+                cat_bm = f"{cat_bm}  •  Bellik: {item['model_hint']}"
+            cat_cell = QTableWidgetItem(cat_bm)
+            cat_cell.setToolTip(cat_bm)
+            self.known_table.setItem(r, 2, cat_cell)
 
             qty_spin = QSpinBox()
             qty_spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
@@ -1152,7 +1159,7 @@ class IncomingQueuePage(QWidget):
         if dlg.exec():
             show_toast(
                 self,
-                f"📱 «{dlg.committed_model}» (IMEI {dlg.committed_imei1}) sklada kabul edildi.",
+                f"«{dlg.committed_model}» (IMEI {dlg.committed_imei1}) sklada kabul edildi.",
                 kind="success",
             )
             self.refresh_data()

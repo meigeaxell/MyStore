@@ -1,5 +1,7 @@
 """Переиспользуемые виджеты: карточки, таблицы, кнопки, списки и график."""
+import weakref
 from decimal import Decimal, InvalidOperation
+from typing import ClassVar
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -127,12 +129,12 @@ class ToastNotification(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         palettes = {
-            "success": (theme.WHITE, theme.ACCENT, "#E57C20", "✔"),
-            "info": (theme.WHITE, theme.ACCENT, "#E57C20", "ℹ"),
-            "warning": (theme.WHITE, "#D97706", "#B45309", "⚠"),
-            "error": (theme.WHITE, theme.RED, "#C81E1E", "✕"),
+            "success": (theme.WHITE, theme.ACCENT, theme.ACCENT_HOVER, "check"),
+            "info": (theme.WHITE, theme.ACCENT, theme.ACCENT_HOVER, "info"),
+            "warning": (theme.WHITE, "#D97706", "#B45309", "warning"),
+            "error": (theme.WHITE, theme.RED, "#C81E1E", "close"),
         }
-        fg, bg, border, icon = palettes.get(kind, palettes["info"])
+        fg, bg, border, icon_key = palettes.get(kind, palettes["info"])
 
         self.setStyleSheet(
             f"QFrame#toastNotification {{ background: {bg}; border: 1px solid {border}; "
@@ -143,8 +145,12 @@ class ToastNotification(QFrame):
         row.setContentsMargins(16, 8, 18, 8)
         row.setSpacing(8)
 
-        icon_lbl = QLabel(icon)
-        icon_lbl.setStyleSheet(f"color: {fg}; font-size: 11pt; font-weight: 800; background: transparent;")
+        from app.ui.icons import make_icon
+
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(16, 16)
+        icon_lbl.setStyleSheet("background: transparent;")
+        icon_lbl.setPixmap(make_icon(icon_key, fg, 16).pixmap(QSize(16, 16)))
         row.addWidget(icon_lbl)
 
         text_lbl = QLabel(message)
@@ -243,6 +249,117 @@ def style_combo(combo: QComboBox) -> QComboBox:
     return combo
 
 
+_CONFIGURED_TABLES: list[tuple[weakref.ref, list[int] | None, int]] = []
+
+
+def _get_active_table_preset() -> str:
+    try:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        from app.services.settings_service import SettingsService
+
+        return SettingsService.get_table_layout_preset()
+    except (ImportError, RuntimeError, ValueError, SQLAlchemyError):
+        return "auto_fit"
+
+
+def apply_table_preset(
+    table: QTableWidget,
+    stretch_cols: list[int] | None = None,
+    base_row_height: int = 46,
+    preset: str | None = None,
+) -> None:
+    """Применяет выбранный шаблон построения таблицы (auto_fit | wrap_full | compact | wide_scroll)."""
+    mode = preset or _get_active_table_preset()
+    header = table.horizontalHeader()
+    vheader = table.verticalHeader()
+    col_count = table.columnCount()
+    stretch_set = set(stretch_cols or [])
+
+    table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+    table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+    if mode == "wide_scroll":
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        header.setStretchLastSection(False)
+        for col in range(col_count):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vheader.setDefaultSectionSize(max(38, min(base_row_height, 44)))
+    elif mode == "wrap_full":
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideNone)
+        header.setStretchLastSection(False)
+        for col in range(col_count):
+            if col in stretch_set:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        vheader.setMinimumSectionSize(max(36, base_row_height - 6))
+        vheader.setDefaultSectionSize(base_row_height)
+    elif mode == "compact":
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        header.setStretchLastSection(False)
+        for col in range(col_count):
+            if col in stretch_set:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        vheader.setDefaultSectionSize(theme.ROW_H_COMPACT)
+    else:
+        # auto_fit (по умолчанию): интерактивные колонки с умным авто-подбором и переносом длинных названий
+        table.setWordWrap(True)
+        table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        header.setStretchLastSection(False)
+        for col in range(col_count):
+            if col in stretch_set:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        vheader.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        vheader.setMinimumSectionSize(max(38, base_row_height - 4))
+        vheader.setDefaultSectionSize(base_row_height)
+
+    QTimer.singleShot(0, lambda t=table, m=mode, ss=stretch_set: _fit_table_after_data(t, m, ss))
+
+
+def _fit_table_after_data(table: QTableWidget, mode: str, stretch_set: set[int]) -> None:
+    try:
+        if table.columnCount() == 0:
+            return
+        if mode == "auto_fit":
+            for col in range(table.columnCount()):
+                if col in stretch_set or table.isColumnHidden(col):
+                    continue
+                table.resizeColumnToContents(col)
+                w = table.columnWidth(col)
+                table.setColumnWidth(col, max(54, min(w + 18, 280)))
+            table.resizeRowsToContents()
+        elif mode == "wrap_full":
+            table.resizeRowsToContents()
+    except RuntimeError:
+        pass
+
+
+def apply_table_layout_preset_all(preset: str | None = None) -> None:
+    """Мгновенно применяет шаблон таблиц ко всем открытым таблицам приложения."""
+    mode = preset or _get_active_table_preset()
+    alive: list[tuple[weakref.ref, list[int] | None, int]] = []
+    for ref, stretch_cols, base_h in _CONFIGURED_TABLES:
+        tbl = ref()
+        if tbl is not None:
+            try:
+                apply_table_preset(tbl, stretch_cols, base_h, preset=mode)
+                alive.append((ref, stretch_cols, base_h))
+            except RuntimeError:
+                pass
+    _CONFIGURED_TABLES[:] = alive
+
+
 def configure_table(
     table: QTableWidget,
     stretch_col: int | list[int] | None = None,
@@ -256,14 +373,32 @@ def configure_table(
     table.setShowGrid(False)
     table.verticalHeader().setVisible(False)
     table.verticalHeader().setDefaultSectionSize(row_height)
-    header = table.horizontalHeader()
+    cols: list[int] | None = None
     if stretch_col is not None:
-        header.setStretchLastSection(False)
-        cols = [stretch_col] if isinstance(stretch_col, int) else stretch_col
-        for col in cols:
-            if 0 <= col < table.columnCount():
-                header.setSectionResizeMode(col, QHeaderView.ResizeMode.Stretch)
+        cols = [stretch_col] if isinstance(stretch_col, int) else list(stretch_col)
+        cols = [c for c in cols if 0 <= c < table.columnCount()]
 
+    apply_table_preset(table, cols, row_height)
+
+    # Авто-подстройка при заполнении таблицы данными
+    tbl_ref = weakref.ref(table)
+
+    def _on_data_changed(*_args, _ref=tbl_ref, sc=cols) -> None:
+        t = _ref()
+        if t is None:
+            return
+        mode = _get_active_table_preset()
+        if mode in ("auto_fit", "wrap_full"):
+            QTimer.singleShot(0, lambda tt=t, m=mode, ss=set(sc or []): _fit_table_after_data(tt, m, ss))
+
+    model = table.model()
+    if model is not None:
+        model.rowsInserted.connect(_on_data_changed)
+        model.modelReset.connect(_on_data_changed)
+
+    _CONFIGURED_TABLES.append((weakref.ref(table), cols, row_height))
+
+    header = table.horizontalHeader()
     header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
     header.customContextMenuRequested.connect(
         lambda pos, tbl=table: _show_header_column_menu(tbl, pos)
@@ -271,8 +406,11 @@ def configure_table(
 
 
 def _show_header_column_menu(table: QTableWidget, pos) -> None:
-    """Контекстное меню заголовка таблицы для включения/скрытия колонок."""
+    """Контекстное меню заголовка таблицы для включения/скрытия колонок и автоподбора ширины."""
     menu = QMenu(table)
+    fit_action = menu.addAction("Sütün giňliklerini awto-düz")
+    fit_action.triggered.connect(lambda: table.resizeColumnsToContents())
+    menu.addSeparator()
     visible_cnt = sum(not table.isColumnHidden(c) for c in range(table.columnCount()))
     for col in range(table.columnCount()):
         item = table.horizontalHeaderItem(col)
@@ -392,11 +530,19 @@ class ColorStatCard(QFrame):
         row.setContentsMargins(12, 10, 12, 10)
         row.setSpacing(10)
 
-        icon = QLabel(glyph)
+        from app.ui.icons import has_icon, make_icon
+
+        icon = QLabel()
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setFixedSize(36, 36)
-        icon.setStyleSheet("background:rgba(255,255,255,0.95); border-radius:9px; "
-                           f"color:{color}; font-size:14pt;")
+        icon.setStyleSheet(
+            "background:rgba(255,255,255,0.95); border-radius:9px; "
+            f"color:{color}; font-size:14pt;"
+        )
+        if has_icon(glyph):
+            icon.setPixmap(make_icon(glyph, color, 20).pixmap(QSize(20, 20)))
+        else:
+            icon.setText(glyph)
         row.addWidget(icon)
 
         col = QVBoxLayout()
@@ -438,10 +584,16 @@ class KpiCard(Card):
         col.addWidget(v)
         col.addWidget(t)
         top.addLayout(col, 1)
-        icon = QLabel(glyph)
+        from app.ui.icons import has_icon, make_icon
+
+        icon = QLabel()
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setFixedSize(40, 40)
         icon.setStyleSheet(f"background:{tint}; border-radius:10px; font-size:14pt;")
+        if has_icon(glyph):
+            icon.setPixmap(make_icon(glyph, theme.NAVY, 20).pixmap(QSize(20, 20)))
+        else:
+            icon.setText(glyph)
         top.addWidget(icon, 0, Qt.AlignmentFlag.AlignTop)
         self.body.addLayout(top)
 
@@ -454,9 +606,9 @@ class KpiCard(Card):
 
 
 class BarChart(QWidget):
-    """Столбчатый график с поддержкой семантического зума по таймлайнам
-    (часы ↔ дни ↔ недели ↔ месяцы ↔ годы), перетаскивания (Pan),
-    динамических осей X/Y и всплывающего окна продаж/прибыли при наведении."""
+    """Столбчатый график с плавным непрерывным 2D-зумом (по осям X и Y),
+    инерционной 60fps-интерполяцией, плавным перетаскиванием (Pan по X/Y)
+    и всплывающим окном продаж/прибыли при наведении."""
 
     zoomChanged = Signal(str)
     timelineZoomRequested = Signal(int, object)
@@ -477,8 +629,8 @@ class BarChart(QWidget):
         self.labels = labels
         self.purchases = purchases
         self.sales = sales
-        self.base_y_max = max(float(y_max or 1), 1.0)
-        self.y_max = self._nice_axis_max(self.base_y_max)
+        self.base_y_max = self._nice_axis_max(max(float(y_max or 1), 1.0))
+        self.y_max = self.base_y_max
         self.buckets_meta = buckets_meta or []
         self._hovered_index = -1
         self._timeline_mode = bool(timeline_mode)
@@ -486,14 +638,26 @@ class BarChart(QWidget):
         self._can_zoom_out = bool(can_zoom_out)
         self._last_wheel_ts = 0.0
 
-        # Состояние масштабирования: окно видимых баров [start_idx .. end_idx) + вертикальный зум
+        # Непрерывное (float) окно по X и Y + целевые значения для плавной анимации
         self._total_n = len(labels)
-        self._view_start = 0
-        self._view_count = max(1, self._total_n)
-        self._y_zoom = 1.0  # > 1.0 означает приближение по вертикальной оси Y
+        full_span = float(max(1, self._total_n))
+        self._x_start = 0.0
+        self._x_span = full_span
+        self._y_min = 0.0
+        self._y_max = self.base_y_max
+
+        self._tx_start = self._x_start
+        self._tx_span = self._x_span
+        self._ty_min = self._y_min
+        self._ty_max = self._y_max
+
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self._step_smooth_zoom)
+
         self._dragging = False
         self._drag_last_x = 0.0
-        self._drag_accum_x = 0.0
+        self._drag_last_y = 0.0
 
         self.setMouseTracking(True)
         self.setMinimumHeight(185)
@@ -527,79 +691,108 @@ class BarChart(QWidget):
             nice = 10.0
         return max(5.0, nice * base)
 
-    def _effective_y_max(self) -> float:
-        """Динамически пересчитывает максимум оси Y для текущего видимого окна и вертикального зума."""
-        if self._total_n == 0:
-            return self.base_y_max
-        s = self._view_start
-        e = min(self._total_n, s + self._view_count)
-        vis_pur = self.purchases[s:e]
-        vis_sal = self.sales[s:e]
-        local_max = max(max(vis_pur, default=0.0), max(vis_sal, default=0.0))
-        target = local_max if local_max > 0 else self.base_y_max
-        scaled = target / max(self._y_zoom, 0.25)
-        return self._nice_axis_max(scaled)
+    def _clamp_targets(self) -> None:
+        full_x = float(max(1, self._total_n))
+        min_x_span = min(full_x, 2.0)
+        self._tx_span = max(min_x_span, min(full_x, self._tx_span))
+        self._tx_start = max(0.0, min(full_x - self._tx_span, self._tx_start))
+
+        min_y_span = max(1.0, self.base_y_max * 0.04)
+        max_y_span = self.base_y_max * 2.5
+        y_span = max(min_y_span, min(max_y_span, self._ty_max - self._ty_min))
+        self._ty_min = max(0.0, min(self.base_y_max * 0.96, self._ty_min))
+        self._ty_max = self._ty_min + y_span
+        if self._ty_max > max_y_span:
+            self._ty_max = max_y_span
+            self._ty_min = max(0.0, self._ty_max - y_span)
+
+    def _start_smooth_anim(self) -> None:
+        self._clamp_targets()
+        if not self._anim_timer.isActive():
+            self._anim_timer.start()
+
+    def _step_smooth_zoom(self) -> None:
+        k = 0.28
+        self._x_start += (self._tx_start - self._x_start) * k
+        self._x_span += (self._tx_span - self._x_span) * k
+        self._y_min += (self._ty_min - self._y_min) * k
+        self._y_max += (self._ty_max - self._y_max) * k
+
+        done = (
+            abs(self._tx_start - self._x_start) < 1e-3
+            and abs(self._tx_span - self._x_span) < 1e-3
+            and abs(self._ty_min - self._y_min) < 1e-2
+            and abs(self._ty_max - self._y_max) < 1e-2
+        )
+        if done:
+            self._x_start = self._tx_start
+            self._x_span = self._tx_span
+            self._y_min = self._ty_min
+            self._y_max = self._ty_max
+            self._anim_timer.stop()
+
+        self.y_max = self._y_max
+        self.zoomChanged.emit(self.zoom_percent_label())
+        self.update()
+
+    def _is_zoomed(self) -> bool:
+        full_x = float(max(1, self._total_n))
+        return (
+            self._x_span < full_x - 0.05
+            or abs(self._y_max - self.base_y_max) > self.base_y_max * 0.02
+            or self._y_min > 0.5
+        )
 
     def zoom_percent_label(self) -> str:
         if self._total_n <= 0:
             return "100%"
-        x_ratio = self._total_n / max(1, self._view_count)
-        pct = round(x_ratio * self._y_zoom * 100)
+        x_ratio = self._total_n / max(0.5, self._x_span)
+        y_ratio = self.base_y_max / max(1.0, self._y_max - self._y_min)
+        pct = round(max(x_ratio, y_ratio) * 100)
         return f"{pct}%"
 
-    def _emit_zoom_state(self) -> None:
-        self.y_max = self._effective_y_max()
-        self.zoomChanged.emit(self.zoom_percent_label())
-        self.update()
+    def zoom_in(self, anchor_x: float = 0.5, anchor_y: float = 0.5, zoom_x: bool = True, zoom_y: bool = True) -> None:
+        self._apply_zoom_factor(0.82, anchor_x, anchor_y, zoom_x=zoom_x, zoom_y=zoom_y)
 
-    def zoom_in(self, anchor_ratio: float = 0.85) -> None:
-        """Приближение: сначала сужает видимое окно по оси X, затем масштабирует ось Y."""
+    def zoom_out(self, anchor_x: float = 0.5, anchor_y: float = 0.5, zoom_x: bool = True, zoom_y: bool = True) -> None:
+        self._apply_zoom_factor(1.0 / 0.82, anchor_x, anchor_y, zoom_x=zoom_x, zoom_y=zoom_y)
+
+    def _apply_zoom_factor(
+        self,
+        factor: float,
+        anchor_x: float,
+        anchor_y: float,
+        zoom_x: bool = True,
+        zoom_y: bool = True,
+    ) -> None:
         if self._total_n <= 0:
             return
-        min_count = min(self._total_n, 4)
-        if self._view_count > min_count:
-            new_count = max(min_count, round(self._view_count * 0.7))
-            if new_count == self._view_count:
-                new_count = max(min_count, self._view_count - 1)
-            anchor_idx = self._view_start + anchor_ratio * self._view_count
-            new_start = round(anchor_idx - anchor_ratio * new_count)
-            new_start = max(0, min(self._total_n - new_count, new_start))
-            self._view_start = new_start
-            self._view_count = new_count
-        else:
-            # Достигнут минимум баров по X -> приближаем вертикальную ось Y
-            self._y_zoom = min(16.0, self._y_zoom * 1.4)
-        self._hovered_index = -1
-        self._emit_zoom_state()
-
-    def zoom_out(self, anchor_ratio: float = 0.5) -> None:
-        """Отдаление: сначала возвращает ось Y, затем расширяет окно по оси X (и допускает Y-отдаление)."""
-        if self._total_n <= 0:
-            return
-        if self._y_zoom > 1.05:
-            self._y_zoom = max(1.0, self._y_zoom / 1.4)
-        elif self._view_count < self._total_n:
-            new_count = min(self._total_n, max(self._view_count + 1, round(self._view_count / 0.7)))
-            anchor_idx = self._view_start + anchor_ratio * self._view_count
-            new_start = round(anchor_idx - anchor_ratio * new_count)
-            new_start = max(0, min(self._total_n - new_count, new_start))
-            self._view_start = new_start
-            self._view_count = new_count
-        else:
-            # На полном диапазоне можно слегка отдалить шкалу Y (до 50%)
-            self._y_zoom = max(0.5, self._y_zoom / 1.25)
-        self._hovered_index = -1
-        self._emit_zoom_state()
+        ax = max(0.0, min(1.0, anchor_x))
+        ay = max(0.0, min(1.0, anchor_y))
+        if zoom_x:
+            anchor_data_x = self._tx_start + ax * self._tx_span
+            new_span = self._tx_span * factor
+            self._tx_span = new_span
+            self._tx_start = anchor_data_x - ax * new_span
+        if zoom_y:
+            y_span = max(1.0, self._ty_max - self._ty_min)
+            # ay=0 внизу оси Y (0), ay=1 вверху
+            anchor_data_y = self._ty_min + ay * y_span
+            new_y_span = y_span * factor
+            self._ty_min = anchor_data_y - ay * new_y_span
+            self._ty_max = self._ty_min + new_y_span
+        self._start_smooth_anim()
 
     def reset_zoom(self) -> None:
-        self._view_start = 0
-        self._view_count = max(1, self._total_n)
-        self._y_zoom = 1.0
+        self._tx_start = 0.0
+        self._tx_span = float(max(1, self._total_n))
+        self._ty_min = 0.0
+        self._ty_max = self.base_y_max
         self._hovered_index = -1
-        self._emit_zoom_state()
+        self._start_smooth_anim()
 
     def _chart_geometry(self) -> tuple[int, int, int, int, int, int]:
-        left, right, top, bottom = 54, 10, 68, 24
+        left, right, top, bottom = 58, 12, 68, 24
         w = max(10, self.width() - left - right)
         h = max(10, self.height() - top - bottom)
         return left, right, top, bottom, w, h
@@ -616,20 +809,14 @@ class BarChart(QWidget):
             return f"{val:.1f}".rstrip("0").rstrip(".")
         return "0"
 
-    def _bucket_focus_date(self, idx: int):
-        if 0 <= idx < len(self.buckets_meta):
-            return self.buckets_meta[idx].get("focus_date")
-        return None
-
     def _bar_index_at_x(self, pos_x: float) -> int:
         left, _right, _top, _bottom, w, _h = self._chart_geometry()
-        vis_n = min(self._view_count, max(0, self._total_n - self._view_start))
-        if vis_n <= 0 or pos_x < left or pos_x > left + w:
+        if self._total_n <= 0 or pos_x < left or pos_x > left + w:
             return -1
-        slot = w / vis_n
-        rel_idx = int((pos_x - left) / slot)
-        if 0 <= rel_idx < vis_n:
-            return self._view_start + rel_idx
+        data_x = self._x_start + ((pos_x - left) / w) * self._x_span
+        idx = int(data_x)
+        if 0 <= idx < self._total_n:
+            return idx
         return -1
 
     def wheelEvent(self, event) -> None:
@@ -637,52 +824,41 @@ class BarChart(QWidget):
         if delta_y == 0:
             super().wheelEvent(event)
             return
-        if self._timeline_mode:
-            import time as _time
 
-            now = _time.monotonic()
-            if now - self._last_wheel_ts < 0.11:
-                event.accept()
-                return
-            self._last_wheel_ts = now
-            idx = self._bar_index_at_x(event.position().x())
-            focus_dt = self._bucket_focus_date(idx) if idx >= 0 else None
-            if delta_y > 0 and self._can_zoom_in:
-                self.timelineZoomRequested.emit(1, focus_dt)
-            elif delta_y < 0 and self._can_zoom_out:
-                self.timelineZoomRequested.emit(-1, focus_dt)
-            event.accept()
-            return
+        left, _right, top, _bottom, w, h = self._chart_geometry()
+        pos = event.position()
+        anchor_x = max(0.0, min(1.0, (pos.x() - left) / max(1, w)))
+        anchor_y = max(0.0, min(1.0, 1.0 - (pos.y() - top) / max(1, h)))
 
-        left, _right, _top, _bottom, w, _h = self._chart_geometry()
-        pos_x = event.position().x()
-        ratio = max(0.0, min(1.0, (pos_x - left) / max(1, w)))
-        if delta_y > 0:
-            self.zoom_in(anchor_ratio=ratio)
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            zx, zy = False, True
+        elif mods & Qt.KeyboardModifier.ControlModifier:
+            zx, zy = True, False
         else:
-            self.zoom_out(anchor_ratio=ratio)
+            zx, zy = True, True
+
+        # Пропорциональный плавный коэффициент (учитывает и обычную мышь, и плавный тачпад)
+        steps = delta_y / 120.0
+        factor = 0.85 ** steps
+        self._apply_zoom_factor(factor, anchor_x, anchor_y, zoom_x=zx, zoom_y=zy)
         event.accept()
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if (
-            self._timeline_mode
-            and event.button() == Qt.MouseButton.LeftButton
-            and self._can_zoom_in
-        ):
-            idx = self._bar_index_at_x(event.position().x())
-            focus_dt = self._bucket_focus_date(idx) if idx >= 0 else None
-            self.timelineZoomRequested.emit(1, focus_dt)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.reset_zoom()
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton and (
-            self._timeline_mode or self._view_count < self._total_n
-        ):
+        if event.button() == Qt.MouseButton.LeftButton and self._is_zoomed():
             self._dragging = True
             self._drag_last_x = event.position().x()
-            self._drag_accum_x = 0.0
+            self._drag_last_y = event.position().y()
+            self._anim_timer.stop()
+            self._tx_start, self._tx_span = self._x_start, self._x_span
+            self._ty_min, self._ty_max = self._y_min, self._y_max
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             event.accept()
             return
@@ -691,8 +867,9 @@ class BarChart(QWidget):
     def mouseReleaseEvent(self, event) -> None:
         if self._dragging and event.button() == Qt.MouseButton.LeftButton:
             self._dragging = False
-            self._drag_accum_x = 0.0
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if self._is_zoomed() else Qt.CursorShape.ArrowCursor
+            )
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -703,38 +880,30 @@ class BarChart(QWidget):
 
         if self._dragging:
             dx = pos.x() - self._drag_last_x
-            if self._timeline_mode:
-                self._drag_accum_x += dx
-                self._drag_last_x = pos.x()
-                if abs(self._drag_accum_x) >= 65.0:
-                    step = -1 if self._drag_accum_x > 0 else 1
-                    self._drag_accum_x = 0.0
-                    self._dragging = False
-                    self.setCursor(Qt.CursorShape.ArrowCursor)
-                    self.timelinePanRequested.emit(step)
-                return
-            if self._view_count < self._total_n:
-                slot = w / max(1, self._view_count)
-                shift = round(-dx / max(12.0, slot))
-                if shift != 0:
-                    new_start = max(0, min(self._total_n - self._view_count, self._view_start + shift))
-                    if new_start != self._view_start:
-                        self._view_start = new_start
-                        self._drag_last_x = pos.x()
-                        self._hovered_index = -1
-                        self._emit_zoom_state()
-                return
+            dy = pos.y() - self._drag_last_y
+            self._drag_last_x = pos.x()
+            self._drag_last_y = pos.y()
 
-        vis_n = min(self._view_count, max(0, self._total_n - self._view_start))
+            self._tx_start -= (dx / max(1, w)) * self._tx_span
+            y_span = max(1.0, self._ty_max - self._ty_min)
+            shift_y = (dy / max(1, h)) * y_span
+            self._ty_min += shift_y
+            self._ty_max += shift_y
+            self._clamp_targets()
+
+            self._x_start = self._tx_start
+            self._y_min = self._ty_min
+            self._y_max = self._ty_max
+            self._hovered_index = -1
+            self.update()
+            return
+
         new_hover = -1
-        if vis_n > 0 and left <= pos.x() <= left + w and 0 <= pos.y() <= top + h + 24:
-            slot = w / vis_n
-            rel_idx = int((pos.x() - left) / slot)
-            if 0 <= rel_idx < vis_n:
-                new_hover = self._view_start + rel_idx
+        if self._total_n > 0 and left <= pos.x() <= left + w and 0 <= pos.y() <= top + h + 24:
+            new_hover = self._bar_index_at_x(pos.x())
         if new_hover != self._hovered_index:
             self._hovered_index = new_hover
-            if self._view_count < self._total_n:
+            if self._is_zoomed():
                 self.setCursor(Qt.CursorShape.OpenHandCursor)
             else:
                 self.setCursor(
@@ -761,8 +930,9 @@ class BarChart(QWidget):
         font.setPointSizeF(8.5)
         p.setFont(font)
 
-        eff_y_max = self._effective_y_max()
-        self.y_max = eff_y_max
+        y_min = self._y_min
+        y_max = max(y_min + 1.0, self._y_max)
+        y_span = y_max - y_min
 
         steps = 5
         for i in range(steps + 1):
@@ -770,7 +940,7 @@ class BarChart(QWidget):
             p.setPen(QPen(QColor(theme.BORDER), 1, Qt.PenStyle.DashLine))
             p.drawLine(left, int(y), left + w, int(y))
             p.setPen(QColor(theme.MUTED))
-            axis_label = self._format_axis_val(eff_y_max * i / steps)
+            axis_label = self._format_axis_val(y_min + y_span * i / steps)
             p.drawText(
                 QRectF(0, y - 8, left - 8, 16),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -781,21 +951,21 @@ class BarChart(QWidget):
             p.end()
             return
 
-        start = self._view_start
-        end = min(self._total_n, start + self._view_count)
-        vis_n = end - start
-        if vis_n <= 0:
-            p.end()
-            return
+        x_start = self._x_start
+        x_span = max(0.5, self._x_span)
+        slot = w / x_span
+        bw = max(5.0, min(38.0, slot * 0.58))
 
-        slot = w / vis_n
-        bw = max(6.0, min(32.0, slot * 0.58))
-        label_step = 1 if vis_n <= 14 else (2 if vis_n <= 20 else 3)
-        last_step_idx = ((vis_n - 1) // label_step) * label_step
+        first_i = max(0, int(x_start) - 1)
+        last_i = min(self._total_n, int(x_start + x_span) + 2)
+        vis_approx = max(1, round(x_span))
+        label_step = 1 if vis_approx <= 14 else (2 if vis_approx <= 22 else 3)
 
-        for rel_i, orig_i in enumerate(range(start, end)):
-            name = self.labels[orig_i]
-            cx = left + slot * (rel_i + 0.5)
+        # Клиппинг области столбцов для плавного скролла/зума без вылезания за оси
+        p.save()
+        p.setClipRect(QRectF(left, top, w, h))
+        for orig_i in range(first_i, last_i):
+            cx = left + (orig_i + 0.5 - x_start) * slot
             is_hovered = orig_i == self._hovered_index
 
             if is_hovered:
@@ -807,22 +977,30 @@ class BarChart(QWidget):
                 (self.purchases[orig_i], theme.ACCENT_SOFT, False),
                 (self.sales[orig_i], theme.ACCENT, True),
             ):
-                bh = min(h, max(0.0, h * float(value) / eff_y_max))
-                if bh <= 0 and not is_hovered:
+                val_f = float(value)
+                if val_f <= y_min:
                     continue
-                draw_h = max(3.0, bh) if value > 0 else 0.0
-                if draw_h <= 0:
-                    continue
-                rect = QRectF(cx - bw / 2, top + h - draw_h, bw, draw_h + 6)
+                norm = (val_f - y_min) / y_span
+                bh = max(3.0, h * norm)
+                y_top = top + h - bh
+                rect = QRectF(cx - bw / 2, y_top, bw, bh + 6)
                 if is_hovered and is_sales:
                     p.setPen(QPen(QColor(theme.NAVY), 1.5))
                 else:
                     p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(color))
                 p.drawRoundedRect(rect, 5, 5)
+        p.restore()
 
-            show_last = rel_i == vis_n - 1 and (vis_n - 1 - last_step_idx) >= 2
-            if rel_i % label_step == 0 or show_last or is_hovered:
+        # Подписи оси X
+        p.save()
+        p.setClipRect(QRectF(left - 18, top + h, w + 36, 24))
+        for orig_i in range(first_i, last_i):
+            cx = left + (orig_i + 0.5 - x_start) * slot
+            if cx < left - 12 or cx > left + w + 12:
+                continue
+            is_hovered = orig_i == self._hovered_index
+            if orig_i % label_step == 0 or is_hovered:
                 lbl_font = QFont(font)
                 lbl_font.setBold(is_hovered)
                 p.setFont(lbl_font)
@@ -830,27 +1008,26 @@ class BarChart(QWidget):
                 p.drawText(
                     QRectF(cx - max(slot, 38) / 2, top + h + 5, max(slot, 38), 16),
                     Qt.AlignmentFlag.AlignCenter,
-                    name,
+                    self.labels[orig_i],
                 )
                 p.setFont(font)
-
-        # закрываем скруглённые «хвосты» столбцов под осью
-        p.fillRect(QRectF(left, top + h, w, 6), QColor("white"))
+        p.restore()
 
         # Всплывающее окно сверху диаграммы при наведении на столбец
-        if start <= self._hovered_index < end:
-            self._draw_hover_popup(p, left, w, slot, self._hovered_index, self._hovered_index - start)
+        if 0 <= self._hovered_index < self._total_n and first_i <= self._hovered_index < last_i:
+            self._draw_hover_popup(p, left, w, slot, self._hovered_index, self._hovered_index - x_start)
         else:
             hint_font = QFont(font)
-            hint_font.setPointSizeF(8.3)
+            hint_font.setPointSizeF(8.2)
             p.setFont(hint_font)
             p.setPen(QColor(theme.MUTED))
-            if self._timeline_mode:
-                zoom_hint = "Tigir / + −: sagat ↔ gün ↔ hepde ↔ aý ↔ ýyl  •  Çekip süýşür"
-            elif self._view_count < self._total_n:
-                zoom_hint = "Syçanjyk tigiri: ýakynlaşdyr/uzaklaşdyr • Çekip süýşür"
+            if self._is_zoomed():
+                zoom_hint = (
+                    f"Masştab {self.zoom_percent_label()} • Çekip süýşür (X/Y) • "
+                    "Shift+Tigir (Y) • Ctrl+Tigir (X) • 2× bas: 100%"
+                )
             else:
-                zoom_hint = "Syçanjygy eltiň (maglumat) • Tigir / + − (masştab)"
+                zoom_hint = "Tigir: tekiz 2D zum (X+Y) • Shift+Tigir: Y • Ctrl+Tigir: X • 2× bas: 100%"
             p.drawText(
                 QRectF(left, 4, w, 18),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -866,7 +1043,7 @@ class BarChart(QWidget):
         w: int,
         slot: float,
         idx: int,
-        rel_idx: int | None = None,
+        rel_idx: float | None = None,
     ) -> None:
         meta = (
             self.buckets_meta[idx]
@@ -1290,3 +1467,172 @@ class SearchResultPopup(QListWidget):
             return True
         sb = self.verticalScrollBar()
         return bool(sb is not None and (sb.underMouse() or sb.isSliderDown()))
+
+
+# ---------------------------------------------------------------------------
+# Базовые компоненты дизайн-системы (шаг 2). Старые классы выше не изменены.
+# ---------------------------------------------------------------------------
+
+_ICON_COLORS = {
+    "primary": theme.WHITE,
+    "success": theme.WHITE,
+    "dark": theme.WHITE,
+    "danger": theme.RED,
+    "ghost": theme.TEXT_NAV,
+    "secondary": theme.NAVY,
+    "link": theme.ACCENT,
+}
+
+
+def make_icon_button(
+    text: str,
+    icon_key: str,
+    variant: str = "secondary",
+    size: str = "md",
+) -> QPushButton:
+    """Кнопка с векторной иконкой вместо эмодзи. size: 'sm' | 'md' | 'lg'."""
+    from app.ui.icons import icon_size as _icon_size
+    from app.ui.icons import make_icon
+
+    btn = make_button(text, "secondary" if variant == "ghost" else variant)
+    if variant == "ghost":
+        btn.setObjectName("ghostBtn")
+    if size in ("sm", "lg"):
+        btn.setProperty("btnSize", size)
+    px = 14 if size == "sm" else 20 if size == "lg" else 17
+    btn.setIcon(make_icon(icon_key, _ICON_COLORS.get(variant, theme.NAVY), px))
+    btn.setIconSize(_icon_size(px))
+    return btn
+
+
+class StatusBadge(QLabel):
+    """Компактный статус: tone = neutral | success | warning | danger | info | accent."""
+
+    def __init__(self, text: str = "", tone: str = "neutral") -> None:
+        super().__init__(text)
+        self.setObjectName("statusBadge")
+        self.set_tone(tone)
+
+    def set_tone(self, tone: str) -> None:
+        self.setProperty("tone", tone)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+
+
+class InlineAlert(QFrame):
+    """Встроенное предупреждение (не модальное). tone = info | warning | danger.
+
+    Используется вместо QMessageBox для некритичных предупреждений:
+    скрыто по умолчанию, `show_message()` показывает, `clear()` прячет.
+    """
+
+    _ICONS: ClassVar[dict[str, str]] = {"info": "info", "warning": "warning", "danger": "warning"}
+    _COLORS: ClassVar[dict[str, str]] = {"info": "#1D4ED8", "warning": "#B45309", "danger": theme.DANGER_TEXT}
+
+    def __init__(self, tone: str = "warning") -> None:
+        super().__init__()
+        self.setObjectName("inlineAlert")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(8)
+        self._icon = QLabel()
+        self._icon.setFixedSize(18, 18)
+        self._text = QLabel()
+        self._text.setObjectName("inlineAlertText")
+        self._text.setWordWrap(True)
+        row.addWidget(self._icon, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(self._text, 1)
+        self.set_tone(tone)
+        self.hide()
+
+    def set_tone(self, tone: str) -> None:
+        from app.ui.icons import make_icon
+
+        self._tone = tone
+        self.setProperty("tone", tone)
+        style = self.style()
+        style.unpolish(self)
+        style.polish(self)
+        color = self._COLORS.get(tone, theme.MUTED)
+        self._icon.setPixmap(make_icon(self._ICONS.get(tone, "info"), color, 18).pixmap(QSize(18, 18)))
+
+    def show_message(self, message: str, tone: str | None = None) -> None:
+        if tone and tone != self._tone:
+            self.set_tone(tone)
+        self._text.setText(message)
+        self.setVisible(bool(message))
+
+    def clear(self) -> None:
+        self._text.clear()
+        self.hide()
+
+
+class StatCard(Card):
+    """Единая карточка показателя: подпись, значение, необязательные подсказка и значок-иконка.
+
+    Заменяет ColorStatCard / KpiCard / make_stat_card при миграции страниц.
+    """
+
+    clicked = Signal()
+
+    def __init__(
+        self,
+        title: str,
+        value: str = "",
+        subtitle: str = "",
+        icon_key: str | None = None,
+        color: str = theme.NAVY,
+        clickable: bool = False,
+    ) -> None:
+        super().__init__(margins=(16, 12, 16, 12), spacing=4)
+        self._clickable = clickable
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("mutedText")
+        top.addWidget(self.title_label, 1)
+        if icon_key:
+            from app.ui.icons import make_icon
+
+            icon_lbl = QLabel()
+            icon_lbl.setPixmap(make_icon(icon_key, color, 18).pixmap(QSize(18, 18)))
+            top.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+        self.body.addLayout(top)
+        self.value_label = QLabel(value)
+        self.value_label.setStyleSheet(
+            f"color: {color}; font-size: {theme.FS_KPI}pt; font-weight: 700;"
+        )
+        self.body.addWidget(self.value_label)
+        self.subtitle_label = QLabel(subtitle)
+        self.subtitle_label.setStyleSheet(f"color: {theme.MUTED}; font-size: {theme.FS_CAPTION}pt;")
+        self.subtitle_label.setVisible(bool(subtitle))
+        self.body.addWidget(self.subtitle_label)
+        if clickable:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_value(self, value: str, subtitle: str | None = None) -> None:
+        self.value_label.setText(value)
+        if subtitle is not None:
+            self.subtitle_label.setText(subtitle)
+            self.subtitle_label.setVisible(bool(subtitle))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if (
+            self._clickable
+            and event.button() == Qt.MouseButton.LeftButton
+            and self.rect().contains(event.position().toPoint())
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+NUM_ALIGN = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+
+
+def align_numeric_columns(table: QTableWidget, cols: list[int] | tuple[int, ...]) -> None:
+    """Выравнивает заголовки числовых/денежных колонок вправо (ячейки задаются через NUM_ALIGN)."""
+    for col in cols:
+        item = table.horizontalHeaderItem(col)
+        if item is not None:
+            item.setTextAlignment(NUM_ALIGN)

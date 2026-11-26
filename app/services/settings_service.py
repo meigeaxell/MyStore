@@ -27,6 +27,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "mobile_server_port": "8765",
     "mobile_server_token": "",
     "stock_group_mode": "name",  # name | brand | category | none
+    "table_layout_preset": "auto_fit",  # auto_fit | wrap_full | compact | wide_scroll
     "product_remember_fields": json.dumps({
         "category": True,
         "brand": True,
@@ -43,6 +44,19 @@ DEFAULT_SETTINGS: dict[str, str] = {
 
 class SettingsService:
     """Централизованный сервис настроек приложения (Фаза VI)."""
+
+    @staticmethod
+    def get_table_layout_preset() -> str:
+        """Возвращает выбранный шаблон отображения таблиц."""
+        preset = (SettingsService.get("table_layout_preset", "auto_fit") or "auto_fit").strip().lower()
+        return preset if preset in ("auto_fit", "wrap_full", "compact", "wide_scroll") else "auto_fit"
+
+    @staticmethod
+    def set_table_layout_preset(preset: str) -> None:
+        clean = (preset or "auto_fit").strip().lower()
+        if clean not in ("auto_fit", "wrap_full", "compact", "wide_scroll"):
+            clean = "auto_fit"
+        SettingsService.set("table_layout_preset", clean)
 
     @staticmethod
     def get_all(session: Session | None = None) -> dict[str, str]:

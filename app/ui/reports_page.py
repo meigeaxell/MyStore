@@ -1,5 +1,6 @@
 import csv
 from datetime import datetime
+from decimal import Decimal
 from html import escape
 from pathlib import Path
 
@@ -30,9 +31,12 @@ from app.services.report_service import ReportService
 from app.ui import theme
 from app.ui.sales_page import SaleDetailsDialog
 from app.ui.widgets import (
+    NUM_ALIGN,
+    align_numeric_columns,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
     show_toast,
     style_combo,
@@ -206,15 +210,15 @@ class ReportsPage(QWidget):
         col.addWidget(sub)
         header.addLayout(col, 1)
 
-        csv_btn = make_button("⬇ CSV eksport")
+        csv_btn = make_icon_button("CSV eksport", "export")
         csv_btn.clicked.connect(self._export_current_csv)
         header.addWidget(csv_btn)
 
-        pdf_btn = make_button("📄 PDF eksport")
+        pdf_btn = make_icon_button("PDF eksport", "print")
         pdf_btn.clicked.connect(self._export_current_pdf)
         header.addWidget(pdf_btn)
 
-        refresh_btn = make_button("↻  Täzele", "primary")
+        refresh_btn = make_icon_button("Täzele", "refresh", "primary")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -312,7 +316,7 @@ class ReportsPage(QWidget):
         )
         layout.addWidget(self.sales_summary_label)
 
-        self.sales_table = QTableWidget(0, 10)
+        self.sales_table = QTableWidget(0, 11)
         self.sales_table.setHorizontalHeaderLabels([
             "ID",
             "Çek",
@@ -322,10 +326,12 @@ class ReportsPage(QWidget):
             "Sany",
             "Walýuta",
             "Girdeji",
+            "Peýda",
             "Tölendi",
             "Müşderiniň bergisi / Status",
         ])
         configure_table(self.sales_table)
+        align_numeric_columns(self.sales_table, (7, 8, 9))
         self.sales_table.horizontalHeader().setSectionResizeMode(
             3, QHeaderView.ResizeMode.Stretch
         )
@@ -366,6 +372,7 @@ class ReportsPage(QWidget):
             "Jemi peýda (Marža)",
         ])
         configure_table(self.profit_table)
+        align_numeric_columns(self.profit_table, (6, 7, 8))
         self.profit_table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.ResizeMode.Stretch
         )
@@ -391,7 +398,7 @@ class ReportsPage(QWidget):
         self.prod_search.textChanged.connect(self._load_products_report)
         top.addWidget(self.prod_search, 1)
 
-        hist_btn = make_button("📜 Saýlanan harydyň hereket taryhy", "primary")
+        hist_btn = make_icon_button("Saýlanan harydyň hereket taryhy", "history", "primary")
         hist_btn.clicked.connect(self._open_selected_product_history)
         top.addWidget(hist_btn)
         layout.addLayout(top)
@@ -444,7 +451,7 @@ class ReportsPage(QWidget):
         self.dev_search.textChanged.connect(self._load_devices_report)
         top.addWidget(self.dev_search, 1)
 
-        imei_hist_btn = make_button("📱 Saýlanan IMEI-niň doly taryhy", "primary")
+        imei_hist_btn = make_icon_button("Saýlanan IMEI-niň doly taryhy", "phone", "primary")
         imei_hist_btn.clicked.connect(self._open_selected_imei_history)
         top.addWidget(imei_hist_btn)
         layout.addLayout(top)
@@ -626,6 +633,13 @@ class ReportsPage(QWidget):
             else:
                 st_txt = "Tölendi"
 
+            prof_val = r.get("profit_amount", Decimal("0.00"))
+            if r["status"] == "cancelled":
+                prof_txt = "—"
+            else:
+                p_sign = "+" if prof_val >= 0 else "−"
+                prof_txt = f"{p_sign}{money_str(abs(prof_val))}"
+
             vals = [
                 str(r["sale_id"]),
                 r["receipt_number"],
@@ -635,18 +649,23 @@ class ReportsPage(QWidget):
                 str(r["units"]),
                 r["currency"],
                 money_str(r["total_amount"]),
+                prof_txt,
                 money_str(r["paid_amount"]),
                 st_txt,
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (0, 5, 6, 7, 8, 9):
+                if c in (7, 8, 9):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (0, 5, 6, 10):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 3:
                     cell.setToolTip(r.get("items_summary", ""))
                 if r["status"] == "cancelled":
                     cell.setForeground(QColor(theme.RED))
-                elif c == 9 and r["customer_debt"] > 0:
+                elif c == 8:
+                    cell.setForeground(QColor(theme.GREEN if prof_val >= 0 else theme.RED))
+                elif c == 10 and r["customer_debt"] > 0:
                     cell.setForeground(QColor(theme.ACCENT))
                 self.sales_table.setItem(i, c, cell)
 
@@ -684,7 +703,9 @@ class ReportsPage(QWidget):
             ]
             for c, val in enumerate(vals):
                 cell = QTableWidgetItem(val)
-                if c in (4, 5, 6, 7, 8):
+                if c in (6, 7, 8):
+                    cell.setTextAlignment(NUM_ALIGN)
+                elif c in (4, 5):
                     cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if c == 8:
                     cell.setForeground(

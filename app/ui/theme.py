@@ -17,6 +17,34 @@ BORDER = "#E8EBF0"
 BG = "#F6F7F9"
 WHITE = "#FFFFFF"
 
+# --- Производные цвета (токены; значения не менять без визуальной проверки) ---
+ACCENT_HOVER = "#E57C20"
+NAVY_HOVER = "#26395A"
+GREEN_HOVER = "#15803D"
+BORDER_STRONG = "#D0D5DD"
+FAINT = "#98A2B3"
+TEXT_NAV = "#475467"
+SURFACE_SUBTLE = "#F2F4F7"
+SURFACE_HEADER = "#F8F9FB"
+SURFACE_ALT = "#FAFBFC"
+TAB_BG = "#EAECF0"
+ROW_DIVIDER = "#F0F1F3"
+DANGER_BG = "#FDECEA"
+DANGER_BORDER = "#F9CFCB"
+DANGER_TEXT = "#B42318"
+
+# --- Типографическая шкала (pt) ---
+FS_CAPTION = 8.5
+FS_BODY = 10
+FS_SECTION = 12
+FS_KPI = 16
+FS_TITLE = 20
+
+# --- Отступы, радиусы, высоты (px, шаг 4) ---
+SP_1, SP_2, SP_3, SP_4, SP_6 = 4, 8, 12, 16, 24
+RADIUS_SM, RADIUS_MD, RADIUS_LG = 6, 8, 12
+ROW_H_COMFORTABLE, ROW_H_COMPACT = 46, 34
+
 _ICONS_DIR = BUNDLE_ROOT / "resources" / "icons"
 _ICON_CHEVRON_DOWN = (_ICONS_DIR / "chevron_down.svg").as_posix()
 _ICON_CHEVRON_DOWN_ACCENT = (_ICONS_DIR / "chevron_down_accent.svg").as_posix()
@@ -52,7 +80,7 @@ QWidget#dialogFooter {{
 
 QTreeView {{
     background-color: {WHITE};
-    alternate-background-color: #FAFBFC;
+    alternate-background-color: {SURFACE_ALT};
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: 8px;
@@ -86,7 +114,7 @@ QCheckBox::indicator {{
     width: 18px;
     height: 18px;
     border-radius: 5px;
-    border: 1.5px solid #D0D5DD;
+    border: 1.5px solid {BORDER_STRONG};
     background-color: {WHITE};
 }}
 
@@ -102,12 +130,12 @@ QCheckBox::indicator:checked {{
 }}
 
 QCheckBox::indicator:checked:hover {{
-    background-color: #E57C20;
-    border-color: #E57C20;
+    background-color: {ACCENT_HOVER};
+    border-color: {ACCENT_HOVER};
 }}
 
 QCheckBox::indicator:disabled {{
-    background-color: #F2F4F7;
+    background-color: {SURFACE_SUBTLE};
     border-color: {BORDER};
 }}
 
@@ -125,7 +153,7 @@ QTabBar {{
 }}
 
 QTabBar::tab {{
-    background: #EAECF0;
+    background: {TAB_BG};
     color: {MUTED};
     border: 1px solid {BORDER};
     border-bottom: none;
@@ -214,7 +242,7 @@ QDateEdit:hover,
 QDateTimeEdit:hover,
 QTimeEdit:hover,
 QComboBox:hover {{
-    border-color: #D0D5DD;
+    border-color: {BORDER_STRONG};
 }}
 
 QLineEdit:focus,
@@ -234,8 +262,8 @@ QLineEdit:disabled,
 QSpinBox:disabled,
 QDoubleSpinBox:disabled,
 QComboBox:disabled {{
-    background-color: #F2F4F7;
-    color: #98A2B3;
+    background-color: {SURFACE_SUBTLE};
+    color: {FAINT};
 }}
 
 /* ---------- Выпадающие списки и календари ---------- */
@@ -313,7 +341,7 @@ QComboBox QAbstractItemView::item:selected {{
 
 QCalendarWidget {{
     background-color: {WHITE};
-    border: 1px solid #D0D5DD;
+    border: 1px solid {BORDER_STRONG};
     border-radius: 10px;
     min-width: 330px;
     min-height: 260px;
@@ -321,7 +349,7 @@ QCalendarWidget {{
 
 QCalendarWidget QTableView {{
     background-color: {WHITE};
-    alternate-background-color: #F8F9FB;
+    alternate-background-color: {SURFACE_HEADER};
     border: none;
     border-radius: 0px;
     padding: 0px;
@@ -379,7 +407,7 @@ QCalendarWidget QToolButton#qt_calendar_nextmonth {{
 QCalendarWidget QMenu {{
     background-color: {WHITE};
     color: {TEXT};
-    border: 1px solid #D0D5DD;
+    border: 1px solid {BORDER_STRONG};
     border-radius: 8px;
     padding: 4px;
 }}
@@ -405,7 +433,7 @@ QCalendarWidget QSpinBox {{
 
 QCalendarWidget QAbstractItemView:enabled {{
     background-color: {WHITE};
-    alternate-background-color: #F8F9FB;
+    alternate-background-color: {SURFACE_HEADER};
     color: {TEXT};
     selection-background-color: {ACCENT};
     selection-color: {WHITE};
@@ -414,7 +442,7 @@ QCalendarWidget QAbstractItemView:enabled {{
 }}
 
 QCalendarWidget QAbstractItemView:disabled {{
-    color: #98A2B3;
+    color: {FAINT};
 }}
 
 /* ---------- Числовые поля (без стрелок для чистого вида) ---------- */
@@ -473,7 +501,7 @@ QLabel#brandMark {{
 }}
 
 QLabel#navSection {{
-    color: #98A2B3;
+    color: {FAINT};
     font-size: 8.5pt;
     font-weight: 600;
     padding: 14px 12px 4px;
@@ -491,7 +519,7 @@ QPushButton#brandNavButton {{
 }}
 
 QPushButton#brandNavButton:hover {{
-    background: #F2F4F7;
+    background: {SURFACE_SUBTLE};
     border-color: {BORDER};
 }}
 
@@ -502,7 +530,7 @@ QPushButton#brandNavButton:checked {{
 }}
 
 QPushButton#navButton {{
-    color: #475467;
+    color: {TEXT_NAV};
     background: transparent;
     border: 0;
     border-radius: 8px;
@@ -512,7 +540,7 @@ QPushButton#navButton {{
 }}
 
 QPushButton#navButton:hover {{
-    background: #F2F4F7;
+    background: {SURFACE_SUBTLE};
     color: {NAVY};
 }}
 
@@ -523,7 +551,7 @@ QPushButton#navButton:checked {{
 }}
 
 QLabel#sideFooter {{
-    color: #98A2B3;
+    color: {FAINT};
     font-size: 8.5pt;
     padding: 4px 12px;
 }}
@@ -558,7 +586,7 @@ QPushButton#primaryBtn {{
 }}
 
 QPushButton#primaryBtn:hover {{
-    background: #E57C20;
+    background: {ACCENT_HOVER};
 }}
 
 QPushButton#primaryBtn:focus {{
@@ -575,7 +603,7 @@ QPushButton#successBtn {{
 }}
 
 QPushButton#successBtn:hover {{
-    background: #15803D;
+    background: {GREEN_HOVER};
 }}
 
 QPushButton#successBtn:focus {{
@@ -592,7 +620,7 @@ QPushButton#darkBtn {{
 }}
 
 QPushButton#darkBtn:hover {{
-    background: #26395A;
+    background: {NAVY_HOVER};
 }}
 
 QPushButton#dangerBtn {{
@@ -605,7 +633,7 @@ QPushButton#dangerBtn {{
 }}
 
 QPushButton#dangerBtn:hover {{
-    background: #FDECEA;
+    background: {DANGER_BG};
     border-color: {RED};
 }}
 
@@ -644,10 +672,65 @@ QPushButton:pressed {{
 }}
 
 QPushButton:disabled {{
-    background: #F2F4F7;
-    color: #98A2B3;
+    background: {SURFACE_SUBTLE};
+    color: {FAINT};
     border-color: {BORDER};
 }}
+
+/* ---------- Размеры кнопок (property "btnSize") ---------- */
+
+QPushButton[btnSize="sm"] {{
+    padding: 5px 10px;
+    font-size: 9pt;
+}}
+
+QPushButton[btnSize="lg"] {{
+    padding: 12px 22px;
+    font-size: 11pt;
+}}
+
+QPushButton#ghostBtn {{
+    background: transparent;
+    color: {TEXT_NAV};
+    border: 1px solid transparent;
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-weight: 600;
+}}
+
+QPushButton#ghostBtn:hover {{
+    background: {SURFACE_SUBTLE};
+    color: {NAVY};
+}}
+
+/* ---------- Бейджи статуса и встроенные предупреждения ---------- */
+
+QLabel#statusBadge {{
+    border-radius: 9px;
+    padding: 2px 9px;
+    font-size: 8.5pt;
+    font-weight: 600;
+    background: {SURFACE_SUBTLE};
+    color: {TEXT_NAV};
+}}
+
+QLabel#statusBadge[tone="success"] {{ background: #E7F6EC; color: {GREEN_HOVER}; }}
+QLabel#statusBadge[tone="warning"] {{ background: #FEF3C7; color: #92400E; }}
+QLabel#statusBadge[tone="danger"] {{ background: {DANGER_BG}; color: {DANGER_TEXT}; }}
+QLabel#statusBadge[tone="info"] {{ background: #E0EAFF; color: #1D4ED8; }}
+QLabel#statusBadge[tone="accent"] {{ background: {ACCENT_SOFT}; color: #C2410C; }}
+
+QFrame#inlineAlert {{
+    border-radius: 9px;
+    border: 1px solid {BORDER};
+    background: {SURFACE_SUBTLE};
+}}
+
+QFrame#inlineAlert[tone="info"] {{ background: #EEF4FF; border-color: #C7D7FE; }}
+QFrame#inlineAlert[tone="warning"] {{ background: #FFFAEB; border-color: #FEDF89; }}
+QFrame#inlineAlert[tone="danger"] {{ background: {DANGER_BG}; border-color: {DANGER_BORDER}; }}
+
+QLabel#inlineAlertText {{ color: {TEXT}; background: transparent; }}
 
 /* ---------- Карточки ---------- */
 
@@ -703,7 +786,7 @@ QLabel#datePill {{
 QTableWidget,
 QTableView {{
     background-color: white;
-    alternate-background-color: #FAFBFC;
+    alternate-background-color: {SURFACE_ALT};
     color: {TEXT};
     border: 1px solid {BORDER};
     border-radius: 10px;
@@ -717,7 +800,7 @@ QTableWidget::item,
 QTableView::item {{
     padding: 9px;
     border: none;
-    border-bottom: 1px solid #F0F1F3;
+    border-bottom: 1px solid {ROW_DIVIDER};
 }}
 
 QTableWidget::item:selected,
@@ -727,7 +810,7 @@ QTableView::item:selected {{
 }}
 
 QHeaderView::section {{
-    background: #F8F9FB;
+    background: {SURFACE_HEADER};
     color: {MUTED};
     padding: 12px 10px;
     border: none;
@@ -738,19 +821,19 @@ QHeaderView::section {{
 /* ---------- Уведомления ---------- */
 
 QFrame#alert {{
-    background: #FDECEA;
-    border: 1px solid #F9CFCB;
+    background: {DANGER_BG};
+    border: 1px solid {DANGER_BORDER};
     border-radius: 9px;
 }}
 
 QLabel#alertText {{
-    color: #B42318;
+    color: {DANGER_TEXT};
 }}
 
 QPushButton#alertClose {{
     background: transparent;
     border: 0;
-    color: #B42318;
+    color: {DANGER_TEXT};
     font-size: 12pt;
 }}
 
@@ -805,13 +888,13 @@ QScrollBar:vertical {{
 }}
 
 QScrollBar::handle:vertical {{
-    background: #D0D5DD;
+    background: {BORDER_STRONG};
     border-radius: 5px;
     min-height: 30px;
 }}
 
 QScrollBar::handle:vertical:hover {{
-    background: #98A2B3;
+    background: {FAINT};
 }}
 
 QScrollBar::add-line:vertical,
@@ -826,7 +909,7 @@ QScrollBar:horizontal {{
 }}
 
 QScrollBar::handle:horizontal {{
-    background: #D0D5DD;
+    background: {BORDER_STRONG};
     border-radius: 5px;
     min-width: 30px;
 }}

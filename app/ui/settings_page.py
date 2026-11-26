@@ -31,7 +31,16 @@ from app.services.mobile_ws_server import MobileWebSocketServer
 from app.services.settings_service import SettingsService
 from app.services.update_service import UpdateService
 from app.ui import theme
-from app.ui.widgets import Card, configure_table, make_button, show_toast, style_combo
+from app.ui.icons import make_icon
+from app.ui.widgets import (
+    Card,
+    apply_table_layout_preset_all,
+    configure_table,
+    make_button,
+    make_icon_button,
+    show_toast,
+    style_combo,
+)
 
 
 class SettingsPage(QWidget):
@@ -68,7 +77,7 @@ class SettingsPage(QWidget):
         col.addWidget(sub)
         header.addLayout(col, 1)
 
-        refresh_btn = make_button("↻  Täzele")
+        refresh_btn = make_icon_button("Täzele", "refresh")
         refresh_btn.clicked.connect(self.refresh_data)
         header.addWidget(refresh_btn)
 
@@ -77,7 +86,11 @@ class SettingsPage(QWidget):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._create_general_settings_tab(), "Dükan we hasap sazlamalary")
         self.tabs.addTab(self._create_backup_tab(), "Ätiýaçlyk nusga we bazany dikeltmek")
-        self.tabs.addTab(self._create_mobile_scanner_tab(), "📱 Mobil skaner (Android)")
+        self.tabs.addTab(
+            self._create_mobile_scanner_tab(),
+            make_icon("phone", theme.NAVY, 16),
+            "Mobil skaner (Android)",
+        )
         root.addWidget(self.tabs, 1)
 
     def _create_general_settings_tab(self) -> QWidget:
@@ -177,6 +190,26 @@ class SettingsPage(QWidget):
         self.stock_group_combo.addItem("Kategoriýa boýunça", "category")
         self.stock_group_combo.addItem("Toparlamazdan (adaty sanaw)", "none")
         st_form.addRow("Skladda harytlary toparlamak:", self.stock_group_combo)
+
+        self.table_preset_combo = style_combo(QComboBox())
+        self.table_preset_combo.setMinimumHeight(36)
+        self.table_preset_combo.addItem(
+            "Awtomatiki giňlik (maslahat berilýär — sütünler mazmuna görä düzülýär)",
+            "auto_fit",
+        )
+        self.table_preset_combo.addItem(
+            "Doly tekst (uzyn atlar we bellikler 2–3 setire bükülýär)",
+            "wrap_full",
+        )
+        self.table_preset_combo.addItem(
+            "Giň tablisa (hiç bir sütün kesilmeýär, gorizontal aýlawly)",
+            "wide_scroll",
+        )
+        self.table_preset_combo.addItem(
+            "Yksym rejim (kiçi setir beýikligi — ekranda has köp setir)",
+            "compact",
+        )
+        st_form.addRow("Tablisa gurluş şablony:", self.table_preset_combo)
         stl.addLayout(st_form)
 
         remember_title = QLabel("«+ Haryt goş» açylanda öňki girizilenleri ýatda sakla:")
@@ -208,7 +241,7 @@ class SettingsPage(QWidget):
 
         save_row = QHBoxLayout()
         save_row.addStretch()
-        save_btn = make_button("💾  Sazlamalary ýatda sakla", "primary")
+        save_btn = make_icon_button("Sazlamalary ýatda sakla", "check", "primary")
         save_btn.setMinimumHeight(42)
         save_btn.setMinimumWidth(240)
         save_btn.clicked.connect(self._save_general_settings)
@@ -275,27 +308,27 @@ class SettingsPage(QWidget):
         cl.addLayout(policy_row)
 
         actions_row = QHBoxLayout()
-        create_now_btn = make_button("➕ Häzir ätiýaçlyk nusga döret", "primary")
+        create_now_btn = make_icon_button("Häzir ätiýaçlyk nusga döret", "plus", "primary")
         create_now_btn.setMinimumHeight(40)
         create_now_btn.clicked.connect(self._create_manual_backup)
         actions_row.addWidget(create_now_btn)
 
-        verify_btn = make_button("✔ Saýlanan nusgany barla")
+        verify_btn = make_icon_button("Saýlanan nusgany barla", "check")
         verify_btn.setMinimumHeight(40)
         verify_btn.clicked.connect(self._verify_selected_backup)
         actions_row.addWidget(verify_btn)
 
-        restore_file_btn = make_button("📂 Daşarky faýldan dikelt…")
+        restore_file_btn = make_icon_button("Daşarky faýldan dikelt…", "folder")
         restore_file_btn.setMinimumHeight(40)
         restore_file_btn.clicked.connect(self._restore_from_external_file)
         actions_row.addWidget(restore_file_btn)
 
-        restore_selected_btn = make_button("⚠ Saýlanan nusgany dikelt", "danger")
+        restore_selected_btn = make_icon_button("Saýlanan nusgany dikelt", "restore", "danger")
         restore_selected_btn.setMinimumHeight(40)
         restore_selected_btn.clicked.connect(self._restore_selected_backup)
         actions_row.addWidget(restore_selected_btn)
 
-        update_zip_btn = make_button("⬆ Programmany täzele (ZIP)")
+        update_zip_btn = make_icon_button("Programmany täzele (ZIP)", "export")
         update_zip_btn.setMinimumHeight(40)
         update_zip_btn.setToolTip(
             "Täze Windows ZIP wersiýasyndan maglumat bazasyny we ätiýaçlyk nusgalary saklap täzelemek"
@@ -314,6 +347,8 @@ class SettingsPage(QWidget):
             "Doly ýoly",
         ])
         configure_table(self.backups_table)
+        self.backups_table.setColumnWidth(1, 148)
+        self.backups_table.setColumnWidth(2, 100)
         self.backups_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents
         )
@@ -374,7 +409,7 @@ class SettingsPage(QWidget):
         self.ws_token_input.setStyleSheet("font-family: monospace; font-weight: 700; font-size: 11pt;")
         token_row.addWidget(self.ws_token_input, 1)
 
-        regen_btn = make_button("🔄 Täze PIN")
+        regen_btn = make_icon_button("Täze PIN", "refresh")
         regen_btn.setMinimumHeight(36)
         regen_btn.clicked.connect(self._regenerate_mobile_token)
         token_row.addWidget(regen_btn)
@@ -390,12 +425,12 @@ class SettingsPage(QWidget):
         cl.addWidget(fw_hint)
 
         btn_row = QHBoxLayout()
-        save_ws_btn = make_button("💾 Ýatda sakla we täzeden başlat", "primary")
+        save_ws_btn = make_icon_button("Ýatda sakla we täzeden başlat", "check", "primary")
         save_ws_btn.setMinimumHeight(38)
         save_ws_btn.clicked.connect(self._save_and_restart_mobile_server)
         btn_row.addWidget(save_ws_btn)
 
-        copy_url_btn = make_button("📋 Salgyny göçür")
+        copy_url_btn = make_icon_button("Salgyny göçür", "copy")
         copy_url_btn.setMinimumHeight(38)
         copy_url_btn.clicked.connect(self._copy_mobile_url)
         btn_row.addWidget(copy_url_btn)
@@ -405,7 +440,7 @@ class SettingsPage(QWidget):
         stop_ws_btn.clicked.connect(self._stop_mobile_server)
         btn_row.addWidget(stop_ws_btn)
 
-        disconnect_all_btn = make_button("✕ Ählisini aýyr", "danger")
+        disconnect_all_btn = make_icon_button("Ählisini aýyr", "close", "danger")
         disconnect_all_btn.setMinimumHeight(38)
         disconnect_all_btn.clicked.connect(self._disconnect_all_mobile_devices)
         btn_row.addWidget(disconnect_all_btn)
@@ -478,6 +513,10 @@ class SettingsPage(QWidget):
         if grp_idx >= 0:
             self.stock_group_combo.setCurrentIndex(grp_idx)
 
+        tbl_idx = self.table_preset_combo.findData(SettingsService.get_table_layout_preset())
+        if tbl_idx >= 0:
+            self.table_preset_combo.setCurrentIndex(tbl_idx)
+
         remember = SettingsService.get_product_remember_fields()
         for key, chk in self.remember_checkboxes.items():
             chk.setChecked(bool(remember.get(key, False)))
@@ -543,7 +582,7 @@ class SettingsPage(QWidget):
     def _update_mobile_devices_table(self, devices: list[dict]) -> None:
         self.ws_devices_table.setRowCount(len(devices))
         for i, dev in enumerate(devices):
-            status_text = "✔ Tassyklandy" if dev.get("authenticated") else "⏳ PIN garaşylýar"
+            status_text = "Tassyklandy" if dev.get("authenticated") else "PIN garaşylýar"
             vals = [
                 dev.get("device_name") or "—",
                 dev.get("ip") or "—",
@@ -665,6 +704,9 @@ class SettingsPage(QWidget):
         try:
             SettingsService.set_many(values)
             SettingsService.set_stock_group_mode(self.stock_group_combo.currentData() or "name")
+            preset = self.table_preset_combo.currentData() or "auto_fit"
+            SettingsService.set_table_layout_preset(preset)
+            apply_table_layout_preset_all(preset)
             SettingsService.set_product_remember_fields({
                 key: chk.isChecked() for key, chk in self.remember_checkboxes.items()
             })

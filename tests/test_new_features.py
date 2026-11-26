@@ -53,8 +53,12 @@ def test_product_barcode_save_lookup_and_duplicate_guard(feat_db):
         name="Hoco 20W Adapter",
         category_id=ids["cat_acc"],
         brand="Hoco",
+        model="C80",
+        specification="Gara",
         barcode="6931474751234",
         stock_quantity=5,
+        default_cost="10.00",
+        default_cost_currency="USD",
     )
     assert p1.barcode == "6931474751234"
 
@@ -62,13 +66,55 @@ def test_product_barcode_save_lookup_and_duplicate_guard(feat_db):
     assert found is not None
     assert found.id == p1.id
 
-    with pytest.raises(ValueError, match="ştrihkody eýýäm"):
-        product_repo.save_product(
-            product_id=None,
-            name="Other Adapter",
-            category_id=ids["cat_acc"],
-            barcode="6931474751234",
-        )
+    # Общий штрихкод разрешён для другого товара / цвета
+    p2 = product_repo.save_product(
+        product_id=None,
+        name="Hoco 20W Adapter Ak",
+        category_id=ids["cat_acc"],
+        brand="Hoco",
+        model="C80",
+        specification="Ak",
+        barcode="6931474751234",
+        stock_quantity=3,
+        default_cost="10.00",
+        default_cost_currency="USD",
+    )
+    assert p2.id != p1.id
+    all_found = product_repo.find_products_by_barcode("6931474751234")
+    assert {p.id for p in all_found} == {p1.id, p2.id}
+
+    # Совпадающие название, модель, категория, характеристики и себестоимость -> суммирование остатка
+    merged = product_repo.save_product(
+        product_id=None,
+        name="Hoco 20W Adapter",
+        category_id=ids["cat_acc"],
+        brand="Hoco",
+        model="C80",
+        specification="Gara",
+        barcode="6931474751234",
+        stock_quantity=4,
+        default_cost="10.00",
+        default_cost_currency="USD",
+    )
+    assert merged.id == p1.id
+    assert merged.stock_quantity == 9
+    assert getattr(merged, "_merged_duplicate", False) is True
+
+    # Другая себестоимость -> отдельный товар (не склеивается)
+    diff_cost = product_repo.save_product(
+        product_id=None,
+        name="Hoco 20W Adapter",
+        category_id=ids["cat_acc"],
+        brand="Hoco",
+        model="C80",
+        specification="Gara",
+        barcode="6931474751234",
+        stock_quantity=2,
+        default_cost="12.00",
+        default_cost_currency="USD",
+    )
+    assert diff_cost.id != p1.id
+    assert diff_cost.stock_quantity == 2
 
 
 def test_edit_and_delete_stock_item_with_stock_sync(feat_db):

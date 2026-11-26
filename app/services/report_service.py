@@ -85,12 +85,14 @@ class ReportService:
         summary = {
             "USD": {
                 "revenue": Decimal("0.00"),
+                "gross_profit": Decimal("0.00"),
                 "paid": Decimal("0.00"),
                 "customer_debt": Decimal("0.00"),
                 "cancelled_value": Decimal("0.00"),
             },
             "TMT": {
                 "revenue": Decimal("0.00"),
+                "gross_profit": Decimal("0.00"),
                 "paid": Decimal("0.00"),
                 "customer_debt": Decimal("0.00"),
                 "cancelled_value": Decimal("0.00"),
@@ -99,8 +101,11 @@ class ReportService:
 
         rows = []
         sale_ids = [s.id for s in sales]
+        sale_map = {s.id: s for s in sales}
         items_by_sale: dict[int, list[str]] = {}
         units_by_sale: dict[int, int] = {}
+        cost_by_sale: dict[int, Decimal] = {}
+        profit_by_sale: dict[int, Decimal] = {}
         if sale_ids:
             si_rows = session.execute(
                 select(SaleItem, Product, Category.name)
@@ -110,7 +115,19 @@ class ReportService:
                 .order_by(SaleItem.id.asc())
             ).all()
             for si, prod, cat_name in si_rows:
-                units_by_sale[si.sale_id] = units_by_sale.get(si.sale_id, 0) + int(si.quantity or 0)
+                qty_i = int(si.quantity or 0)
+                units_by_sale[si.sale_id] = units_by_sale.get(si.sale_id, 0) + qty_i
+                sale_obj = sale_map.get(si.sale_id)
+                if sale_obj is not None:
+                    s_cur = (sale_obj.currency or "TMT").strip().upper()
+                    s_rate = _validate_rate(sale_obj.exchange_rate or Decimal("1.0000"))
+                    c_cur = (si.cost_currency or s_cur).strip().upper()
+                    line_rev = _decimal(si.unit_price) * qty_i - _decimal(si.discount)
+                    line_cost = _convert_currency(_decimal(si.unit_cost), c_cur, s_cur, s_rate) * qty_i
+                    cost_by_sale[si.sale_id] = _money(cost_by_sale.get(si.sale_id, Decimal("0.00")) + line_cost)
+                    profit_by_sale[si.sale_id] = _money(
+                        profit_by_sale.get(si.sale_id, Decimal("0.00")) + (line_rev - line_cost)
+                    )
                 bm = " / ".join(filter(None, [(prod.brand or "").strip(), (prod.model or "").strip()]))
                 if not bm and getattr(prod, "is_phone_unit", False) and prod.specification:
                     bm = prod.specification.strip()
@@ -127,6 +144,8 @@ class ReportService:
             total = _money(_decimal(sale.total_amount))
             paid = SalesService.get_sale_paid_amount(session, sale)
             sale_units = units_by_sale.get(sale.id, 0)
+            sale_cost = cost_by_sale.get(sale.id, Decimal("0.00"))
+            sale_profit = profit_by_sale.get(sale.id, Decimal("0.00"))
 
             if sale.status == "cancelled":
                 cancelled_count += 1
@@ -134,11 +153,13 @@ class ReportService:
                     summary[cur]["cancelled_value"] + total
                 )
                 cust_debt = Decimal("0.00")
+                sale_profit = Decimal("0.00")
             else:
                 active_count += 1
                 units_sold += sale_units
                 cust_debt = SalesService.get_customer_debt(session, sale)
                 summary[cur]["revenue"] = _money(summary[cur]["revenue"] + total)
+                summary[cur]["gross_profit"] = _money(summary[cur]["gross_profit"] + sale_profit)
                 summary[cur]["paid"] = _money(summary[cur]["paid"] + paid)
                 summary[cur]["customer_debt"] = _money(
                     summary[cur]["customer_debt"] + cust_debt
@@ -160,6 +181,8 @@ class ReportService:
                 "exchange_rate": _validate_rate(sale.exchange_rate or Decimal("1.0000")),
                 "units": sale_units,
                 "total_amount": total,
+                "cost_amount": sale_cost,
+                "profit_amount": sale_profit,
                 "paid_amount": paid,
                 "customer_debt": cust_debt,
                 "status": sale.status,

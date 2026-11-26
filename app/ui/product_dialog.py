@@ -30,7 +30,14 @@ from app.repositories.product_repository import (
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.category_dialog import CategoryDialog
-from app.ui.widgets import configure_dialog_buttons, make_button, show_toast, style_combo
+from app.ui.icons import icon_size, make_icon
+from app.ui.widgets import (
+    configure_dialog_buttons,
+    make_button,
+    make_icon_button,
+    show_toast,
+    style_combo,
+)
 
 
 class ProductDialog(QDialog):
@@ -158,12 +165,12 @@ class ProductDialog(QDialog):
         root.addWidget(self.imei_note_label)
 
         footer = QHBoxLayout()
-        self.deactivate_button = make_button("📦 Arhiwe geçir", "danger")
+        self.deactivate_button = make_icon_button("Arhiwe geçir", "archive", "danger")
         self.deactivate_button.clicked.connect(self._toggle_archive_product)
         self.deactivate_button.hide()
         footer.addWidget(self.deactivate_button)
 
-        self.clear_btn = make_button("↺ Arassala")
+        self.clear_btn = make_icon_button("Arassala", "refresh")
         self.clear_btn.setToolTip("Öňki doldurylan öýjükleri arassalamak")
         self.clear_btn.clicked.connect(self._clear_fields)
         if self.product_id is not None:
@@ -280,8 +287,12 @@ class ProductDialog(QDialog):
             self._is_active = bool(product.is_active)
             self._current_stock_qty = product.stock_quantity
             self.deactivate_button.setText(
-                "📦 Arhiwe geçir" if self._is_active else "♻ Arhiwden dikelt"
+                "Arhiwe geçir" if self._is_active else "Arhiwden dikelt"
             )
+            self.deactivate_button.setIcon(
+                make_icon("archive" if self._is_active else "restore", theme.RED, 17)
+            )
+            self.deactivate_button.setIconSize(icon_size(17))
             self.deactivate_button.show()
             self._in_stock_imeis_count = in_stock_imeis
             self.name_input.setText(product.name)
@@ -347,6 +358,8 @@ class ProductDialog(QDialog):
                 stock_quantity=self.stock_spin.value(),
                 min_stock_quantity=self.min_stock_spin.value(),
                 barcode=self.barcode_input.text(),
+                default_cost=self.cost_spin.value(),
+                default_cost_currency=self.cost_curr_combo.currentText(),
             )
             self.created_product_id = product.id
             if self.cost_spin.value() > 0:
@@ -367,11 +380,15 @@ class ProductDialog(QDialog):
                     "name": self.name_input.text().strip(),
                     "barcode": self.barcode_input.text().strip(),
                 })
-            msg = (
-                f"«{product.name}» harydy üstünlikli goşuldy."
-                if self.product_id is None
-                else f"«{product.name}» harydynyň üýtgeşmeleri ýatda saklandy."
-            )
+            if self.product_id is None and getattr(product, "_merged_duplicate", False):
+                msg = (
+                    f"«{product.name}» eýýäm bar — galyndy goşuldy "
+                    f"(jemi: {product.stock_quantity} sany)."
+                )
+            elif self.product_id is None:
+                msg = f"«{product.name}» harydy üstünlikli goşuldy."
+            else:
+                msg = f"«{product.name}» harydynyň üýtgeşmeleri ýatda saklandy."
             show_toast(self.parentWidget() or self, msg, kind="success")
             self.accept()
         except ValueError as err:
@@ -398,7 +415,7 @@ class ProductDialog(QDialog):
         stock_warn = ""
         if self._current_stock_qty > 0 or self._in_stock_imeis_count > 0:
             stock_warn = (
-                f"\n\n⚠ Üns beriň: skladda entek {self._current_stock_qty} sany "
+                f"\n\nÜns beriň: skladda entek {self._current_stock_qty} sany "
                 f"(IMEI: {self._in_stock_imeis_count}) bar.\n"
                 "Arhiwe geçirileninde galyndylar we taryh saklanar, ýöne haryt satyşda görünmez."
             )

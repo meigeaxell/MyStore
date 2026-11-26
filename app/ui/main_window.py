@@ -38,7 +38,7 @@ from app.ui.sales_page import SalesPage
 from app.ui.settings_page import SettingsPage
 from app.ui.sidebar import SIDEBAR_COLLAPSED_W, SlidingSidebar
 from app.ui.stock_page import StockPage
-from app.ui.widgets import SearchResultPopup, make_button, money_str, show_toast
+from app.ui.widgets import SearchResultPopup, make_button, make_icon_button, money_str, show_toast
 
 NAV_SECTIONS = [
     ("Harytlar", [
@@ -137,9 +137,25 @@ class MainWindow(QMainWindow):
             )
         BackupService.run_auto_backup_if_due()
 
-        self.scanner_status_label = QLabel("📱 Skaner: öçük")
+        self.rate_status_btn = make_button("Kurs: —", "link")
+        self.rate_status_btn.setToolTip("Kursy üýtgetmek üçin Sazlamalary açyň")
+        self.rate_status_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; border: 0; color: {theme.NAVY}; "
+            f"font-weight: 600; padding: 0 8px; }}"
+            f"QPushButton:hover {{ color: {theme.ACCENT}; text-decoration: underline; }}"
+        )
+        self.rate_status_btn.clicked.connect(lambda: self.navigate_to_title("Sazlamalar"))
+        self.statusBar().addPermanentWidget(self.rate_status_btn)
+
+        self.backup_status_label = QLabel("Nusga: —")
+        self.backup_status_label.setStyleSheet(f"padding: 0 8px; color: {theme.MUTED};")
+        self.statusBar().addPermanentWidget(self.backup_status_label)
+
+        self.scanner_status_label = QLabel("Skaner: öçük")
         self.scanner_status_label.setStyleSheet("padding: 0 10px; font-weight: 600;")
         self.statusBar().addPermanentWidget(self.scanner_status_label)
+
+        self._update_status_bar_meta()
 
         self.mobile_server.devicesChanged.connect(self._on_mobile_devices_changed)
         self.mobile_server.serverStateChanged.connect(self._on_mobile_server_state_changed)
@@ -290,7 +306,7 @@ class MainWindow(QMainWindow):
                 self.navigate_to_title("Satyş we kassa")
             self.raise_()
             self.activateWindow()
-            self.statusBar().showMessage(f"📱 {msg}", 8000)
+            self.statusBar().showMessage(f"{msg}", 8000)
         return ok, msg, details
 
     def _on_mobile_devices_changed(self, _devices: list) -> None:
@@ -301,7 +317,7 @@ class MainWindow(QMainWindow):
 
     def _update_scanner_status_badge(self) -> None:
         if not self.mobile_server.is_running():
-            self.scanner_status_label.setText("📱 Skaner: öçük")
+            self.scanner_status_label.setText("Skaner: öçük")
             self.scanner_status_label.setStyleSheet(
                 f"padding: 0 10px; font-weight: 600; color: {theme.MUTED};"
             )
@@ -310,7 +326,7 @@ class MainWindow(QMainWindow):
         cnt = len(auth_devices)
         port = self.mobile_server.port
         color = theme.GREEN if cnt > 0 else theme.TEAL
-        self.scanner_status_label.setText(f"📱 Skanerler: {cnt} (port {port})")
+        self.scanner_status_label.setText(f"Skanerler: {cnt} (port {port})")
         self.scanner_status_label.setStyleSheet(
             f"padding: 0 10px; font-weight: 600; color: {color};"
         )
@@ -326,7 +342,7 @@ class MainWindow(QMainWindow):
         elif hasattr(widget, "_load_data"):
             widget._load_data()
         self.statusBar().showMessage(
-            f"📱 Maglumatlar mobil skanerden täzelendi ({action_type})",
+            f"Maglumatlar mobil skanerden täzelendi ({action_type})",
             6000,
         )
 
@@ -361,8 +377,8 @@ class MainWindow(QMainWindow):
             if isinstance(data, dict)
             else ""
         ) or "Täze haryt kabul ediş nobatyna goşuldy"
-        show_toast(self, f"📥 {msg}", kind="info", duration_ms=4200)
-        self.statusBar().showMessage(f"📥 {msg}", 8000)
+        show_toast(self, f"{msg}", kind="info", duration_ms=4200)
+        self.statusBar().showMessage(f"{msg}", 8000)
 
     def _on_incoming_queue_committed(self) -> None:
         for page in (
@@ -410,12 +426,27 @@ class MainWindow(QMainWindow):
                 self._switch_page(index)
                 return
 
+    def _update_status_bar_meta(self) -> None:
+        rate = SettingsService.get_default_exchange_rate()
+        self.rate_status_btn.setText(f"1 USD = {rate:.2f} TMT")
+        last_at = (SettingsService.get("last_backup_at", "") or "").strip()
+        if last_at:
+            short = last_at[:16].replace("T", " ")
+            self.backup_status_label.setText(f"Nusga: {short}")
+            self.backup_status_label.setStyleSheet(f"padding: 0 8px; color: {theme.MUTED};")
+        else:
+            self.backup_status_label.setText("Nusga: ýok")
+            self.backup_status_label.setStyleSheet(
+                f"padding: 0 8px; color: {theme.ACCENT}; font-weight: 600;"
+            )
+
     def _refresh_current_page(self) -> None:
         widget = self.pages.currentWidget()
         if hasattr(widget, "refresh_data"):
             widget.refresh_data()
         elif hasattr(widget, "_load_data"):
             widget._load_data()
+        self._update_status_bar_meta()
         show_toast(self, "Maglumatlar täzelendi (F5)", kind="info", duration_ms=1600)
         self.statusBar().showMessage("Täzelendi (F5)", 2500)
 
@@ -672,7 +703,7 @@ class MainWindow(QMainWindow):
         self.top_search_popup.itemClicked.connect(self._on_top_live_item_clicked)
         self.top_search_popup.hide()
 
-        search_btn = make_button("🔍 Gözleg (Ctrl+K)")
+        search_btn = make_icon_button("Gözleg (Ctrl+K)", "search")
         search_btn.clicked.connect(lambda: self._open_quick_search())
         row.addWidget(search_btn)
 

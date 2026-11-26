@@ -43,12 +43,14 @@ from app.services.report_service import ReportService
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.category_management_dialog import CategoryManagementDialog
+from app.ui.icons import make_icon
 from app.ui.product_dialog import ProductDialog
 from app.ui.widgets import (
     Card,
     configure_dialog_buttons,
     configure_table,
     make_button,
+    make_icon_button,
     make_stat_card,
     money_str,
     show_toast,
@@ -82,13 +84,13 @@ ROLE_GROUP_KEY = Qt.ItemDataRole.UserRole + 7
 
 def _apply_phone_category_badge(label: QLabel, is_used: bool) -> None:
     if is_used:
-        label.setText("🔒 Kategoriýa: Telefon B/U")
+        label.setText("Kategoriýa: Telefon B/U")
         label.setStyleSheet(
             f"font-weight: 700; color: {theme.ACCENT}; background: #FFF8F1; "
             "border: 1px solid #FDBA74; padding: 5px 10px; border-radius: 6px;"
         )
     else:
-        label.setText("🔒 Kategoriýa: Telefon Täze")
+        label.setText("Kategoriýa: Telefon Täze")
         label.setStyleSheet(
             f"font-weight: 700; color: {theme.BLUE}; background: #EFF6FF; "
             "border: 1px solid #93C5FD; padding: 5px 10px; border-radius: 6px;"
@@ -238,13 +240,13 @@ class StandalonePhoneIntakeDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        clear_btn = make_button("↺ Arassala")
+        clear_btn = make_icon_button("Arassala", "refresh")
         clear_btn.setToolTip("Ähli öýjükleri arassalamak")
         clear_btn.clicked.connect(self._clear_all)
         btn_row.addWidget(clear_btn)
         btn_row.addStretch()
 
-        self.add_phone_btn = make_button("+ Telefony sklada goş", "primary")
+        self.add_phone_btn = make_icon_button("Telefony sklada goş", "plus", "primary")
         self.add_phone_btn.clicked.connect(self._add_phone)
         btn_row.addWidget(self.add_phone_btn)
         card.body.addLayout(btn_row)
@@ -276,7 +278,7 @@ class StandalonePhoneIntakeDialog(QDialog):
         root.addWidget(self.table, 1)
 
         footer = QHBoxLayout()
-        edit_btn = make_button("✏ Saýlanan telefony üýtget")
+        edit_btn = make_icon_button("Saýlanan telefony üýtget", "edit")
         edit_btn.clicked.connect(self._edit_selected)
         footer.addWidget(edit_btn)
         footer.addStretch()
@@ -570,12 +572,12 @@ class EditStockItemDialog(QDialog):
         root.addLayout(form2)
 
         footer = QHBoxLayout()
-        self.delete_btn = make_button("🗑 Poz", "danger")
+        self.delete_btn = make_icon_button("Poz", "trash", "danger")
         self.delete_btn.clicked.connect(self._delete_item)
         self.delete_btn.hide()
         footer.addWidget(self.delete_btn)
 
-        self.history_btn = make_button("📜 IMEI taryhy")
+        self.history_btn = make_icon_button("IMEI taryhy", "history")
         self.history_btn.clicked.connect(self._open_imei_history)
         self.history_btn.hide()
         footer.addWidget(self.history_btn)
@@ -799,7 +801,7 @@ class StockItemDialog(QDialog):
         self.title_label.setObjectName("pageTitle")
         top.addWidget(self.title_label, 1)
 
-        edit_prod_btn = make_button("✏ Harydy üýtget")
+        edit_prod_btn = make_icon_button("Harydy üýtget", "edit")
         edit_prod_btn.clicked.connect(self._edit_current_product)
         top.addWidget(edit_prod_btn)
         root.addLayout(top)
@@ -810,20 +812,20 @@ class StockItemDialog(QDialog):
         root.addWidget(self.summary_label)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_devices_tab(), "📱 Enjamlar (IMEI) we hasaba alyş")
-        self.tabs.addTab(self._build_history_tab(), "📜 Alyş, satyş we hereket taryhy")
+        self.tabs.addTab(self._build_devices_tab(), make_icon("phone", theme.NAVY, 16), "Enjamlar (IMEI) we hasaba alyş")
+        self.tabs.addTab(self._build_history_tab(), make_icon("history", theme.NAVY, 16), "Alyş, satyş we hereket taryhy")
         root.addWidget(self.tabs, 1)
 
         footer = QHBoxLayout()
-        edit_imei_btn = make_button("✏ Saýlanan enjamy üýtget", "primary")
+        edit_imei_btn = make_icon_button("Saýlanan enjamy üýtget", "edit", "primary")
         edit_imei_btn.clicked.connect(self._edit_selected_stock_item)
         footer.addWidget(edit_imei_btn)
 
-        del_imei_btn = make_button("🗑 Enjamy poz", "danger")
+        del_imei_btn = make_icon_button("Enjamy poz", "trash", "danger")
         del_imei_btn.clicked.connect(self._delete_selected_stock_item)
         footer.addWidget(del_imei_btn)
 
-        imei_hist_btn = make_button("📜 Saýlanan IMEI-niň doly taryhy")
+        imei_hist_btn = make_icon_button("Saýlanan IMEI-niň doly taryhy", "history")
         imei_hist_btn.clicked.connect(self._open_selected_imei_history)
         footer.addWidget(imei_hist_btn)
         footer.addStretch()
@@ -853,7 +855,7 @@ class StockItemDialog(QDialog):
         self.product_combo = style_combo(QComboBox())
         self.product_combo.currentIndexChanged.connect(self._on_product_combo_changed)
         prod_row.addWidget(self.product_combo, 1)
-        new_prod_btn = make_button("+ Täze model döret")
+        new_prod_btn = make_icon_button("Täze model döret", "plus")
         new_prod_btn.clicked.connect(self._create_new_product)
         prod_row.addWidget(new_prod_btn)
         form.addRow("Model / Haryt *:", prod_row)
@@ -909,7 +911,7 @@ class StockItemDialog(QDialog):
         self.notes_input.setPlaceholderText(
             "Bellik: korpusyň ýagdaýy, batareýa %, komplekt (hökmany däl)..."
         )
-        self.add_device_btn = make_button("+ Enjamy sklada goş", "primary")
+        self.add_device_btn = make_icon_button("Enjamy sklada goş", "plus", "primary")
         self.add_device_btn.clicked.connect(self._add_stock_item)
         row3.addWidget(self.notes_input, 1)
         row3.addWidget(self.add_device_btn)
@@ -1212,11 +1214,11 @@ class StockPage(QWidget):
         cat_btn.clicked.connect(self._open_category_management)
         header.addWidget(cat_btn)
 
-        used_btn = make_button("+ Enjam (IMEI)")
+        used_btn = make_icon_button("Enjam (IMEI)", "plus")
         used_btn.clicked.connect(lambda: self._open_device_intake(default_condition="new"))
         header.addWidget(used_btn)
 
-        add_prod_btn = make_button("+ Haryt goş (Ctrl+N)", "primary")
+        add_prod_btn = make_icon_button("Haryt goş (Ctrl+N)", "plus", "primary")
         add_prod_btn.clicked.connect(self._open_add_product)
         header.addWidget(add_prod_btn)
 
@@ -1224,7 +1226,7 @@ class StockPage(QWidget):
         self.add_product_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.add_product_shortcut.activated.connect(self._open_add_product)
 
-        refresh_btn = make_button("↻ Täzele")
+        refresh_btn = make_icon_button("Täzele", "refresh")
         refresh_btn.clicked.connect(self._load_data)
         header.addWidget(refresh_btn)
 
@@ -1286,7 +1288,7 @@ class StockPage(QWidget):
         self.status_filter.addItem("Köp duran (> 30 gün)", "stale_30")
         self.status_filter.addItem("Az galyndy", "low_stock")
         self.status_filter.addItem("Skladda ýok", "out_of_stock")
-        self.status_filter.addItem("📦 Arhiwdäki harytlar", "archived")
+        self.status_filter.addItem("Arhiwdäki harytlar", "archived")
         self.status_filter.currentIndexChanged.connect(self._filter_products)
 
         self.group_combo = style_combo(QComboBox())
@@ -1318,6 +1320,9 @@ class StockPage(QWidget):
             "IMEI (Täze / B/U)",
             "Status",
         ])
+        self.tree.headerItem().setTextAlignment(
+            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(False)
@@ -1346,19 +1351,19 @@ class StockPage(QWidget):
         actions_bar = QHBoxLayout()
         actions_bar.setSpacing(10)
 
-        details_btn = make_button("📱 Haryt karty we enjamlar (IMEI)", "primary")
+        details_btn = make_icon_button("Haryt karty we enjamlar (IMEI)", "phone", "primary")
         details_btn.clicked.connect(self._open_selected_imei_dialog)
         actions_bar.addWidget(details_btn)
 
-        edit_btn = make_button("✏ Harydy üýtget")
+        edit_btn = make_icon_button("Harydy üýtget", "edit")
         edit_btn.clicked.connect(self._edit_selected_product)
         actions_bar.addWidget(edit_btn)
 
-        self.archive_btn = make_button("📦 Arhiwe geçir / ♻ Dikelt")
+        self.archive_btn = make_icon_button("Arhiwe geçir / Dikelt", "archive")
         self.archive_btn.clicked.connect(self._toggle_archive_selected_product)
         actions_bar.addWidget(self.archive_btn)
 
-        history_btn = make_button("📜 Hereket taryhy")
+        history_btn = make_icon_button("Hereket taryhy", "history")
         history_btn.clicked.connect(self._open_selected_product_history)
         actions_bar.addWidget(history_btn)
 
@@ -1546,8 +1551,11 @@ class StockPage(QWidget):
             imei_summary,
             status,
         ])
-        for col in (3, 4, 5, 6):
+        for col in (4, 5, 6):
             item.setTextAlignment(col, Qt.AlignmentFlag.AlignCenter)
+        item.setTextAlignment(
+            3, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
 
         if is_phone:
             item.setForeground(
@@ -1777,15 +1785,15 @@ class StockPage(QWidget):
                         cats_str = f"{', '.join(cats[:3])} +{len(cats) - 3}"
                     else:
                         cats_str = ", ".join(cats)
-                    header_title = f"📁 {label}"
+                    header_title, group_icon = label, "folder"
                     sub_col = f"{len(items)} enjam" if phone_cnt == len(items) else f"{len(items)} görnüş"
                     meta_col = cats_str
                 elif group_mode == "brand":
-                    header_title = f"🏷 {label}"
+                    header_title, group_icon = label, "price"
                     sub_col = f"{len(items)} haryt"
                     meta_col = ""
                 else:
-                    header_title = f"📂 {label}"
+                    header_title, group_icon = label, "list"
                     sub_col = f"{len(items)} haryt"
                     meta_col = ""
 
@@ -1800,6 +1808,7 @@ class StockPage(QWidget):
                     imei_col,
                     "",
                 ])
+                group_item.setIcon(0, make_icon(group_icon, theme.NAVY, 16))
                 group_item.setData(0, ROLE_ITEM_TYPE, "group")
                 group_item.setData(0, ROLE_GROUP_KEY, f"{group_mode}:{g_key}")
                 group_item.setSizeHint(0, QSize(0, 38))

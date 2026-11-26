@@ -33,6 +33,7 @@ from app.ui.widgets import (
     Card,
     configure_table,
     make_button,
+    make_icon_button,
     money_str,
     show_toast,
     style_combo,
@@ -153,7 +154,7 @@ class ExchangePage(QWidget):
         step2_title.setObjectName("cardTitle")
         step2_header.addWidget(step2_title, 1)
 
-        browse_stock_btn = make_button("🔍 Skladdan saýlamak penjiresi…")
+        browse_stock_btn = make_icon_button("Skladdan saýlamak penjiresi…", "search")
         browse_stock_btn.clicked.connect(self._open_replacement_selector_dialog)
         step2_header.addWidget(browse_stock_btn)
         left.addLayout(step2_header)
