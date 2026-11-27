@@ -549,8 +549,10 @@ def save_product(
             session.add(product)
             session.flush()
             from app.services.accessory_matcher import sync_product_glossary
+            from app.services.search_engine import sync_product_fts
 
             sync_product_glossary(session, product)
+            sync_product_fts(session, product)
             session.refresh(product)
             product._merged_duplicate = False
             created_product = product
@@ -583,8 +585,10 @@ def save_product(
             product.min_stock_quantity = min_stock_quantity
             session.flush()
             from app.services.accessory_matcher import sync_product_glossary
+            from app.services.search_engine import sync_product_fts
 
             sync_product_glossary(session, product)
+            sync_product_fts(session, product)
             session.refresh(product)
             return product
 

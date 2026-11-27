@@ -15,6 +15,7 @@ from app.models.purchase_refund import PurchaseRefund
 from app.models.sale import Sale
 from app.models.sale_item import SaleItem
 from app.models.sale_payment import SalePayment
+from app.models.search_synonym import SearchSynonym
 from app.models.settings import Setting
 from app.models.stock_item import StockItem
 
@@ -37,6 +38,7 @@ __all__ = [
     "Sale",
     "SaleItem",
     "SalePayment",
+    "SearchSynonym",
     "Setting",
     "StockItem",
 ]

@@ -1302,36 +1302,21 @@ class SalesPage(QWidget):
                 if imei_added >= 50:
                     break
 
-            prod_rows = session.execute(
-                select(Product, Category.name)
-                .outerjoin(Category, Product.category_id == Category.id)
-                .where(
-                    Product.is_active.is_(True),
-                    Product.stock_quantity > 0,
-                    Product.is_phone_unit.is_(False),
-                )
-                .order_by(Product.name.asc())
-            ).all()
+            from app.services.search_engine import search_products
+
+            search_res = search_products(
+                session,
+                text,
+                in_stock_only=True,
+                limit=40,
+                enable_fuzzy=True,
+            )
             prod_added = 0
-            for p, cat_name in prod_rows:
-                if getattr(p, "is_phone_unit", False) and p.stock_quantity <= 0:
+            for hit in search_res.hits:
+                p = hit.product
+                if getattr(p, "is_phone_unit", False):
                     continue
-                hay = " ".join(
-                    filter(
-                        None,
-                        [
-                            p.name,
-                            cat_name,
-                            p.brand,
-                            p.model,
-                            p.specification,
-                            p.barcode,
-                        ],
-                    )
-                ).lower()
-                if not self._matches_multiword(hay, words, words_en):
-                    continue
-                cat_label = cat_name or "—"
+                cat_label = hit.category_name or "—"
                 bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
                 u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
                     session=session,
@@ -1353,12 +1338,24 @@ class SalesPage(QWidget):
                     payload={"product_id": p.id, "imei": None},
                 )
                 prod_added += 1
-                if prod_added >= 60:
+                if prod_added >= 40:
                     break
 
         if self.live_search_popup.count() == 0:
-            self._hide_live_search_popup()
-            return
+            if search_res.out_of_stock_count > 0:
+                self.live_search_popup.add_result_card(
+                    title=f"Skladda galyndysy 0 bolan {search_res.out_of_stock_count} haryt tapyldy",
+                    category="Maglumat",
+                    subtitle="Galyndysy bar haryt tapylmady",
+                    cost_text="",
+                    badge_text="0 sany",
+                    badge_tone="orange",
+                    icon_kind="product",
+                    payload=None,
+                )
+            else:
+                self._hide_live_search_popup()
+                return
 
         self.live_search_popup.show_below(self.search_input, min_width=640, max_height=420)
 

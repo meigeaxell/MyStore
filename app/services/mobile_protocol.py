@@ -33,6 +33,7 @@ from app.services.accessory_matcher import (
 from app.services.incoming_queue_service import enqueue_incoming_item
 from app.services.purchase_service import create_purchase
 from app.services.sales_service import SalesService
+from app.services.search_engine import search_products
 from app.services.settings_service import SettingsService
 
 logger = logging.getLogger("mobilestore.mobile_protocol")
@@ -670,28 +671,8 @@ class MobileProtocolProcessor:
                         f"Umumy ştrihkod {cand}: {len(items)} haryt tapyldy",
                     )
 
-            q_words = [w for w in _norm_search(primary_code).split() if w]
-            matches: list[Product] = []
-            if q_words:
-                all_active = session.execute(
-                    select(Product, Category.name)
-                    .outerjoin(Category, Product.category_id == Category.id)
-                    .where(Product.is_active.is_(True))
-                    .order_by(Product.stock_quantity.desc(), Product.name.asc())
-                ).all()
-                for p, cat_name in all_active:
-                    hay = _norm_search(
-                        " ".join(
-                            filter(
-                                None,
-                                [p.name, p.brand, p.model, p.specification, p.barcode, p.sku, cat_name],
-                            )
-                        )
-                    )
-                    if _matches_words(hay, q_words):
-                        matches.append(p)
-                        if len(matches) >= 15:
-                            break
+            res = search_products(session, primary_code, limit=15, enable_fuzzy=True)
+            matches = [h.product for h in res.hits]
             if len(matches) == 1:
                 card = self._build_product_card_data(session, matches[0], None)
                 return (
@@ -989,30 +970,57 @@ class MobileProtocolProcessor:
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
         q_raw = str(payload.get("query") or "").strip()
-        q_words = [w for w in _norm_search(q_raw).split() if w]
         cat_id = payload.get("category_id")
+        cat_id_int = int(cat_id) if cat_id is not None else None
         limit = min(300, max(1, int(payload.get("limit") or 100)))
+
+        if q_raw:
+            with SessionLocal() as session:
+                res = search_products(
+                    session,
+                    q_raw,
+                    category_id=cat_id_int,
+                    limit=limit,
+                    enable_fuzzy=True,
+                )
+                matched_ids = [h.product.id for h in res.hits]
+            if not matched_ids:
+                return (
+                    make_response("catalog_list", request_id, {"products": [], "total": 0}),
+                    "Katalog haýyşy (0 setir)",
+                )
+            products, _cats = list_products_inventory()
+            by_id = {p["id"]: p for p in products}
+            result = []
+            for pid in matched_ids:
+                p = by_id.get(pid)
+                if p is None:
+                    continue
+                result.append({
+                    "id": p["id"],
+                    "sku": p["sku"],
+                    "barcode": p.get("barcode", ""),
+                    "name": p["name"],
+                    "category_id": p["category_id"],
+                    "category": p["category"],
+                    "brand": p["brand"],
+                    "model": p["model"],
+                    "specification": p["specification"],
+                    "stock_quantity": p["quantity"],
+                    "min_stock_quantity": p["minimum"],
+                    "new_devices": p["new_devices"],
+                    "used_devices": p["used_devices"],
+                })
+            return (
+                make_response("catalog_list", request_id, {"products": result, "total": len(result)}),
+                f"Katalog haýyşy ({len(result)} setir)",
+            )
 
         products, _cats = list_products_inventory()
         result = []
         for p in products:
-            if cat_id is not None and p["category_id"] != int(cat_id):
+            if cat_id_int is not None and p["category_id"] != cat_id_int:
                 continue
-            if q_words:
-                hay = _norm_search(
-                    " ".join([
-                        p["sku"],
-                        p.get("barcode", ""),
-                        p["name"],
-                        p["brand"],
-                        p["model"],
-                        p["specification"],
-                        p["category"],
-                        p["imei_search_blob"],
-                    ])
-                )
-                if not _matches_words(hay, q_words):
-                    continue
             result.append({
                 "id": p["id"],
                 "sku": p["sku"],

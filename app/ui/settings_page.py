@@ -91,6 +91,11 @@ class SettingsPage(QWidget):
             make_icon("phone", theme.NAVY, 16),
             "Mobil skaner (Android)",
         )
+        self.tabs.addTab(
+            self._create_search_glossary_tab(),
+            make_icon("search", theme.NAVY, 16),
+            "Gözleg sözlügi",
+        )
         root.addWidget(self.tabs, 1)
 
     def _create_general_settings_tab(self) -> QWidget:
@@ -542,6 +547,7 @@ class SettingsPage(QWidget):
 
         self._refresh_mobile_scanner_tab(cfg)
         self._reload_backups_table()
+        self._reload_glossary_tab()
 
     def _refresh_mobile_scanner_tab(self, cfg: dict[str, str] | None = None) -> None:
         if cfg is None:
@@ -879,3 +885,250 @@ class SettingsPage(QWidget):
         else:
             QMessageBox.information(self, "Täzeleme maglumaty", result_msg)
             self.refresh_data()
+
+    # ------------------------------------------------------------------
+    # Вкладка «Gözleg sözlügi» (простой редактор синонимов и OCR-алиасов)
+    # ------------------------------------------------------------------
+
+    def _create_search_glossary_tab(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("page")
+        root = QVBoxLayout(content)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(14)
+
+        # 1. Карточка синонимов
+        syn_card = Card()
+        sl = syn_card.body
+        syn_title = QLabel("Meňzeş sözler (Sinonimlar)")
+        syn_title.setObjectName("cardTitle")
+        sl.addWidget(syn_title)
+
+        syn_hint = QLabel(
+            "Bu ýerde dükanda ulanylýan gysgaltmalary we meňzeş sözleri ýazyp bilersiňiz — "
+            "olar PK-daky gözlegde hem-de Android skanerde derrew işläp başlaýar."
+        )
+        syn_hint.setObjectName("mutedText")
+        syn_hint.setWordWrap(True)
+        sl.addWidget(syn_hint)
+
+        form_row = QHBoxLayout()
+        form_row.setSpacing(8)
+        self.syn_term_input = QLineEdit()
+        self.syn_term_input.setPlaceholderText("Gysga söz (mysal: 16pm, udarnyk, gara)")
+        self.syn_term_input.setMinimumWidth(200)
+        self.syn_exp_input = QLineEdit()
+        self.syn_exp_input.setPlaceholderText("Meňzeş sözler otur bilen (mysal: iphone 16 pro max)")
+        self.syn_save_btn = make_icon_button("Goş / Ýatda sakla", "plus", "primary")
+        self.syn_save_btn.clicked.connect(self._save_synonym_entry)
+        self.syn_del_btn = make_icon_button("Poz", "trash", "danger")
+        self.syn_del_btn.clicked.connect(self._delete_selected_synonym)
+        self.syn_reset_btn = make_icon_button("Standart sözlügi dikelt", "refresh")
+        self.syn_reset_btn.clicked.connect(self._reset_default_synonyms)
+
+        form_row.addWidget(self.syn_term_input, 1)
+        form_row.addWidget(self.syn_exp_input, 2)
+        form_row.addWidget(self.syn_save_btn)
+        form_row.addWidget(self.syn_del_btn)
+        form_row.addWidget(self.syn_reset_btn)
+        sl.addLayout(form_row)
+
+        self.synonyms_table = QTableWidget(0, 2)
+        self.synonyms_table.setHorizontalHeaderLabels([
+            "Gysga söz / Adalga",
+            "Meňzeş sözler (sinonimlar)",
+        ])
+        configure_table(self.synonyms_table, stretch_col=1, row_height=40)
+        self.synonyms_table.setColumnWidth(0, 180)
+        self.synonyms_table.setMinimumHeight(210)
+        self.synonyms_table.cellClicked.connect(self._on_synonym_row_clicked)
+        sl.addWidget(self.synonyms_table)
+        root.addWidget(syn_card)
+
+        # 2. Проверка поиска в 1 строку
+        test_card = Card()
+        tl = test_card.body
+        test_title = QLabel("Gözlegi barla")
+        test_title.setObjectName("cardTitle")
+        tl.addWidget(test_title)
+
+        test_row = QHBoxLayout()
+        test_row.setSpacing(8)
+        self.glossary_test_input = QLineEdit()
+        self.glossary_test_input.setPlaceholderText(
+            "Synag üçin ýazyň (mysal: 16pm udarnyk ýa-da samsng a55)..."
+        )
+        self.glossary_test_input.setClearButtonEnabled(True)
+        self.glossary_test_input.textChanged.connect(self._run_glossary_test_search)
+        rebuild_btn = make_icon_button("Indeksi täzele", "refresh")
+        rebuild_btn.setToolTip("Ähli harytlar boýunça gözleg indeksini täzeden düzmek")
+        rebuild_btn.clicked.connect(self._rebuild_search_index)
+        test_row.addWidget(self.glossary_test_input, 1)
+        test_row.addWidget(rebuild_btn)
+        tl.addLayout(test_row)
+
+        self.glossary_test_result = QLabel("Synag sözüni ýazyň — netijeler şu ýerde görkeziler.")
+        self.glossary_test_result.setObjectName("mutedText")
+        self.glossary_test_result.setWordWrap(True)
+        self.glossary_test_result.setMinimumHeight(54)
+        self.glossary_test_result.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        tl.addWidget(self.glossary_test_result)
+        root.addWidget(test_card)
+
+        # 3. Выученные OCR-алиасы коробок
+        ocr_card = Card()
+        ol = ocr_card.body
+        ocr_head = QHBoxLayout()
+        ocr_title = QLabel("Guty OCR ýatda saklananlar")
+        ocr_title.setObjectName("cardTitle")
+        ocr_del_btn = make_icon_button("Saýlanany poz", "trash", "danger")
+        ocr_del_btn.clicked.connect(self._delete_selected_ocr_alias)
+        ocr_head.addWidget(ocr_title, 1)
+        ocr_head.addWidget(ocr_del_btn)
+        ol.addLayout(ocr_head)
+
+        ocr_hint = QLabel(
+            "Eger bir guty ýalňyş haryda berkidilen bolsa, şu sanawdan pozup bilersiňiz."
+        )
+        ocr_hint.setObjectName("mutedText")
+        ol.addWidget(ocr_hint)
+
+        self.ocr_aliases_table = QTableWidget(0, 3)
+        self.ocr_aliases_table.setHorizontalHeaderLabels([
+            "Guty teksti (OCR)",
+            "Berkidilen haryt",
+            "Ulanyş sany",
+        ])
+        configure_table(self.ocr_aliases_table, stretch_col=0, row_height=40)
+        self.ocr_aliases_table.setColumnWidth(1, 240)
+        self.ocr_aliases_table.setColumnWidth(2, 110)
+        self.ocr_aliases_table.setMinimumHeight(160)
+        ol.addWidget(self.ocr_aliases_table)
+        root.addWidget(ocr_card)
+
+        root.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    def _reload_glossary_tab(self) -> None:
+        if not hasattr(self, "synonyms_table"):
+            return
+        from app.services.search_engine import list_ocr_aliases, list_synonyms
+
+        syns = list_synonyms()
+        self._synonyms_cache = syns
+        self.synonyms_table.setRowCount(len(syns))
+        for i, row in enumerate(syns):
+            c0 = QTableWidgetItem(row.term)
+            c0.setData(Qt.ItemDataRole.UserRole, row.id)
+            c1 = QTableWidgetItem(row.expansions)
+            self.synonyms_table.setItem(i, 0, c0)
+            self.synonyms_table.setItem(i, 1, c1)
+
+        aliases = list_ocr_aliases()
+        self._ocr_aliases_cache = aliases
+        self.ocr_aliases_table.setRowCount(len(aliases))
+        for i, a in enumerate(aliases):
+            c0 = QTableWidgetItem(a["raw_text"])
+            c0.setData(Qt.ItemDataRole.UserRole, a["id"])
+            prod_lbl = a["product_name"]
+            if a["brand_model"]:
+                prod_lbl = f"{prod_lbl} ({a['brand_model']})"
+            c1 = QTableWidgetItem(prod_lbl)
+            c2 = QTableWidgetItem(str(a["usage_count"]))
+            c2.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.ocr_aliases_table.setItem(i, 0, c0)
+            self.ocr_aliases_table.setItem(i, 1, c1)
+            self.ocr_aliases_table.setItem(i, 2, c2)
+
+    def _on_synonym_row_clicked(self, row: int, _col: int) -> None:
+        if 0 <= row < len(getattr(self, "_synonyms_cache", [])):
+            s = self._synonyms_cache[row]
+            self.syn_term_input.setText(s.term)
+            self.syn_exp_input.setText(s.expansions)
+
+    def _save_synonym_entry(self) -> None:
+        from app.services.search_engine import upsert_synonym
+
+        try:
+            upsert_synonym(self.syn_term_input.text(), self.syn_exp_input.text())
+            self.syn_term_input.clear()
+            self.syn_exp_input.clear()
+            self._reload_glossary_tab()
+            self._run_glossary_test_search()
+            show_toast(self, "Sinonim sözlüge goşuldy.", kind="success")
+        except (ValueError, SQLAlchemyError) as err:
+            QMessageBox.warning(self, "Ýalňyşlyk", str(err))
+
+    def _delete_selected_synonym(self) -> None:
+        from app.services.search_engine import delete_synonym
+
+        row = self.synonyms_table.currentRow()
+        if row < 0:
+            return
+        item = self.synonyms_table.item(row, 0)
+        if item is None:
+            return
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        if sid is not None:
+            delete_synonym(int(sid))
+            self._reload_glossary_tab()
+            self._run_glossary_test_search()
+            show_toast(self, "Sinonim pozuldy.", kind="info")
+
+    def _reset_default_synonyms(self) -> None:
+        from app.services.search_engine import reset_default_synonyms
+
+        reset_default_synonyms()
+        self._reload_glossary_tab()
+        self._run_glossary_test_search()
+        show_toast(self, "Standart gözleg sözlügi dikeldildi.", kind="success")
+
+    def _delete_selected_ocr_alias(self) -> None:
+        from app.services.search_engine import delete_ocr_alias
+
+        row = self.ocr_aliases_table.currentRow()
+        if row < 0:
+            return
+        item = self.ocr_aliases_table.item(row, 0)
+        if item is None:
+            return
+        aid = item.data(Qt.ItemDataRole.UserRole)
+        if aid is not None:
+            delete_ocr_alias(int(aid))
+            self._reload_glossary_tab()
+            show_toast(self, "OCR ýazgy pozuldy.", kind="info")
+
+    def _rebuild_search_index(self) -> None:
+        from app.services.search_engine import rebuild_fts_index
+
+        cnt = rebuild_fts_index()
+        self._run_glossary_test_search()
+        show_toast(self, f"Gözleg indeksi täzelendi ({cnt} haryt).", kind="success")
+
+    def _run_glossary_test_search(self, *_args) -> None:
+        if not hasattr(self, "glossary_test_input"):
+            return
+        q = self.glossary_test_input.text().strip()
+        if not q:
+            self.glossary_test_result.setText("Synag sözüni ýazyň — netijeler şu ýerde görkeziler.")
+            return
+        from app.database.engine import SessionLocal
+        from app.services.search_engine import search_products
+
+        with SessionLocal() as session:
+            res = search_products(session, q, limit=5, enable_fuzzy=True)
+        if not res.hits:
+            self.glossary_test_result.setText(
+                f"Açylyşy: {res.expanded_preview or q}\nNetije: gabat gelýän haryt tapylmady."
+            )
+            return
+        lines = [f"Açylyşy: {res.expanded_preview}"]
+        for h in res.hits:
+            tag = "fuzzy" if h.matched_by == "fuzzy" else "takyk"
+            lines.append(
+                f"• {h.product.name} ({h.category_name or '—'}) — galyndy: {h.product.stock_quantity} [{tag}]"
+            )
+        self.glossary_test_result.setText("\n".join(lines))

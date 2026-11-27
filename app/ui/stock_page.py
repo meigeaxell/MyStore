@@ -1476,6 +1476,8 @@ class StockPage(QWidget):
                 continue
 
             if tokens:
+                from app.services.search_engine import matches_query_in_memory
+
                 searchable = " ".join([
                     p["name"],
                     p["category"],
@@ -1484,11 +1486,20 @@ class StockPage(QWidget):
                     p.get("reference", ""),
                     p.get("barcode", ""),
                     p["imei_search_blob"],
-                ]).lower()
-                if not all(tok in searchable for tok in tokens):
+                ])
+                if not matches_query_in_memory(searchable, search):
                     continue
 
             filtered.append(p)
+
+        if tokens and not filtered:
+            from app.services.search_engine import search_products
+
+            with SessionLocal() as session:
+                res = search_products(session, search, category_id=category_id, limit=80, enable_fuzzy=True)
+                fuzzy_ids = {h.product.id for h in res.hits}
+            if fuzzy_ids:
+                filtered = [p for p in self.products if p["id"] in fuzzy_ids]
 
         self._show_products(filtered, has_search=bool(tokens))
 
