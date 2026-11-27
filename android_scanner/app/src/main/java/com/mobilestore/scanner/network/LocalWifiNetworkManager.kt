@@ -82,7 +82,8 @@ class LocalWifiNetworkManager(
 
     private fun isNetworkAliveWifi(network: Network): Boolean {
         val caps = runCatching { cm.getNetworkCapabilities(network) }.getOrNull() ?: return false
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
     }
 
     @Suppress("DEPRECATION")
@@ -96,6 +97,8 @@ class LocalWifiNetworkManager(
     private fun startPassiveWifiMonitor() {
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            // Исключаем VPN-туннель, чтобы сокет к локальному ПК шёл напрямую по физическому Wi-Fi
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             // КРИТИЧНО: убираем требование интернета, чтобы ловить локальный Wi-Fi хаб без интернета!
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .build()
@@ -141,6 +144,7 @@ class LocalWifiNetworkManager(
 
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
             .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
             .setNetworkSpecifier(specBuilder.build())
             .build()

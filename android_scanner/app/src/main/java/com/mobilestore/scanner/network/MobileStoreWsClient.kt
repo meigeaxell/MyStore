@@ -31,6 +31,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.net.InetAddress
+import java.net.Proxy
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -89,6 +90,7 @@ class MobileStoreWsClient(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val baseOkHttp = OkHttpClient.Builder()
+        .proxy(Proxy.NO_PROXY)
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .writeTimeout(10, TimeUnit.SECONDS)

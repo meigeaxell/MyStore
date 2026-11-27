@@ -38,6 +38,19 @@ from app.services.settings_service import SettingsService
 logger = logging.getLogger("mobilestore.mobile_protocol")
 
 PROTOCOL_VERSION = 1
+
+_TK_FOLD_TABLE = str.maketrans({
+    "ä": "a", "ö": "o", "ü": "u", "ý": "y", "ž": "z", "ň": "n", "ş": "s", "ç": "c",
+    "Ä": "a", "Ö": "o", "Ü": "u", "Ý": "y", "Ž": "z", "Ň": "n", "Ş": "s", "Ç": "c",
+})
+
+
+def _norm_search(text: str | None) -> str:
+    return (text or "").strip().lower().translate(_TK_FOLD_TABLE)
+
+
+def _matches_words(haystack_norm: str, query_words: list[str]) -> bool:
+    return all(w in haystack_norm for w in query_words)
 SERVER_VERSION = "0.1.0"
 
 MUTATING_COMMANDS = {
@@ -657,12 +670,28 @@ class MobileProtocolProcessor:
                         f"Umumy ştrihkod {cand}: {len(items)} haryt tapyldy",
                     )
 
-            matches = session.scalars(
-                select(Product).where(
-                    Product.is_active.is_(True),
-                    (Product.sku.ilike(f"%{primary_code}%")) | (Product.name.ilike(f"%{primary_code}%")),
-                ).order_by(Product.name).limit(10)
-            ).all()
+            q_words = [w for w in _norm_search(primary_code).split() if w]
+            matches: list[Product] = []
+            if q_words:
+                all_active = session.execute(
+                    select(Product, Category.name)
+                    .outerjoin(Category, Product.category_id == Category.id)
+                    .where(Product.is_active.is_(True))
+                    .order_by(Product.stock_quantity.desc(), Product.name.asc())
+                ).all()
+                for p, cat_name in all_active:
+                    hay = _norm_search(
+                        " ".join(
+                            filter(
+                                None,
+                                [p.name, p.brand, p.model, p.specification, p.barcode, p.sku, cat_name],
+                            )
+                        )
+                    )
+                    if _matches_words(hay, q_words):
+                        matches.append(p)
+                        if len(matches) >= 15:
+                            break
             if len(matches) == 1:
                 card = self._build_product_card_data(session, matches[0], None)
                 return (
@@ -959,7 +988,8 @@ class MobileProtocolProcessor:
         _device_id: str,
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
-        q = str(payload.get("query") or "").strip().lower()
+        q_raw = str(payload.get("query") or "").strip()
+        q_words = [w for w in _norm_search(q_raw).split() if w]
         cat_id = payload.get("category_id")
         limit = min(300, max(1, int(payload.get("limit") or 100)))
 
@@ -968,18 +998,20 @@ class MobileProtocolProcessor:
         for p in products:
             if cat_id is not None and p["category_id"] != int(cat_id):
                 continue
-            if q:
-                hay = " ".join([
-                    p["sku"],
-                    p.get("barcode", ""),
-                    p["name"],
-                    p["brand"],
-                    p["model"],
-                    p["specification"],
-                    p["category"],
-                    p["imei_search_blob"],
-                ]).lower()
-                if q not in hay:
+            if q_words:
+                hay = _norm_search(
+                    " ".join([
+                        p["sku"],
+                        p.get("barcode", ""),
+                        p["name"],
+                        p["brand"],
+                        p["model"],
+                        p["specification"],
+                        p["category"],
+                        p["imei_search_blob"],
+                    ])
+                )
+                if not _matches_words(hay, q_words):
                     continue
             result.append({
                 "id": p["id"],

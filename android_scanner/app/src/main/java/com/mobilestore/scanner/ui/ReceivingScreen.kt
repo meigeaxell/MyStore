@@ -731,13 +731,11 @@ fun ReceivingScreen(
     // Read-only выбор существующего товара из каталога (ТОЛЬКО для режима Sany bilen, БЕЗ «+ Täze»)
     if (showProductPicker) {
         var filter by remember { mutableStateOf("") }
-        val filtered = remember(catalog, filter) {
-            val q = filter.trim().lowercase()
-            if (q.isEmpty()) catalog
-            else catalog.filter {
-                "${it.name} ${it.brand} ${it.model} ${it.specification} ${it.sku} ${it.barcode}".lowercase().contains(q)
-            }
+        LaunchedEffect(filter) {
+            kotlinx.coroutines.delay(220L)
+            vm.loadCatalog(query = filter.trim())
         }
+        val filtered = catalog
         AlertDialog(
             containerColor = SurfaceWhite,
             onDismissRequest = { showProductPicker = false },

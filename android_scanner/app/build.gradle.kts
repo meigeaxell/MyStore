@@ -14,8 +14,8 @@ android {
         applicationId = "com.mobilestore.scanner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.5.5"
+        versionCode = 5
+        versionName = "1.5.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
