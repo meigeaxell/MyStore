@@ -1,6 +1,7 @@
 """Кастомный выдвижной сайдбар MobileStore с векторными duotone-иконками."""
 
 import math
+from typing import ClassVar
 
 from PySide6.QtCore import (
     Property,
@@ -11,6 +12,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    Signal,
 )
 from PySide6.QtGui import (
     QBrush,
@@ -615,6 +617,94 @@ class NavSectionHeader(QWidget):
             p.restore()
 
 
+class _SidebarModeButton(QPushButton):
+    """Компактная кнопка переключения режима сайдбара: hover → expanded → collapsed."""
+
+    _LABELS: ClassVar[dict[str, str]] = {
+        "hover": "Menýu: Hover",
+        "expanded": "Menýu: Berkidilen",
+        "collapsed": "Menýu: Ýapyk",
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._mode = "hover"
+        self._progress = 0.0
+        self._hovered = False
+        self.setAutoDefault(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(32)
+        self._sync_tooltip()
+
+    def set_mode(self, mode: str) -> None:
+        self._mode = mode if mode in self._LABELS else "hover"
+        self._sync_tooltip()
+        self.update()
+
+    def _sync_tooltip(self) -> None:
+        cur = self._LABELS.get(self._mode, self._LABELS["hover"])
+        self.setToolTip(f"{cur}\nÜýtgetmek üçin basyň (Hover → Berkidilen → Ýapyk)")
+
+    def set_expand_progress(self, progress: float) -> None:
+        self._progress = max(0.0, min(1.0, progress))
+        self.update()
+
+    def enterEvent(self, event) -> None:
+        self._hovered = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hovered = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, _event) -> None:
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect()).adjusted(1.0, 1.0, -1.0, -1.0)
+        active_bg = self._mode != "hover"
+        if self._hovered:
+            p.setPen(QPen(QColor("#CBD5E1"), 1.0))
+            p.setBrush(QColor("#F2F4F7"))
+            p.drawRoundedRect(rect, 8, 8)
+        elif active_bg:
+            p.setPen(QPen(QColor("#E2E8F0"), 1.0))
+            p.setBrush(QColor("#F8FAFC"))
+            p.drawRoundedRect(rect, 8, 8)
+
+        # Компактная иконка панели слева (выровнена по центру 72px)
+        ix = 18.0
+        iy = (self.height() - 16.0) / 2.0
+        stroke = QColor(theme.ACCENT if active_bg else "#667085")
+        p.setPen(QPen(stroke, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRoundedRect(QRectF(ix, iy, 18.0, 14.0), 2.8, 2.8)
+        div_x = ix + (7.5 if self._mode == "expanded" else 5.0)
+        p.drawLine(QPointF(div_x, iy + 0.8), QPointF(div_x, iy + 13.2))
+        if self._mode == "expanded":
+            p.fillRect(QRectF(ix + 1.0, iy + 1.0, 6.0, 12.0), QColor(245, 138, 46, 70))
+        elif self._mode == "collapsed":
+            p.drawLine(QPointF(ix + 10.5, iy + 7.0), QPointF(ix + 14.5, iy + 7.0))
+
+        if self._progress > 0.15:
+            alpha = min(1.0, (self._progress - 0.15) / 0.65)
+            p.save()
+            p.setOpacity(alpha)
+            f = QFont(self.font())
+            f.setPointSizeF(8.3)
+            f.setWeight(QFont.Weight.DemiBold if active_bg else QFont.Weight.Medium)
+            p.setFont(f)
+            p.setPen(QColor(theme.NAVY if active_bg else "#667085"))
+            text_left = ix + 28.0
+            p.drawText(
+                QRectF(text_left, 0.0, max(0.0, self.width() - text_left - 8.0), self.height()),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                self._LABELS.get(self._mode, "Menýu"),
+            )
+            p.restore()
+
+
 class _SidebarVersionFooter(QWidget):
     """Компактный нижний индикатор версии."""
 
@@ -678,9 +768,13 @@ class _SidebarShadowStrip(QWidget):
 
 
 class SlidingSidebar(QFrame):
-    """Выдвижной левый сайдбар: в покое 72px (только иконки),
-    при наведении плавно раскрывается направо до 248px поверх контента.
-    Вкладка «Sazlamalar» закреплена в самом низу."""
+    """Левый сайдбар с 3 режимами:
+    - hover: 72px в покое, при наведении плавно раскрывается поверх контента до 248px;
+    - expanded: всегда закреплён раскрытым (248px);
+    - collapsed: всегда компактный (72px, без раскрытия при наведении).
+    """
+
+    modeChanged = Signal(str)
 
     def __init__(
         self,
@@ -694,6 +788,7 @@ class SlidingSidebar(QFrame):
         self._expanded_w = SIDEBAR_EXPANDED_W
         self._drawer_width = self._collapsed_w
         self._is_expanded = False
+        self._mode = "hover"
 
         self._shadow_strip = _SidebarShadowStrip(parent)
         self._shadow_strip.hide()
@@ -754,6 +849,12 @@ class SlidingSidebar(QFrame):
         self.nav_buttons.append(self.settings_btn)
         self._animatables.append(self.settings_btn)
 
+        layout.addSpacing(4)
+        self.mode_btn = _SidebarModeButton(self)
+        self.mode_btn.clicked.connect(self._cycle_mode)
+        layout.addWidget(self.mode_btn)
+        self._animatables.append(self.mode_btn)
+
         layout.addSpacing(2)
         self._footer = _SidebarVersionFooter(APP_VERSION, self)
         layout.addWidget(self._footer)
@@ -761,6 +862,25 @@ class SlidingSidebar(QFrame):
 
         self.setFixedWidth(self._collapsed_w)
         self._sync_progress()
+
+    def _cycle_mode(self) -> None:
+        order = ("hover", "expanded", "collapsed")
+        idx = order.index(self._mode) if self._mode in order else 0
+        next_mode = order[(idx + 1) % len(order)]
+        self.set_mode(next_mode)
+        self.modeChanged.emit(next_mode)
+
+    def mode(self) -> str:
+        return self._mode
+
+    def set_mode(self, mode: str) -> None:
+        clean = mode if mode in ("hover", "expanded", "collapsed") else "hover"
+        self._mode = clean
+        self.mode_btn.set_mode(clean)
+        if clean == "expanded":
+            self.set_expanded_immediate(True)
+        else:
+            self.set_expanded_immediate(False)
 
     def _get_drawer_width(self) -> int:
         return self._drawer_width
@@ -780,7 +900,7 @@ class SlidingSidebar(QFrame):
         for w in self._animatables:
             if hasattr(w, "set_expand_progress"):
                 w.set_expand_progress(progress)
-        self._shadow_strip.set_intensity(progress)
+        self._shadow_strip.set_intensity(progress if self._mode == "hover" else 0.0)
 
     def sync_geometry(self) -> None:
         parent = self.parentWidget()
@@ -826,9 +946,11 @@ class SlidingSidebar(QFrame):
         self._set_drawer_width(self._expanded_w if expanded else self._collapsed_w)
 
     def enterEvent(self, event) -> None:
-        self.expand()
+        if self._mode == "hover":
+            self.expand()
         super().enterEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self.collapse()
+        if self._mode == "hover":
+            self.collapse()
         super().leaveEvent(event)

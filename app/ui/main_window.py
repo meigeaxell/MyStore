@@ -1,30 +1,22 @@
 
-from PySide6.QtCore import QEvent, QSettings, Qt, QTimer
+from PySide6.QtCore import QEvent, QSettings
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidgetItem,
     QMainWindow,
     QPushButton,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
-from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.database.engine import SessionLocal
-from app.models.category import Category
-from app.models.product import Product
-from app.models.sale import Sale
-from app.models.stock_item import StockItem
 from app.services.backup_service import BackupService
 from app.services.incoming_queue_service import count_queue_items
 from app.services.mobile_ws_server import MobileWebSocketServer
-from app.services.sales_service import SalesService
 from app.services.settings_service import SettingsService
 from app.ui import theme
 from app.ui.dashboard_page import DashboardPage
@@ -32,13 +24,12 @@ from app.ui.exchange_page import ExchangePage
 from app.ui.finance_page import FinancePage
 from app.ui.incoming_queue_page import IncomingQueuePage
 from app.ui.purchase_page import PurchasePage
-from app.ui.quick_search_dialog import QuickSearchDialog
 from app.ui.reports_page import ReportsPage
 from app.ui.sales_page import SalesPage
 from app.ui.settings_page import SettingsPage
-from app.ui.sidebar import SIDEBAR_COLLAPSED_W, SlidingSidebar
+from app.ui.sidebar import SIDEBAR_COLLAPSED_W, SIDEBAR_EXPANDED_W, SlidingSidebar
 from app.ui.stock_page import StockPage
-from app.ui.widgets import SearchResultPopup, make_button, make_icon_button, money_str, show_toast
+from app.ui.widgets import make_button, show_toast
 
 NAV_SECTIONS = [
     ("Harytlar", [
@@ -92,14 +83,13 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Резервируем место под свёрнутый рельс сайдбара (72px), чтобы контент не дёргался при раскрытии
-        sidebar_rail = QWidget(self._central)
-        sidebar_rail.setFixedWidth(SIDEBAR_COLLAPSED_W)
-        root.addWidget(sidebar_rail)
+        # Резервируем место под рельс сайдбара (72px в hover/collapsed или 248px в expanded)
+        self._sidebar_rail = QWidget(self._central)
+        self._sidebar_rail.setFixedWidth(SIDEBAR_COLLAPSED_W)
+        root.addWidget(self._sidebar_rail)
 
         right = QVBoxLayout()
         right.setSpacing(0)
-        right.addWidget(self._build_topbar())
 
         self.pages = QStackedWidget()
         right.addWidget(self.pages, 1)
@@ -107,9 +97,10 @@ class MainWindow(QMainWindow):
         root.addLayout(right, 1)
         self.setCentralWidget(self._central)
 
-        # Выдвижной оверлей-сайдбар поверх левого края окна
+        # Боковой сайдбар с 3 режимами (hover / expanded / collapsed)
         self.sidebar = self._build_sidebar()
-        self.sidebar.sync_geometry()
+        self.sidebar.modeChanged.connect(lambda m: self.apply_sidebar_mode(m, persist=True))
+        self.apply_sidebar_mode(SettingsService.get_sidebar_mode(), persist=False)
 
         self.mobile_server = MobileWebSocketServer(
             add_to_sale_callback=self._handle_mobile_add_to_sale,
@@ -127,7 +118,7 @@ class MainWindow(QMainWindow):
         self._register_pages()
         self._update_incoming_queue_badge()
         self._restore_ui_state()
-        QShortcut(QKeySequence("Ctrl+K"), self, activated=self._open_quick_search)
+        QShortcut(QKeySequence("Ctrl+K"), self, activated=self._focus_current_page_search)
         QShortcut(QKeySequence("F5"), self, activated=self._refresh_current_page)
         for idx in range(min(9, len(self.nav_buttons))):
             QShortcut(
@@ -182,7 +173,6 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:
-        self._hide_top_search_popup()
         if self.sales_page is not None:
             self.sales_page._hide_live_search_popup()
         self.mobile_server.stop()
@@ -192,20 +182,19 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def changeEvent(self, event) -> None:
-        if event.type() == QEvent.Type.WindowDeactivate:
-            self._hide_top_search_popup()
-            if getattr(self, "sales_page", None) is not None:
-                self.sales_page._hide_live_search_popup()
+        if (
+            event.type() == QEvent.Type.WindowDeactivate
+            and getattr(self, "sales_page", None) is not None
+        ):
+            self.sales_page._hide_live_search_popup()
         super().changeEvent(event)
 
     def moveEvent(self, event) -> None:
-        self._hide_top_search_popup()
         if getattr(self, "sales_page", None) is not None:
             self.sales_page._hide_live_search_popup()
         super().moveEvent(event)
 
     def resizeEvent(self, event) -> None:
-        self._hide_top_search_popup()
         if getattr(self, "sales_page", None) is not None:
             self.sales_page._hide_live_search_popup()
         super().resizeEvent(event)
@@ -219,36 +208,7 @@ class MainWindow(QMainWindow):
             and getattr(self, "sidebar", None) is not None
         ):
             self.sidebar.sync_geometry()
-        if obj is getattr(self, "top_search", None):
-            if event.type() == QEvent.Type.FocusOut:
-                QTimer.singleShot(160, self._check_hide_top_search_popup)
-            elif event.type() == QEvent.Type.KeyPress:
-                key = event.key()
-                popup = getattr(self, "top_search_popup", None)
-                if key == Qt.Key.Key_Escape:
-                    self._hide_top_search_popup()
-                    return True
-                if popup is not None and popup.isVisible():
-                    if key == Qt.Key.Key_Down:
-                        popup.step_selection(1)
-                        return True
-                    if key == Qt.Key.Key_Up:
-                        popup.step_selection(-1)
-                        return True
-                    if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                        cur = popup.currentItem()
-                        if cur is not None:
-                            self._on_top_live_item_clicked(cur)
-                            return True
         return super().eventFilter(obj, event)
-
-    def _check_hide_top_search_popup(self) -> None:
-        if not hasattr(self, "top_search_popup") or not self.top_search_popup.isVisible():
-            return
-        if self.top_search.hasFocus() or self.top_search_popup.is_interacting():
-            return
-        if not self.isActiveWindow() or not self.top_search.hasFocus():
-            self._hide_top_search_popup()
 
     def _register_pages(self) -> None:
         for index, button in enumerate(self.nav_buttons):
@@ -396,7 +356,6 @@ class MainWindow(QMainWindow):
         self._update_incoming_queue_badge()
 
     def _switch_page(self, index: int) -> None:
-        self._hide_top_search_popup()
         if self.sales_page is not None:
             self.sales_page._hide_live_search_popup()
         self.pages.setCurrentIndex(index)
@@ -450,275 +409,56 @@ class MainWindow(QMainWindow):
         show_toast(self, "Maglumatlar täzelendi (F5)", kind="info", duration_ms=1600)
         self.statusBar().showMessage("Täzelendi (F5)", 2500)
 
-    def _open_quick_search(self, initial_text: str = "") -> None:
-        self._hide_top_search_popup()
-        query = initial_text or self.top_search.text().strip()
-        dlg = QuickSearchDialog(initial_query=query, parent=self)
-        if dlg.exec() and dlg.selected_for_pos:
-            sel = dlg.selected_for_pos
-            self.navigate_to_title("Satyş we kassa")
-            current = self.pages.currentWidget()
-            if hasattr(current, "_append_to_cart"):
-                with SessionLocal() as session:
-                    prod = session.get(Product, sel["product_id"])
-                    if prod:
-                        current._append_to_cart(prod, sel.get("imei"))
-        self.top_search.clear()
-
-    def _on_global_search(self) -> None:
-        q = self.top_search.text().strip()
-        self._open_quick_search(q)
-
-    def _hide_top_search_popup(self) -> None:
-        if hasattr(self, "_top_search_timer") and self._top_search_timer is not None:
-            self._top_search_timer.stop()
-        if hasattr(self, "top_search_popup") and self.top_search_popup is not None:
-            self.top_search_popup.hide()
-
-    def _schedule_top_live_search(self, text: str) -> None:
-        if len(text.strip()) < 2:
-            self._hide_top_search_popup()
+    def _focus_current_page_search(self) -> None:
+        """Переводит фокус (Ctrl+K) на поле поиска текущей открытой вкладки."""
+        page = self.pages.currentWidget()
+        if page is None:
             return
-        self._top_search_timer.start(180)
+        scope: QWidget = page
+        tabs = getattr(page, "tabs", None)
+        if isinstance(tabs, QTabWidget) and tabs.currentWidget() is not None:
+            scope = tabs.currentWidget()
 
-    def _run_top_live_search(self) -> None:
-        if not self.isActiveWindow() or not self.top_search.hasFocus():
-            self._hide_top_search_popup()
-            return
-        q = self.top_search.text().strip()
-        if len(q) < 2:
-            self._hide_top_search_popup()
-            return
-        words = [w for w in q.lower().split() if w]
-        if not words:
-            self._hide_top_search_popup()
-            return
-
-        default_curr = SettingsService.get("default_currency", "TMT")
-        default_rate = SettingsService.get_default_exchange_rate()
-
-        self.top_search_popup.clear()
-        with SessionLocal() as session:
-            in_stock_rows = session.scalars(
-                select(StockItem)
-                .where(StockItem.status == "in_stock")
-                .order_by(StockItem.id.desc())
-            ).all()
-            latest_stock_by_prod: dict[int, StockItem] = {}
-            for st in in_stock_rows:
-                if st.product_id not in latest_stock_by_prod and st.unit_cost is not None:
-                    latest_stock_by_prod[st.product_id] = st
-
-            prod_rows = session.execute(
-                select(Product, Category.name)
-                .outerjoin(Category, Product.category_id == Category.id)
-                .where(Product.is_active.is_(True))
-                .order_by(Product.stock_quantity.desc(), Product.name.asc())
-            ).all()
-            prod_added = 0
-            for p, cat_name in prod_rows:
-                if getattr(p, "is_phone_unit", False):
-                    continue
-                hay = " ".join(
-                    filter(
-                        None,
-                        [
-                            p.name,
-                            cat_name,
-                            p.brand,
-                            p.model,
-                            p.specification,
-                            p.barcode,
-                        ],
-                    )
-                ).lower()
-                if not all(w in hay for w in words):
-                    continue
-                cat_label = cat_name or "—"
-                bm = " / ".join(filter(None, [p.brand, p.model])) or "—"
-                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
-                    session=session,
-                    product_id=p.id,
-                    stock_item=latest_stock_by_prod.get(p.id),
-                    fallback_currency=default_curr,
-                    fallback_rate=default_rate,
-                )
-                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
-                qty_val = int(p.stock_quantity or 0)
-                self.top_search_popup.add_result_card(
-                    title=p.name,
-                    category=cat_label,
-                    subtitle=bm if not p.specification else f"{bm}  •  {p.specification}",
-                    cost_text=cost_str,
-                    badge_text=f"Skladda: {qty_val}" if qty_val > 0 else "Ýok",
-                    badge_tone="green" if qty_val > 0 else "red",
-                    icon_kind="product",
-                    payload={"kind": "product", "product_id": p.id, "imei": None},
-                )
-                prod_added += 1
-                if prod_added >= 50:
-                    break
-
-            imei_rows = session.execute(
-                select(StockItem, Product, Category.name)
-                .join(Product, StockItem.product_id == Product.id)
-                .outerjoin(Category, Product.category_id == Category.id)
-                .order_by(StockItem.status.asc(), StockItem.id.desc())
-            ).all()
-            imei_added = 0
-            for st, prod, cat_name in imei_rows:
-                hay = " ".join(
-                    filter(
-                        None,
-                        [
-                            prod.name,
-                            cat_name,
-                            prod.brand,
-                            prod.model,
-                            prod.specification,
-                            prod.barcode,
-                            st.imei1,
-                            st.imei2,
-                            st.serial_number,
-                            st.memory,
-                            st.color,
-                        ],
-                    )
-                ).lower()
-                if not all(w in hay for w in words):
-                    continue
-                cat_label = cat_name or "—"
-                spec_parts = [x for x in (st.memory, st.color) if x]
-                if not spec_parts:
-                    bm = " / ".join(filter(None, [prod.brand, prod.model]))
-                    if bm:
-                        spec_parts.append(bm)
-                spec_parts.append(f"IMEI: {st.imei1}")
-                u_cost, c_curr, _r = SalesService._resolve_item_cost_basis(
-                    session=session,
-                    product_id=prod.id,
-                    stock_item=st,
-                    fallback_currency=default_curr,
-                    fallback_rate=default_rate,
-                )
-                cost_str = f"Öz bahasy: {money_str(u_cost)} {c_curr}" if u_cost > 0 else ""
-                is_in = st.status == "in_stock"
-                cond_lbl = "Täze" if st.condition == "new" else "B/U"
-                self.top_search_popup.add_result_card(
-                    title=prod.name,
-                    category=cat_label,
-                    subtitle=" • ".join(spec_parts),
-                    cost_text=cost_str,
-                    badge_text=f"Bar ({cond_lbl})" if is_in else "Satyldy",
-                    badge_tone=("blue" if st.condition == "new" else "orange") if is_in else "muted",
-                    icon_kind="imei",
-                    payload={"kind": "imei", "product_id": prod.id, "imei": st.imei1, "in_stock": is_in},
-                )
-                imei_added += 1
-                if imei_added >= 40:
-                    break
-
-            sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc())).all()
-            sale_added = 0
-            for s in sales:
-                hay = " ".join(
-                    filter(None, [s.receipt_number, s.customer_name, s.customer_phone])
-                ).lower()
-                if not all(w in hay for w in words):
-                    continue
-                cust = s.customer_name or "Bölek müşderi"
-                date_s = s.sale_date.strftime("%d.%m.%Y %H:%M") if s.sale_date else ""
-                self.top_search_popup.add_result_card(
-                    title=f"Çek {s.receipt_number}",
-                    category="Satyş çeki",
-                    subtitle=f"{cust}  •  {date_s}",
-                    cost_text=f"{money_str(s.total_amount)} {s.currency}",
-                    badge_text="Ýatyryldy" if s.status == "cancelled" else "Çek",
-                    badge_tone="red" if s.status == "cancelled" else "muted",
-                    icon_kind="sale",
-                    payload={"kind": "sale", "sale_id": s.id},
-                )
-                sale_added += 1
-                if sale_added >= 12:
-                    break
-
-        if self.top_search_popup.count() == 0:
-            self._hide_top_search_popup()
-            return
-
-        self.top_search_popup.show_below(self.top_search, min_width=680, max_height=420)
-
-    def _on_top_live_item_clicked(self, item: QListWidgetItem) -> None:
-        data = item.data(Qt.ItemDataRole.UserRole) or {}
-        self._hide_top_search_popup()
-        self.top_search.clear()
-        kind = data.get("kind")
-        if kind in ("product", "imei"):
-            self.navigate_to_title("Satyş we kassa")
-            current = self.pages.currentWidget()
-            if hasattr(current, "_append_to_cart"):
-                with SessionLocal() as session:
-                    prod = session.get(Product, data["product_id"])
-                    if prod and prod.stock_quantity > 0:
-                        if kind == "imei" and not data.get("in_stock"):
-                            from app.ui.stock_page import StockItemDialog
-
-                            StockItemDialog(product_id=prod.id, product_name=prod.name, parent=self).exec()
-                            return
-                        current._append_to_cart(prod, data.get("imei"))
-                    elif prod:
-                        from app.ui.stock_page import StockItemDialog
-
-                        StockItemDialog(product_id=prod.id, product_name=prod.name, parent=self).exec()
-        elif kind == "sale" and data.get("sale_id"):
-            from app.ui.sales_page import SaleDetailsDialog
-
-            SaleDetailsDialog(data["sale_id"], self).exec()
-
-    def _build_topbar(self) -> QFrame:
-        bar = QFrame()
-        bar.setObjectName("topbar")
-        bar.setFixedHeight(64)
-
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(28, 0, 28, 0)
-        row.setSpacing(10)
-
-        self.top_search = QLineEdit()
-        self.top_search.setObjectName("search")
-        self.top_search.setClearButtonEnabled(True)
-        self.top_search.setPlaceholderText(
-            "Harytlar, kategoriýa, brend, model, ştrihkod, IMEI, müşderiler (Ctrl+K)…"
+        # 1. Приоритет — известные поля поиска на активной вкладке
+        known_names = (
+            "search_input",
+            "history_search",
+            "journal_search",
+            "simurg_search",
+            "sup_search",
+            "prod_search",
+            "glossary_test_input",
         )
-        self.top_search.returnPressed.connect(self._on_global_search)
-        self.top_search.textChanged.connect(self._schedule_top_live_search)
-        self.top_search.installEventFilter(self)
-        row.addWidget(self.top_search)
+        for attr in known_names:
+            w = getattr(page, attr, None)
+            if isinstance(w, QLineEdit) and w.isVisible() and w.isEnabled():
+                w.setFocus()
+                w.selectAll()
+                return
 
-        self._top_search_timer = QTimer(self)
-        self._top_search_timer.setSingleShot(True)
-        self._top_search_timer.timeout.connect(self._run_top_live_search)
+        # 2. Иначе ищем любое видимое поле поиска внутри текущей вкладки
+        for edit in scope.findChildren(QLineEdit):
+            if not edit.isVisible() or not edit.isEnabled():
+                continue
+            ph = (edit.placeholderText() or "").lower()
+            if edit.isClearButtonEnabled() or any(k in ph for k in ("gözleg", "skan", "imei", "synag")):
+                edit.setFocus()
+                edit.selectAll()
+                return
 
-        self.top_search_popup = SearchResultPopup(self)
-        self.top_search_popup.itemClicked.connect(self._on_top_live_item_clicked)
-        self.top_search_popup.hide()
-
-        search_btn = make_icon_button("Gözleg (Ctrl+K)", "search")
-        search_btn.clicked.connect(lambda: self._open_quick_search())
-        row.addWidget(search_btn)
-
-        row.addStretch()
-
-        sale = make_button("+  Täze satyş", "primary")
-        sale.clicked.connect(lambda: self.navigate_to_title("Satyş we kassa"))
-
-        cash = make_button("Kassa we Maliýe", "dark")
-        cash.clicked.connect(lambda: self.navigate_to_title("Maliýe"))
-
-        row.addWidget(sale)
-        row.addWidget(cash)
-
-        return bar
+    def apply_sidebar_mode(self, mode: str, persist: bool = True) -> None:
+        clean = mode if mode in ("hover", "expanded", "collapsed") else "hover"
+        self.sidebar.set_mode(clean)
+        self._sidebar_rail.setFixedWidth(
+            SIDEBAR_EXPANDED_W if clean == "expanded" else SIDEBAR_COLLAPSED_W
+        )
+        self.sidebar.sync_geometry()
+        if persist:
+            SettingsService.set_sidebar_mode(clean)
+            if getattr(self, "settings_page", None) is not None and hasattr(
+                self.settings_page, "sync_sidebar_mode_combo"
+            ):
+                self.settings_page.sync_sidebar_mode_combo(clean)
 
     def _build_sidebar(self) -> SlidingSidebar:
         sidebar = SlidingSidebar(

@@ -558,8 +558,24 @@ class DashboardPage(QScrollArea):
 
             active_sale_ids: list[int] = []
             sale_by_id: dict[int, Sale] = {}
+            simurg_recog_map: dict[int, tuple[Decimal, datetime | None]] = {}
             for s in sales_all:
-                if s.status != "cancelled" and s.sale_date and range_start <= s.sale_date <= range_end:
+                if s.status == "cancelled" or not s.sale_date:
+                    continue
+                is_sim = bool(getattr(s, "is_simurg", False))
+                in_sale_range = range_start <= s.sale_date <= range_end
+                if is_sim:
+                    ratio, recog_dt = ReportService._simurg_profit_recognition(session, s)
+                    simurg_recog_map[s.id] = (ratio, recog_dt)
+                    in_recog_range = bool(
+                        ratio > Decimal(0)
+                        and recog_dt is not None
+                        and range_start <= recog_dt <= range_end
+                    )
+                    if in_sale_range or in_recog_range:
+                        active_sale_ids.append(s.id)
+                        sale_by_id[s.id] = s
+                elif in_sale_range:
                     active_sale_ids.append(s.id)
                     sale_by_id[s.id] = s
 
@@ -643,7 +659,15 @@ class DashboardPage(QScrollArea):
                     if sale is None or sale.sale_date is None:
                         continue
                     b_idx = matcher(sale.sale_date)
-                    if b_idx is None:
+                    is_sim = bool(getattr(sale, "is_simurg", False))
+                    if is_sim:
+                        prof_ratio, recog_dt = simurg_recog_map.get(sale.id, (Decimal(0), None))
+                        prof_b_idx = matcher(recog_dt) if (prof_ratio > Decimal(0) and recog_dt is not None) else None
+                    else:
+                        prof_ratio = Decimal(1)
+                        prof_b_idx = b_idx
+
+                    if b_idx is None and prof_b_idx is None:
                         continue
 
                     is_imei_item = bool(
@@ -671,21 +695,26 @@ class DashboardPage(QScrollArea):
                         c_rate = s_rate
                     raw_cost = Decimal(str(si.unit_cost or 0)) * int(si.quantity or 1)
                     cost_in_sale_curr = _convert_currency(raw_cost, cost_curr, sale_curr, c_rate)
-                    line_profit = (rev_in_sale_curr - cost_in_sale_curr).quantize(Decimal("0.01"))
+                    line_profit = ((rev_in_sale_curr - cost_in_sale_curr) * prof_ratio).quantize(Decimal("0.01"))
 
-                    bucket_receipt_sets[b_idx].add(sale.id)
-                    if sale_curr == "USD":
-                        chart_sal_usd += rev_in_sale_curr
-                        chart_prof_usd += line_profit
-                        buckets[b_idx]["sales_usd"] += rev_in_sale_curr
-                        buckets[b_idx]["profit_usd"] += line_profit
-                        buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr * s_rate)
-                    else:
-                        chart_sal_tmt += rev_in_sale_curr
-                        chart_prof_tmt += line_profit
-                        buckets[b_idx]["sales_tmt"] += rev_in_sale_curr
-                        buckets[b_idx]["profit_tmt"] += line_profit
-                        buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr)
+                    if b_idx is not None:
+                        bucket_receipt_sets[b_idx].add(sale.id)
+                        if sale_curr == "USD":
+                            chart_sal_usd += rev_in_sale_curr
+                            buckets[b_idx]["sales_usd"] += rev_in_sale_curr
+                            buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr * s_rate)
+                        else:
+                            chart_sal_tmt += rev_in_sale_curr
+                            buckets[b_idx]["sales_tmt"] += rev_in_sale_curr
+                            buckets[b_idx]["sales_bar"] += float(rev_in_sale_curr)
+
+                    if prof_b_idx is not None and prof_ratio > Decimal(0):
+                        if sale_curr == "USD":
+                            chart_prof_usd += line_profit
+                            buckets[prof_b_idx]["profit_usd"] += line_profit
+                        else:
+                            chart_prof_tmt += line_profit
+                            buckets[prof_b_idx]["profit_tmt"] += line_profit
 
                 for idx_b, rset in enumerate(bucket_receipt_sets):
                     buckets[idx_b]["receipts_count"] = len(rset)
@@ -969,7 +998,7 @@ class DashboardPage(QScrollArea):
     def _debts_card(self, stats: dict) -> Card:
         card = Card(margins=(14, 8, 14, 8), spacing=6)
         head = QHBoxLayout()
-        t = QLabel("Simurg, Sklad we Üpjün edijiler")
+        t = QLabel("Simurg we Üpjün edijiler")
         t.setStyleSheet(f"font-size: 10.5pt; font-weight: 700; color: {theme.NAVY};")
         head.addWidget(t, 1)
         fin_btn = make_button("Maliýe bölümini aç →", "link")
@@ -979,7 +1008,6 @@ class DashboardPage(QScrollArea):
 
         d = stats["debts"]
         sim = stats["simurg"]
-        sv = stats["stock_val"]
 
         row = QHBoxLayout()
         row.setSpacing(10)
@@ -1006,7 +1034,7 @@ class DashboardPage(QScrollArea):
         sim_box.body.addWidget(sim_title)
         sim_box.body.addWidget(sim_val)
         sim_box.body.addWidget(sim_ready)
-        row.addWidget(sim_box, 2)
+        row.addWidget(sim_box, 1)
 
         # 2. Üpjün edijilere bergi
         sup_box = QFrame()
@@ -1026,29 +1054,6 @@ class DashboardPage(QScrollArea):
         sv_l.addWidget(sup_v)
         sv_l.addWidget(sup_s)
         row.addWidget(sup_box, 1)
-
-        # 3. Интерактивный блок Sklad jemi baha -> разбивка по категориям
-        stk_box = ClickableCard(margins=(12, 8, 12, 8), spacing=2)
-        stk_box.setStyleSheet(
-            f"QFrame#clickableCard {{ background: #EFF6FF; border: 1.5px solid #BFDBFE; border-radius: 10px; }}"
-            f"QFrame#clickableCard:hover {{ background: #DBEAFE; border: 1.5px solid {theme.BLUE}; }}"
-        )
-        stk_box.setToolTip("Kategoriýalar boýunça sklad bahasyny görmek üçin basyň")
-        stk_box.clicked.connect(self._open_stock_valuation_dialog)
-        stk_t = QLabel("Sklad jemi baha (kategoriýalar →)")
-        stk_t.setStyleSheet(f"color: {theme.MUTED}; font-size: 8.8pt; font-weight: 600;")
-        stk_v = QLabel(
-            f"${sv['total_in_usd']:,.2f} USD  |  {sv['total_in_tmt']:,.2f} TMT"
-        )
-        stk_v.setStyleSheet(f"font-size: 11pt; font-weight: 700; color: {theme.BLUE};")
-        stk_s = QLabel(
-            f"{sv['devices_count']} enjam • {sv['accessories_count']} aksessuar (jemi {sv['total_units']} sany)"
-        )
-        stk_s.setStyleSheet(f"font-size: 8.3pt; color: {theme.MUTED};")
-        stk_box.body.addWidget(stk_t)
-        stk_box.body.addWidget(stk_v)
-        stk_box.body.addWidget(stk_s)
-        row.addWidget(stk_box, 1)
 
         card.body.addLayout(row)
         return card

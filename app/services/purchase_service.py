@@ -303,6 +303,11 @@ def create_purchase(
         total = Decimal("0.00")
         seen_imeis: set[str] = set()
 
+        from app.services.settings_service import SettingsService
+
+        default_cost_updates: list[tuple[int, Decimal]] = []
+        running_cost_map: dict[int, tuple[Decimal, str]] = {}
+
         for item in items:
             product_id = _positive_integer(
                 item["product_id"],
@@ -402,8 +407,25 @@ def create_purchase(
                     )
                 )
 
+            old_qty = max(0, int(product.stock_quantity or 0))
             product.stock_quantity += quantity
             total += line_total
+            if not imei_records and not getattr(product, "is_phone_unit", False):
+                prev_info = running_cost_map.get(product.id)
+                if prev_info is None:
+                    prev_info = SettingsService.get_product_default_cost(product.id)
+                if old_qty > 0 and prev_info is not None and prev_info[0] > Decimal("0.00"):
+                    prev_cost_in_cur = _convert_to_document_currency(
+                        prev_info[0], prev_info[1], currency, rate
+                    )
+                    weighted_cost = _money(
+                        ((prev_cost_in_cur * old_qty) + (unit_cost * quantity))
+                        / Decimal(old_qty + quantity)
+                    )
+                else:
+                    weighted_cost = unit_cost
+                running_cost_map[product.id] = (weighted_cost, currency)
+                default_cost_updates.append((product.id, weighted_cost))
 
         purchase.total_amount = _money(total)
 
@@ -418,6 +440,11 @@ def create_purchase(
             )
 
         purchase_id = purchase.id
+
+    if default_cost_updates:
+        final_costs = dict(default_cost_updates)
+        for prod_id, u_cost in final_costs.items():
+            SettingsService.set_product_default_cost(prod_id, u_cost, currency)
 
     return purchase_id
 

@@ -123,14 +123,16 @@ class FinanceService:
 
     @staticmethod
     def get_all_outstanding_balances(session: Session) -> dict:
-        """Рассчитывает 4 отдельные категории задолженностей отдельно в USD и TMT:
-        1. Долги клиентов перед магазином (customer_debts).
-        2. Долги магазина перед поставщиками (supplier_payables).
-        3. Долги магазина перед клиентами по отмененным чекам (store_debts_to_customers).
-        4. Долги поставщиков перед магазином по отмененным закупкам (supplier_debts_to_store).
+        """Рассчитывает отдельные категории задолженностей в USD и TMT:
+        1. Обычные долги клиентов перед магазином (customer_debts, без Simurg).
+        2. Долги Simurg перед магазином (simurg_debts).
+        3. Долги магазина перед поставщиками (supplier_payables).
+        4. Долги магазина перед клиентами по отменённым чекам (store_debts_to_customers).
+        5. Долги поставщиков перед магазином по отменённым закупкам (supplier_debts_to_store).
         """
         result = {
             "customer_debts": {"USD": Decimal("0.00"), "TMT": Decimal("0.00")},
+            "simurg_debts": {"USD": Decimal("0.00"), "TMT": Decimal("0.00")},
             "supplier_payables": {"USD": Decimal("0.00"), "TMT": Decimal("0.00")},
             "store_debts_to_customers": {"USD": Decimal("0.00"), "TMT": Decimal("0.00")},
             "supplier_debts_to_store": {"USD": Decimal("0.00"), "TMT": Decimal("0.00")},
@@ -150,9 +152,12 @@ class FinanceService:
             else:
                 c_debt = SalesService.get_customer_debt(session, sale)
                 if c_debt > 0:
-                    result["customer_debts"][cur] = _money(
-                        result["customer_debts"][cur] + c_debt
+                    bucket = (
+                        "simurg_debts"
+                        if bool(getattr(sale, "is_simurg", False))
+                        else "customer_debts"
                     )
+                    result[bucket][cur] = _money(result[bucket][cur] + c_debt)
 
         purchases = session.scalars(select(Purchase)).all()
         for purchase in purchases:
@@ -184,11 +189,14 @@ class FinanceService:
     def get_customer_receivables_list(
         session: Session,
         include_paid: bool = False,
+        include_simurg: bool = False,
     ) -> list[dict]:
         """Возвращает список чеков с задолженностью клиентов и чеков, где магазин должен клиенту."""
         sales = session.scalars(select(Sale).order_by(Sale.sale_date.desc())).all()
         rows = []
         for sale in sales:
+            if not include_simurg and bool(getattr(sale, "is_simurg", False)):
+                continue
             paid = SalesService.get_sale_paid_amount(session, sale)
             total = _money(_decimal(sale.total_amount))
 

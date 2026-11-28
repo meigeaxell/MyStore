@@ -693,7 +693,7 @@ class SalesPage(QWidget):
             "Sany",
             "Öz bahasy",
             "Satyş bahasy",
-            "Jemi (Peýda)",
+            "Peýda",
         ])
         configure_table(self.cart_table, stretch_col=1, row_height=46)
         align_numeric_columns(self.cart_table, (self.COL_COST, self.COL_PRICE, self.COL_SUM_PROFIT))
@@ -1585,11 +1585,16 @@ class SalesPage(QWidget):
                 fallback_currency=receipt_curr,
                 fallback_rate=rate,
             )
+            cat_obj = session.get(Category, product.category_id)
+            cat_name = cat_obj.name if cat_obj else ""
 
         self.tabs.setCurrentIndex(0)
         self.cart_items.append({
             "product_id": product.id,
             "name": product.name,
+            "category": cat_name,
+            "brand": (product.brand or "").strip(),
+            "model": (product.model or "").strip(),
             "imei": imei,
             "quantity": qty,
             "unit_price": unit_price_doc,
@@ -1655,10 +1660,15 @@ class SalesPage(QWidget):
                 fallback_currency=cur,
                 fallback_rate=rate,
             )
+            cat_obj = session.get(Category, product.category_id)
+            cat_name = cat_obj.name if cat_obj else ""
 
         self.cart_items.append({
             "product_id": product.id,
             "name": product.name,
+            "category": cat_name,
+            "brand": (product.brand or "").strip(),
+            "model": (product.model or "").strip(),
             "imei": imei,
             "quantity": 1,
             "unit_price": Decimal("0.00"),
@@ -1704,10 +1714,9 @@ class SalesPage(QWidget):
             qty = int(item["quantity"])
             unit_price = Decimal(str(item["unit_price"]))
             unit_cost_doc = self._item_cost_in_receipt_currency(item)
-            line_sum = unit_price * qty
             line_profit = (unit_price - unit_cost_doc) * qty
             sign = "+" if line_profit >= 0 else "−"
-            sum_profit_str = f"{money_str(line_sum)} ({sign}{money_str(abs(line_profit))})"
+            sum_profit_str = f"{sign}{money_str(abs(line_profit))}"
 
             read_only_flags = Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled
             editable_flags = read_only_flags | Qt.ItemFlag.ItemIsEditable
@@ -1716,7 +1725,11 @@ class SalesPage(QWidget):
             c_id.setFlags(read_only_flags)
             c_id.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            c_name = QTableWidgetItem(item["name"])
+            bm = " / ".join(filter(None, [item.get("brand", ""), item.get("model", "")]))
+            meta = " • ".join(p for p in (item.get("category", ""), bm) if p)
+            display_name = f"{item['name']}  ({meta})" if meta else item["name"]
+            c_name = QTableWidgetItem(display_name)
+            c_name.setToolTip(display_name)
             c_name.setFlags(read_only_flags)
 
             c_imei = QTableWidgetItem(item["imei"] or "—")

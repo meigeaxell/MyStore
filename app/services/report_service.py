@@ -61,6 +61,38 @@ class ReportService:
         return datetime.combine(d1, time.min), datetime.combine(d2, time.max)
 
     @staticmethod
+    def _simurg_profit_recognition(
+        session: Session,
+        sale: Sale,
+    ) -> tuple[Decimal, datetime | None]:
+        """Возвращает (долю признанной прибыли 0..1, дату признания прибыли).
+
+        Для обычных продаж: (1, sale.sale_date).
+        Для продаж Simurg: прибыль признаётся только после получения выплаты
+        от Simurg (пропорционально оплаченной доле) на дату фактической выплаты.
+        """
+        if not bool(getattr(sale, "is_simurg", False)):
+            return Decimal(1), sale.sale_date
+
+        paid = SalesService.get_sale_paid_amount(session, sale)
+        total = _money(_decimal(sale.total_amount))
+        if paid <= Decimal("0.00") or total <= Decimal("0.00"):
+            return Decimal(0), None
+
+        ratio = min(Decimal(1), paid / total)
+        from app.models.sale_payment import SalePayment
+
+        last_pay_dt = session.scalar(
+            select(SalePayment.payment_date)
+            .where(
+                SalePayment.sale_id == sale.id,
+                SalePayment.payment_type == "payment",
+            )
+            .order_by(SalePayment.payment_date.desc(), SalePayment.id.desc())
+        )
+        return ratio, (last_pay_dt or sale.sale_date)
+
+    @staticmethod
     def get_sales_report(
         session: Session,
         date_from: datetime | None = None,
@@ -158,6 +190,8 @@ class ReportService:
                 active_count += 1
                 units_sold += sale_units
                 cust_debt = SalesService.get_customer_debt(session, sale)
+                prof_ratio, _ = ReportService._simurg_profit_recognition(session, sale)
+                sale_profit = _money(sale_profit * prof_ratio)
                 summary[cur]["revenue"] = _money(summary[cur]["revenue"] + total)
                 summary[cur]["gross_profit"] = _money(summary[cur]["gross_profit"] + sale_profit)
                 summary[cur]["paid"] = _money(summary[cur]["paid"] + paid)
@@ -221,9 +255,9 @@ class ReportService:
             .order_by(Sale.sale_date.desc(), SaleItem.id.asc())
         )
         if date_from is not None:
-            stmt = stmt.where(Sale.sale_date >= date_from)
+            stmt = stmt.where((Sale.sale_date >= date_from) | (Sale.is_simurg.is_(True)))
         if date_to is not None:
-            stmt = stmt.where(Sale.sale_date <= date_to)
+            stmt = stmt.where((Sale.sale_date <= date_to) | (Sale.is_simurg.is_(True)))
         if currency_filter and currency_filter in ("USD", "TMT"):
             stmt = stmt.where(Sale.currency == currency_filter)
 
@@ -253,12 +287,26 @@ class ReportService:
         }
 
         seen_sales: set[int] = set()
+        simurg_recog_cache: dict[int, tuple[Decimal, datetime | None]] = {}
         lines = []
 
         for s_item, sale, product, cat_name in item_rows:
             doc_cur = sale.currency.strip().upper()
             if doc_cur not in totals:
                 continue
+
+            if sale.id not in simurg_recog_cache:
+                simurg_recog_cache[sale.id] = ReportService._simurg_profit_recognition(session, sale)
+            prof_ratio, recog_dt = simurg_recog_cache[sale.id]
+
+            # Для Simurg прибыль и реализация признаются только после получения выплаты в выбранном периоде
+            if bool(getattr(sale, "is_simurg", False)):
+                if prof_ratio <= Decimal(0) or recog_dt is None:
+                    continue
+                if date_from is not None and recog_dt < date_from:
+                    continue
+                if date_to is not None and recog_dt > date_to:
+                    continue
 
             sale_rate = _validate_rate(sale.exchange_rate or Decimal("1.0000"))
 
@@ -323,6 +371,10 @@ class ReportService:
                     cost_rate,
                 )
                 cogs_doc = _money(unit_cost_doc * qty)
+
+            if prof_ratio < Decimal(1):
+                selling_price_doc = _money(selling_price_doc * prof_ratio)
+                cogs_doc = _money(cogs_doc * prof_ratio)
 
             profit_doc = _money(selling_price_doc - cogs_doc)
             margin_pct = (
@@ -411,6 +463,7 @@ class ReportService:
         sold_qty_map: dict[int, int] = {}
         last_sale_map: dict[int, datetime] = {}
         fin_map: dict[int, dict] = {}
+        simurg_ratio_cache: dict[int, Decimal] = {}
 
         for si, sale in s_items:
             pid = si.product_id
@@ -439,7 +492,9 @@ class ReportService:
                 _convert_currency(_decimal(si.unit_cost), si.cost_currency, cur, c_rate)
                 * si.quantity
             )
-            prof = _money(rev - cogs)
+            if sale.id not in simurg_ratio_cache:
+                simurg_ratio_cache[sale.id], _ = ReportService._simurg_profit_recognition(session, sale)
+            prof = _money((rev - cogs) * simurg_ratio_cache[sale.id])
 
             fin_map[pid][cur]["rev"] = _money(fin_map[pid][cur]["rev"] + rev)
             fin_map[pid][cur]["cogs"] = _money(fin_map[pid][cur]["cogs"] + cogs)

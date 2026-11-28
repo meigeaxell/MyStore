@@ -215,6 +215,22 @@ class SettingsPage(QWidget):
             "compact",
         )
         st_form.addRow("Tablisa gurluş şablony:", self.table_preset_combo)
+
+        self.sidebar_mode_combo = style_combo(QComboBox())
+        self.sidebar_mode_combo.setMinimumHeight(36)
+        self.sidebar_mode_combo.addItem(
+            "Üstüne baranda açylýan (Hover — adaty rejim)",
+            "hover",
+        )
+        self.sidebar_mode_combo.addItem(
+            "Hemişe açyk (Berkidilen — tekstli menýu)",
+            "expanded",
+        )
+        self.sidebar_mode_combo.addItem(
+            "Hemişe ýapyk (Diňe nyşanlar — ekrany giňeltmek üçin)",
+            "collapsed",
+        )
+        st_form.addRow("Çep menýu (Saýdbar) režimi:", self.sidebar_mode_combo)
         stl.addLayout(st_form)
 
         remember_title = QLabel("«+ Haryt goş» açylanda öňki girizilenleri ýatda sakla:")
@@ -522,9 +538,16 @@ class SettingsPage(QWidget):
         if tbl_idx >= 0:
             self.table_preset_combo.setCurrentIndex(tbl_idx)
 
+        self.sync_sidebar_mode_combo(SettingsService.get_sidebar_mode())
+
         remember = SettingsService.get_product_remember_fields()
         for key, chk in self.remember_checkboxes.items():
             chk.setChecked(bool(remember.get(key, False)))
+
+    def sync_sidebar_mode_combo(self, mode: str) -> None:
+        sb_idx = self.sidebar_mode_combo.findData(mode)
+        if sb_idx >= 0:
+            self.sidebar_mode_combo.setCurrentIndex(sb_idx)
 
     def refresh_data(self) -> None:
         cfg = SettingsService.get_all()
@@ -713,6 +736,11 @@ class SettingsPage(QWidget):
             preset = self.table_preset_combo.currentData() or "auto_fit"
             SettingsService.set_table_layout_preset(preset)
             apply_table_layout_preset_all(preset)
+            sb_mode = self.sidebar_mode_combo.currentData() or "hover"
+            SettingsService.set_sidebar_mode(sb_mode)
+            win = self.window()
+            if win is not None and hasattr(win, "apply_sidebar_mode"):
+                win.apply_sidebar_mode(sb_mode, persist=False)
             SettingsService.set_product_remember_fields({
                 key: chk.isChecked() for key, chk in self.remember_checkboxes.items()
             })
@@ -900,11 +928,17 @@ class SettingsPage(QWidget):
         root.setSpacing(14)
 
         # 1. Карточка синонимов
-        syn_card = Card()
-        sl = syn_card.body
+        self.glossary_syn_card = Card()
+        sl = self.glossary_syn_card.body
+        syn_head = QHBoxLayout()
         syn_title = QLabel("Meňzeş sözler (Sinonimlar)")
         syn_title.setObjectName("cardTitle")
-        sl.addWidget(syn_title)
+        self.syn_expand_btn = make_icon_button("Doly aýna", "export")
+        self.syn_expand_btn.setCheckable(True)
+        self.syn_expand_btn.clicked.connect(self._toggle_glossary_fullscreen)
+        syn_head.addWidget(syn_title, 1)
+        syn_head.addWidget(self.syn_expand_btn)
+        sl.addLayout(syn_head)
 
         syn_hint = QLabel(
             "Bu ýerde dükanda ulanylýan gysgaltmalary we meňzeş sözleri ýazyp bilersiňiz — "
@@ -944,12 +978,12 @@ class SettingsPage(QWidget):
         self.synonyms_table.setColumnWidth(0, 180)
         self.synonyms_table.setMinimumHeight(210)
         self.synonyms_table.cellClicked.connect(self._on_synonym_row_clicked)
-        sl.addWidget(self.synonyms_table)
-        root.addWidget(syn_card)
+        sl.addWidget(self.synonyms_table, 1)
+        root.addWidget(self.glossary_syn_card, 1)
 
         # 2. Проверка поиска в 1 строку
-        test_card = Card()
-        tl = test_card.body
+        self.glossary_test_card = Card()
+        tl = self.glossary_test_card.body
         test_title = QLabel("Gözlegi barla")
         test_title.setObjectName("cardTitle")
         tl.addWidget(test_title)
@@ -975,11 +1009,11 @@ class SettingsPage(QWidget):
         self.glossary_test_result.setMinimumHeight(54)
         self.glossary_test_result.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         tl.addWidget(self.glossary_test_result)
-        root.addWidget(test_card)
+        root.addWidget(self.glossary_test_card)
 
         # 3. Выученные OCR-алиасы коробок
-        ocr_card = Card()
-        ol = ocr_card.body
+        self.glossary_ocr_card = Card()
+        ol = self.glossary_ocr_card.body
         ocr_head = QHBoxLayout()
         ocr_title = QLabel("Guty OCR ýatda saklananlar")
         ocr_title.setObjectName("cardTitle")
@@ -1006,11 +1040,16 @@ class SettingsPage(QWidget):
         self.ocr_aliases_table.setColumnWidth(2, 110)
         self.ocr_aliases_table.setMinimumHeight(160)
         ol.addWidget(self.ocr_aliases_table)
-        root.addWidget(ocr_card)
+        root.addWidget(self.glossary_ocr_card)
 
-        root.addStretch()
         scroll.setWidget(content)
         return scroll
+
+    def _toggle_glossary_fullscreen(self, expanded: bool) -> None:
+        self.glossary_test_card.setVisible(not expanded)
+        self.glossary_ocr_card.setVisible(not expanded)
+        self.syn_expand_btn.setText("Adaty görnüş" if expanded else "Doly aýna")
+        self.synonyms_table.setMinimumHeight(520 if expanded else 210)
 
     def _reload_glossary_tab(self) -> None:
         if not hasattr(self, "synonyms_table"):

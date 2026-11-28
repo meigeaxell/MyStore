@@ -213,6 +213,17 @@ class SettingsService:
         SettingsService.set_many({"stock_group_mode": clean})
 
     @staticmethod
+    def get_sidebar_mode() -> str:
+        """Режим бокового меню: 'hover' | 'expanded' | 'collapsed'."""
+        mode = SettingsService.get("sidebar_mode", "hover").strip().lower()
+        return mode if mode in ("hover", "expanded", "collapsed") else "hover"
+
+    @staticmethod
+    def set_sidebar_mode(mode: str) -> None:
+        clean = mode if mode in ("hover", "expanded", "collapsed") else "hover"
+        SettingsService.set_many({"sidebar_mode": clean})
+
+    @staticmethod
     def get_product_remember_fields() -> dict[str, bool]:
         """Возвращает карту полей, которые автоматически запоминаются при добавлении товара."""
         defaults = {

@@ -107,6 +107,14 @@ class SalesService:
                     _validate_rate(purchase.exchange_rate),
                 )
 
+        if stock_item is None:
+            from app.services.settings_service import SettingsService
+
+            default_cost = SettingsService.get_product_default_cost(product_id)
+            if default_cost is not None:
+                d_cost, d_curr = default_cost
+                return _money(d_cost), d_curr, fallback_rate
+
         latest_row = session.execute(
             select(PurchaseItem, Purchase)
             .join(Purchase, PurchaseItem.purchase_id == Purchase.id)
