@@ -110,7 +110,7 @@ class SalesService:
         if stock_item is None:
             from app.services.settings_service import SettingsService
 
-            default_cost = SettingsService.get_product_default_cost(product_id)
+            default_cost = SettingsService.get_product_default_cost(product_id, session=session)
             if default_cost is not None:
                 d_cost, d_curr = default_cost
                 return _money(d_cost), d_curr, fallback_rate
@@ -134,7 +134,7 @@ class SalesService:
 
         from app.services.settings_service import SettingsService
 
-        default_cost = SettingsService.get_product_default_cost(product_id)
+        default_cost = SettingsService.get_product_default_cost(product_id, session=session)
         if default_cost is not None:
             d_cost, d_curr = default_cost
             return _money(d_cost), d_curr, fallback_rate

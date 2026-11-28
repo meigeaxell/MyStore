@@ -413,7 +413,7 @@ def create_purchase(
             if not imei_records and not getattr(product, "is_phone_unit", False):
                 prev_info = running_cost_map.get(product.id)
                 if prev_info is None:
-                    prev_info = SettingsService.get_product_default_cost(product.id)
+                    prev_info = SettingsService.get_product_default_cost(product.id, session=session)
                 if old_qty > 0 and prev_info is not None and prev_info[0] > Decimal("0.00"):
                     prev_cost_in_cur = _convert_to_document_currency(
                         prev_info[0], prev_info[1], currency, rate
@@ -439,12 +439,12 @@ def create_purchase(
                 payment_date=payment_data.get("payment_date"),
             )
 
-        purchase_id = purchase.id
+        if default_cost_updates:
+            final_costs = dict(default_cost_updates)
+            for prod_id, u_cost in final_costs.items():
+                SettingsService.set_product_default_cost(prod_id, u_cost, currency, session=session)
 
-    if default_cost_updates:
-        final_costs = dict(default_cost_updates)
-        for prod_id, u_cost in final_costs.items():
-            SettingsService.set_product_default_cost(prod_id, u_cost, currency)
+        purchase_id = purchase.id
 
     return purchase_id
 

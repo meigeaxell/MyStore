@@ -126,9 +126,13 @@ class SettingsService:
                     session.add(Setting(key=k, value=str_val))
 
     @staticmethod
-    def get_product_default_cost(product_id: int) -> tuple[Decimal, str] | None:
+    def get_product_default_cost(product_id: int, session=None) -> tuple[Decimal, str] | None:
         """Возвращает базовую себестоимость товара (unit_cost, currency), если она была задана в карточке или кассе."""
-        raw = SettingsService.get("product_default_costs", "{}")
+        if session is not None:
+            row = session.scalar(select(Setting).where(Setting.key == "product_default_costs"))
+            raw = row.value if row and row.value is not None else "{}"
+        else:
+            raw = SettingsService.get("product_default_costs", "{}")
         try:
             data = json.loads(raw) if raw else {}
             entry = data.get(str(product_id))
@@ -137,14 +141,24 @@ class SettingsService:
                 curr = str(entry.get("currency", "USD")).strip().upper()
                 if cost > 0 and curr in ("USD", "TMT"):
                     return cost, curr
-        except ( ValueError, TypeError, InvalidOperation):
+        except (ValueError, TypeError, InvalidOperation):
             pass
         return None
 
     @staticmethod
-    def set_product_default_cost(product_id: int, unit_cost: Decimal | float | str, currency: str = "USD") -> None:
+    def set_product_default_cost(
+        product_id: int,
+        unit_cost: Decimal | float | str,
+        currency: str = "USD",
+        session=None,
+    ) -> None:
         """Сохраняет базовую себестоимость товара без необходимости создавать документ закупки."""
-        raw = SettingsService.get("product_default_costs", "{}")
+        if session is not None:
+            row = session.scalar(select(Setting).where(Setting.key == "product_default_costs"))
+            raw = row.value if row and row.value is not None else "{}"
+        else:
+            row = None
+            raw = SettingsService.get("product_default_costs", "{}")
         try:
             data = json.loads(raw) if raw else {}
             if not isinstance(data, dict):
@@ -157,7 +171,14 @@ class SettingsService:
             "unit_cost": f"{cost_dec:.2f}",
             "currency": (currency or "USD").strip().upper(),
         }
-        SettingsService.set_many({"product_default_costs": json.dumps(data, ensure_ascii=False)})
+        serialized = json.dumps(data, ensure_ascii=False)
+        if session is not None:
+            if row is not None:
+                row.value = serialized
+            else:
+                session.add(Setting(key="product_default_costs", value=serialized))
+        else:
+            SettingsService.set_many({"product_default_costs": serialized})
 
     @staticmethod
     def get_held_carts() -> list[dict]:
